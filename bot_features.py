@@ -3,8 +3,7 @@ import random
 import aiohttp
 import re
 import asyncio
-
-from db_utils import get_config, set_config, show_config
+from db_utils import get_config
 from image_utils import generate_card, truncate_to_100_chars
 
 MUSIC_URL_PATTERNS = [
@@ -36,7 +35,9 @@ async def get_random_icon(channel):
                 all_images.append((attachment.url, message.author.display_name))
     return random.choice(all_images) if all_images else (None, None)
 
+# Here is the override_post_channel logic:
 async def process_rename(guild_id, client, override_post_channel=None):
+    from image_utils import truncate_to_100_chars, generate_card
     cfg = get_config(guild_id)
     quote_channel = client.get_channel(cfg[1])
     icon_channel = client.get_channel(cfg[2])
@@ -60,8 +61,20 @@ async def process_rename(guild_id, client, override_post_channel=None):
     image_file = await generate_card(quote, quote_user or "Unknown", icon_user or "Unknown", icon_bytes)
     if image_file:
         image_file.seek(0)
-        target_channel = override_post_channel or post_channel
-        await target_channel.send(file=discord.File(fp=image_file, filename="update.png"))
+        channels_to_post = []
+
+        # Always post to override_post_channel if provided
+        if override_post_channel:
+            channels_to_post.append(override_post_channel)
+
+        # Also post to post_channel unless it's the same as override_post_channel
+        if post_channel and (not override_post_channel or post_channel.id != override_post_channel.id):
+            channels_to_post.append(post_channel)
+
+        # Post to each selected channel (never duplicates)
+        for channel in channels_to_post:
+            image_file.seek(0)
+            await channel.send(file=discord.File(fp=image_file, filename="update.png"))
 
 async def get_random_song(channel):
     all_links = []
