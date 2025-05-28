@@ -1,6 +1,8 @@
 import sqlite3
+import os
 
-DB_FILE = 'server_config.db'
+DB_FILE = os.getenv('DB_FILE', '/data/server_config.db')
+
 
 CREATE_TABLE = '''CREATE TABLE IF NOT EXISTS server_config (
     guild_id INTEGER PRIMARY KEY,
