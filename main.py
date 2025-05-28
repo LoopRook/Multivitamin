@@ -37,29 +37,45 @@ async def on_message(message):
     # Ignore quoted/reply messages
     if getattr(message, "reference", None) is not None:
         return
-    # ADMIN ONLY
-    if not message.author.guild_permissions.manage_guild:
-        return
+
     content = message.content.lower()
     gid = message.guild.id
-    # Channel Setters
+
+    # ADMIN-ONLY COMMANDS
     if content.startswith('!setquotechannel'):
+        if not message.author.guild_permissions.manage_guild:
+            await message.channel.send("You don't have permission to use this command.")
+            return
         set_config(gid, 'quote_channel', message.channel.id)
         await message.channel.send('✅ This channel set as Quote Channel.')
     elif content.startswith('!seticonchannel'):
+        if not message.author.guild_permissions.manage_guild:
+            await message.channel.send("You don't have permission to use this command.")
+            return
         set_config(gid, 'icon_channel', message.channel.id)
         await message.channel.send('✅ This channel set as Icon Channel.')
     elif content.startswith('!setpostchannel'):
+        if not message.author.guild_permissions.manage_guild:
+            await message.channel.send("You don't have permission to use this command.")
+            return
         set_config(gid, 'post_channel', message.channel.id)
         await message.channel.send('✅ This channel set as Post Channel.')
     elif content.startswith('!setmusicchannel'):
+        if not message.author.guild_permissions.manage_guild:
+            await message.channel.send("You don't have permission to use this command.")
+            return
         set_config(gid, 'music_channel', message.channel.id)
         await message.channel.send('✅ This channel set as Music Channel.')
     elif content.startswith('!setsongpostchannel'):
+        if not message.author.guild_permissions.manage_guild:
+            await message.channel.send("You don't have permission to use this command.")
+            return
         set_config(gid, 'song_post_channel', message.channel.id)
         await message.channel.send('✅ This channel set as Song Post Channel.')
-    # Feature Toggles
     elif content.startswith('!enablefeature '):
+        if not message.author.guild_permissions.manage_guild:
+            await message.channel.send("You don't have permission to use this command.")
+            return
         arg = content.split(' ', 1)[1].strip()
         if arg == 'quote':
             set_config(gid, 'enable_daily_quote', 1)
@@ -68,6 +84,9 @@ async def on_message(message):
             set_config(gid, 'enable_daily_song', 1)
             await message.channel.send('✅ Daily Song feature enabled.')
     elif content.startswith('!disablefeature '):
+        if not message.author.guild_permissions.manage_guild:
+            await message.channel.send("You don't have permission to use this command.")
+            return
         arg = content.split(' ', 1)[1].strip()
         if arg == 'quote':
             set_config(gid, 'enable_daily_quote', 0)
@@ -76,9 +95,15 @@ async def on_message(message):
             set_config(gid, 'enable_daily_song', 0)
             await message.channel.send('✅ Daily Song feature disabled.')
     elif content.startswith('!showconfig'):
+        if not message.author.guild_permissions.manage_guild:
+            await message.channel.send("You don't have permission to use this command.")
+            return
         cfg_txt = show_config(gid)
         await message.channel.send(f"```\n{cfg_txt}\n```")
     elif content.startswith('!setup'):
+        if not message.author.guild_permissions.manage_guild:
+            await message.channel.send("You don't have permission to use this command.")
+            return
         setup_text = (
             "**Bot Setup Guide:**\n"
             "1. In each channel, use the appropriate setup command:\n"
@@ -88,7 +113,8 @@ async def on_message(message):
             "4. All scheduled times are EST."
         )
         await message.channel.send(setup_text)
-    # Manual trigger (only if features enabled)
+
+    # ANYONE CAN USE
     elif content.startswith('!rename'):
         cfg = get_config(gid)
         if cfg[6]:
