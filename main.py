@@ -1,144 +1,112 @@
+import os
 import discord
-import random
-import aiohttp
-import re
-import asyncio
+import logging
 
-from db_utils import get_config, set_config, show_config
-from image_utils import generate_card, truncate_to_100_chars
+from db_utils import init_db, set_config, show_config, get_config
+from bot_features import (
+    process_rename,
+    process_daily_song,
+    schedule_rename,
+    schedule_daily_song
+)
 
-MUSIC_URL_PATTERNS = [
-    r"(https?://)?(www\.)?(youtube\.com|youtu\.be|soundcloud\.com|spotify\.com)/[^\s]+"
-]
+TOKEN = os.getenv('DISCORD_TOKEN')
+QUOTE_TIME = os.getenv('QUOTE_TIME', '4:00')
+SONG_TIME = os.getenv('SONG_TIME', '10:00')
 
-def is_music_link(line):
-    return any(re.search(pattern, line, re.IGNORECASE) for pattern in MUSIC_URL_PATTERNS)
+intents = discord.Intents.default()
+intents.message_content = True
+intents.guilds = True
+intents.messages = True
+client = discord.Client(intents=intents)
 
-async def get_random_quote(channel):
-    all_lines = []
-    async for message in channel.history(limit=None, oldest_first=False):
-        if message.author.bot:
-            continue
-        # Only include lines that are NOT commands
-        lines = message.content.strip().splitlines()
-        for line in lines:
-            if line.strip() and not line.strip().startswith('!'):
-                all_lines.append((line, message.author.display_name))
-    return random.choice(all_lines) if all_lines else (None, None)
+logging.basicConfig(level=logging.INFO)
+logging.getLogger('discord.gateway').setLevel(logging.WARNING)
 
-async def get_random_icon(channel):
-    all_images = []
-    async for message in channel.history(limit=None, oldest_first=False):
-        if message.author.bot:
-            continue
-        for attachment in message.attachments:
-            if attachment.content_type and attachment.content_type.startswith("image"):
-                all_images.append((attachment.url, message.author.display_name))
-    return random.choice(all_images) if all_images else (None, None)
+@client.event
+async def on_ready():
+    print(f"✅ Logged in as {client.user}")
+    init_db()
+    client.loop.create_task(schedule_rename(client, QUOTE_TIME))
+    client.loop.create_task(schedule_daily_song(client, SONG_TIME))
 
-async def process_rename(guild_id, client, override_post_channel=None):
-    cfg = get_config(guild_id)
-    quote_channel = client.get_channel(cfg[1])
-    icon_channel = client.get_channel(cfg[2])
-    post_channel = client.get_channel(cfg[3])
-    guild = client.get_guild(guild_id)
-
-    quote, quote_user = await get_random_quote(quote_channel)
-    image_url, icon_user = await get_random_icon(icon_channel)
-
-    if not quote or not image_url:
-        print(f"⚠️ No valid quote or image found for guild {guild_id}")
+@client.event
+async def on_message(message):
+    if message.author.bot or not message.guild:
         return
-
-    async with aiohttp.ClientSession() as session:
-        async with session.get(image_url) as resp:
-            icon_bytes = await resp.read()
-
-    await guild.edit(name=truncate_to_100_chars(quote), icon=icon_bytes)
-    print(f"📝 [{guild_id}] Server renamed to: \"{quote}\"")
-
-    image_file = await generate_card(quote, quote_user or "Unknown", icon_user or "Unknown", icon_bytes)
-    if image_file:
-        image_file.seek(0)
-        target_channel = override_post_channel or post_channel
-        await target_channel.send(file=discord.File(fp=image_file, filename="update.png"))
-
-async def get_random_song(channel):
-    all_links = []
-    async for message in channel.history(limit=None, oldest_first=False):
-        if message.author.bot:
-            continue
-        lines = message.content.strip().splitlines()
-        for line in lines:
-            if line.strip() and is_music_link(line.strip()):
-                all_links.append((line.strip(), message.author.display_name))
-    return random.choice(all_links) if all_links else (None, None)
-
-is_song_searching = {}
-
-async def process_daily_song(guild_id, client):
-    cfg = get_config(guild_id)
-    music_channel = client.get_channel(cfg[4])
-    post_channel = client.get_channel(cfg[5])
-    if is_song_searching.get(guild_id, False):
-        print(f"⚠️ Song search already in progress for guild {guild_id}. Skipping.")
-        if post_channel:
-            await post_channel.send("⚠️ Song search is already running. Please wait for it to finish.")
+    # Ignore quoted/reply messages
+    if getattr(message, "reference", None) is not None:
         return
-    is_song_searching[guild_id] = True
-    try:
-        print(f"DEBUG: Entered process_daily_song() for guild {guild_id}")
-        if not music_channel:
-            print("❌ Music channel not found.")
-            is_song_searching[guild_id] = False
-            return
-        if not post_channel:
-            print("❌ Song post channel not found.")
-            is_song_searching[guild_id] = False
-            return
-        song, user = await get_random_song(music_channel)
-        print(f"DEBUG: Song={song}, User={user}")
-        if not song:
-            print("⚠️ No valid music link found in music channel.")
-            await post_channel.send("⚠️ No valid music link found in music channel.")
-            is_song_searching[guild_id] = False
-            return
-        await post_channel.send(f"🎵 **Song of the Day** (from {user}):\n{song}")
-        print(f"🎵 Posted song of the day: {song}")
-    except Exception as e:
-        print(f"❌ Song post failed: {e}")
-    finally:
-        is_song_searching[guild_id] = False
+    # ADMIN ONLY
+    if not message.author.guild_permissions.manage_guild:
+        return
+    content = message.content.lower()
+    gid = message.guild.id
+    # Channel Setters
+    if content.startswith('!setquotechannel'):
+        set_config(gid, 'quote_channel', message.channel.id)
+        await message.channel.send('✅ This channel set as Quote Channel.')
+    elif content.startswith('!seticonchannel'):
+        set_config(gid, 'icon_channel', message.channel.id)
+        await message.channel.send('✅ This channel set as Icon Channel.')
+    elif content.startswith('!setpostchannel'):
+        set_config(gid, 'post_channel', message.channel.id)
+        await message.channel.send('✅ This channel set as Post Channel.')
+    elif content.startswith('!setmusicchannel'):
+        set_config(gid, 'music_channel', message.channel.id)
+        await message.channel.send('✅ This channel set as Music Channel.')
+    elif content.startswith('!setsongpostchannel'):
+        set_config(gid, 'song_post_channel', message.channel.id)
+        await message.channel.send('✅ This channel set as Song Post Channel.')
+    # Feature Toggles
+    elif content.startswith('!enablefeature '):
+        arg = content.split(' ', 1)[1].strip()
+        if arg == 'quote':
+            set_config(gid, 'enable_daily_quote', 1)
+            await message.channel.send('✅ Daily Quote feature enabled.')
+        elif arg == 'song':
+            set_config(gid, 'enable_daily_song', 1)
+            await message.channel.send('✅ Daily Song feature enabled.')
+    elif content.startswith('!disablefeature '):
+        arg = content.split(' ', 1)[1].strip()
+        if arg == 'quote':
+            set_config(gid, 'enable_daily_quote', 0)
+            await message.channel.send('✅ Daily Quote feature disabled.')
+        elif arg == 'song':
+            set_config(gid, 'enable_daily_song', 0)
+            await message.channel.send('✅ Daily Song feature disabled.')
+    elif content.startswith('!showconfig'):
+        cfg_txt = show_config(gid)
+        await message.channel.send(f"```
+{cfg_txt}
+```")
+    elif content.startswith('!setup'):
+        setup_text = (
+            "**Bot Setup Guide:**\n"
+            "1. In each channel, use the appropriate setup command:\n"
+            "   - !setquotechannel\n   - !seticonchannel\n   - !setpostchannel\n   - !setmusicchannel\n   - !setsongpostchannel\n"
+            "2. Use !enablefeature [quote|song] or !disablefeature [quote|song] to toggle features.\n"
+            "3. Use !showconfig to see your current config.\n"
+            "4. All scheduled times are EST."
+        )
+        await message.channel.send(setup_text)
+    # Manual trigger (only if features enabled)
+    elif content.startswith('!rename'):
+        cfg = get_config(gid)
+        if cfg[6]:
+            # Post image in the channel where command was used
+            await process_rename(gid, client, override_post_channel=message.channel)
+        else:
+            await message.channel.send('⚠️ Daily Quote feature is disabled for this server.')
+    elif content.startswith('!song'):
+        cfg = get_config(gid)
+        if cfg[7]:
+            await process_daily_song(gid, client)
+        else:
+            await message.channel.send('⚠️ Daily Song feature is disabled for this server.')
 
-def get_seconds_until_time(timestr):
-    from datetime import datetime, timedelta
-    import pytz
-    hour, minute = [int(x) for x in timestr.strip().split(":")]
-    tz = pytz.timezone('US/Eastern')
-    now = datetime.now(tz)
-    next_run = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    if now >= next_run:
-        next_run += timedelta(days=1)
-    return (next_run - now).total_seconds()
-
-async def schedule_rename(client, quote_time):
-    await client.wait_until_ready()
-    while not client.is_closed():
-        wait_time = get_seconds_until_time(quote_time)
-        print(f"⏰ Sleeping for {wait_time/3600:.2f} hours until Quote of the Day ({quote_time} EST)")
-        await asyncio.sleep(wait_time)
-        for guild in client.guilds:
-            cfg = get_config(guild.id)
-            if cfg[6]:  # enable_daily_quote
-                await process_rename(guild.id, client)
-
-async def schedule_daily_song(client, song_time):
-    await client.wait_until_ready()
-    while not client.is_closed():
-        wait_time = get_seconds_until_time(song_time)
-        print(f"⏰ Sleeping for {wait_time/3600:.2f} hours until Song of the Day ({song_time} EST)")
-        await asyncio.sleep(wait_time)
-        for guild in client.guilds:
-            cfg = get_config(guild.id)
-            if cfg[7]:  # enable_daily_song
-                await process_daily_song(guild.id, client)
+if __name__ == "__main__":
+    if not TOKEN:
+        print("❌ DISCORD_TOKEN environment variable not set!")
+    else:
+        client.run(TOKEN)
