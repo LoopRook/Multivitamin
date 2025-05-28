@@ -375,8 +375,8 @@ async def on_message(message):
         else:
             await message.channel.send('⚠️ Daily Quote feature is disabled for this server.')
     elif content.startswith('!song'):
-        cfg = get_config(gid)
-        if cfg[7]:
-            await process_daily_song(gid)
-        else:
-            await message.channel.send('
+    cfg = get_config(gid)
+    if cfg[7]:
+        await process_daily_song(gid)
+    else:
+        await message.channel.send('⚠️ Daily Song feature is disabled for this server.')
