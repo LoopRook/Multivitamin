@@ -316,6 +316,9 @@ async def on_ready():
 async def on_message(message):
     if message.author.bot or not message.guild:
         return
+    # Ignore quoted/reply messages
+    if getattr(message, "reference", None) is not None:
+        return
     # ADMIN ONLY
     if not message.author.guild_permissions.manage_guild:
         return
@@ -356,14 +359,25 @@ async def on_message(message):
             await message.channel.send('✅ Daily Song feature disabled.')
     elif content.startswith('!showconfig'):
         cfg_txt = show_config(gid)
-        await message.channel.send(f"```\n{cfg_txt}\n```")
+        await message.channel.send(f"```
+{cfg_txt}
+```")
     elif content.startswith('!setup'):
         setup_text = (
-            "**Bot Setup Guide:**\n"
-            "1. In each channel, use the appropriate setup command:\n"
-            "   - !setquotechannel\n   - !seticonchannel\n   - !setpostchannel\n   - !setmusicchannel\n   - !setsongpostchannel\n"
-            "2. Use !enablefeature [quote|song] or !disablefeature [quote|song] to toggle features.\n"
-            "3. Use !showconfig to see your current config.\n"
+            "**Bot Setup Guide:**
+"
+            "1. In each channel, use the appropriate setup command:
+"
+            "   - !setquotechannel
+   - !seticonchannel
+   - !setpostchannel
+   - !setmusicchannel
+   - !setsongpostchannel
+"
+            "2. Use !enablefeature [quote|song] or !disablefeature [quote|song] to toggle features.
+"
+            "3. Use !showconfig to see your current config.
+"
             "4. All scheduled times are EST."
         )
         await message.channel.send(setup_text)
@@ -375,8 +389,8 @@ async def on_message(message):
         else:
             await message.channel.send('⚠️ Daily Quote feature is disabled for this server.')
     elif content.startswith('!song'):
-    cfg = get_config(gid)
-    if cfg[7]:
-        await process_daily_song(gid)
-    else:
-        await message.channel.send('⚠️ Daily Song feature is disabled for this server.')
+        cfg = get_config(gid)
+        if cfg[7]:
+            await process_daily_song(gid)
+        else:
+            await message.channel.send('⚠️ Daily Song feature is disabled for this server.')
