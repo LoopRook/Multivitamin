@@ -36,7 +36,7 @@ async def get_random_icon(channel):
                 all_images.append((attachment.url, message.author.display_name))
     return random.choice(all_images) if all_images else (None, None)
 
-async def process_rename(guild_id, client):
+async def process_rename(guild_id, client, override_post_channel=None):
     cfg = get_config(guild_id)
     quote_channel = client.get_channel(cfg[1])
     icon_channel = client.get_channel(cfg[2])
@@ -60,7 +60,8 @@ async def process_rename(guild_id, client):
     image_file = await generate_card(quote, quote_user or "Unknown", icon_user or "Unknown", icon_bytes)
     if image_file:
         image_file.seek(0)
-        await post_channel.send(file=discord.File(fp=image_file, filename="update.png"))
+        target_channel = override_post_channel or post_channel
+        await target_channel.send(file=discord.File(fp=image_file, filename="update.png"))
 
 async def get_random_song(channel):
     all_links = []
