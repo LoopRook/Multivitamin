@@ -77,9 +77,7 @@ async def on_message(message):
             await message.channel.send('✅ Daily Song feature disabled.')
     elif content.startswith('!showconfig'):
         cfg_txt = show_config(gid)
-        await message.channel.send(f"```
-{cfg_txt}
-```")
+        await message.channel.send(f"```\n{cfg_txt}\n```")
     elif content.startswith('!setup'):
         setup_text = (
             "**Bot Setup Guide:**\n"
