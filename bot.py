@@ -1,6 +1,6 @@
-# Discord Quote & Song Bot - Multi-Server, SQLite, Per-Server Feature Toggles
-# All scheduled times are in EST (US/Eastern). Configure accordingly.
-# Features: per-server config, persistent with SQLite, admin commands for setup
+# Multi-Server Discord Quote & Song Bot - Final, Complete Version
+# (Fixed all unterminated f-string and context issues)
+# Uses SQLite for per-server config, admin commands for setup, robust error handling
 
 import discord
 import random
@@ -180,8 +180,11 @@ async def get_random_quote(channel):
     async for message in channel.history(limit=None, oldest_first=False):
         if message.author.bot:
             continue
+        # Only include lines that are NOT commands
         lines = message.content.strip().splitlines()
-        all_lines.extend([(line, message.author.display_name) for line in lines if line.strip()])
+        for line in lines:
+            if line.strip() and not line.strip().startswith('!'):
+                all_lines.append((line, message.author.display_name))
     return random.choice(all_lines) if all_lines else (None, None)
 
 async def get_random_icon(channel):
@@ -278,7 +281,7 @@ async def process_daily_song(guild_id):
             await post_channel.send("⚠️ No valid music link found in music channel.")
             is_song_searching[guild_id] = False
             return
-        await post_channel.send(f"""🎵 **Song of the Day** (from {user}):\n{song}""")
+        await post_channel.send(f"🎵 **Song of the Day** (from {user}):\n{song}")
         print(f"🎵 Posted song of the day: {song}")
     except Exception as e:
         print(f"❌ Song post failed: {e}")
@@ -297,11 +300,6 @@ async def schedule_daily_song():
                 await process_daily_song(guild.id)
 
 # ================ COMMANDS ================
-def admin_only():
-    async def predicate(ctx):
-        return ctx.author.guild_permissions.manage_guild
-    return discord.app_commands.check(predicate)
-
 @client.event
 async def on_ready():
     print(f"✅ Logged in as {client.user}")
@@ -364,20 +362,11 @@ async def on_message(message):
 ```")
     elif content.startswith('!setup'):
         setup_text = (
-            "**Bot Setup Guide:**
-"
-            "1. In each channel, use the appropriate setup command:
-"
-            "   - !setquotechannel
-   - !seticonchannel
-   - !setpostchannel
-   - !setmusicchannel
-   - !setsongpostchannel
-"
-            "2. Use !enablefeature [quote|song] or !disablefeature [quote|song] to toggle features.
-"
-            "3. Use !showconfig to see your current config.
-"
+            "**Bot Setup Guide:**\n"
+            "1. In each channel, use the appropriate setup command:\n"
+            "   - !setquotechannel\n   - !seticonchannel\n   - !setpostchannel\n   - !setmusicchannel\n   - !setsongpostchannel\n"
+            "2. Use !enablefeature [quote|song] or !disablefeature [quote|song] to toggle features.\n"
+            "3. Use !showconfig to see your current config.\n"
             "4. All scheduled times are EST."
         )
         await message.channel.send(setup_text)
@@ -394,3 +383,11 @@ async def on_message(message):
             await process_daily_song(gid)
         else:
             await message.channel.send('⚠️ Daily Song feature is disabled for this server.')
+
+# ================ BOT ENTRYPOINT ================
+if __name__ == "__main__":
+    if not TOKEN:
+        print("❌ DISCORD_TOKEN environment variable not set!")
+    else:
+        client.run(TOKEN)
+
