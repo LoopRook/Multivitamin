@@ -1,15 +1,16 @@
-import asyncio
 import logging
 import os
 
 import discord
+import pytz
 
 from db_utils import init_db, set_config, show_config, get_config
 from bot_features import (
     process_rename,
     process_daily_song,
-    schedule_rename,
-    schedule_daily_song,
+    scheduler_loop,
+    build_mystats,
+    build_contributors,
 )
 
 # ── Logging ──────────────────────────────────────────────────────────────────
@@ -20,15 +21,13 @@ logging.basicConfig(
 )
 logging.getLogger("discord.gateway").setLevel(logging.WARNING)
 logging.getLogger("discord.http").setLevel(logging.WARNING)
-logging.getLogger("discord.client").setLevel(logging.ERROR)   # suppress PyNaCl/voice warnings
+logging.getLogger("discord.client").setLevel(logging.ERROR)
 
 log = logging.getLogger(__name__)
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
-TOKEN      = os.getenv("DISCORD_TOKEN")
-QUOTE_TIME = os.getenv("QUOTE_TIME", "4:00")
-SONG_TIME  = os.getenv("SONG_TIME",  "10:00")
+TOKEN = os.getenv("DISCORD_TOKEN")
 
 # ── Discord client ───────────────────────────────────────────────────────────
 
@@ -40,7 +39,6 @@ client = discord.Client(intents=intents)
 
 # ── Command tables ───────────────────────────────────────────────────────────
 
-# Maps command prefix -> (db field, success message)
 _CHANNEL_SETTERS: dict[str, tuple[str, str]] = {
     "!setquotechannel":    ("quote_channel",     "✅ This channel set as Quote Channel."),
     "!seticonchannel":     ("icon_channel",      "✅ This channel set as Icon Channel."),
@@ -49,7 +47,6 @@ _CHANNEL_SETTERS: dict[str, tuple[str, str]] = {
     "!setsongpostchannel": ("song_post_channel", "✅ This channel set as Song Post Channel."),
 }
 
-# Maps feature keyword -> (db field, human label)
 _FEATURE_MAP: dict[str, tuple[str, str]] = {
     "quote": ("enable_daily_quote", "Daily Quote"),
     "song":  ("enable_daily_song",  "Daily Song"),
@@ -57,52 +54,45 @@ _FEATURE_MAP: dict[str, tuple[str, str]] = {
 
 _SETUP_TEXT = (
     "**Bot Setup Guide:**\n"
-    "1. In each channel, run the appropriate command:\n"
+    "**Channel setup** (run each command in the target channel):\n"
     "   `!setquotechannel` · `!seticonchannel` · `!setpostchannel`\n"
-    "   `!setmusicchannel` · `!setsongpostchannel`\n"
-    "2. Toggle features: `!enablefeature [quote|song]` / `!disablefeature [quote|song]`\n"
-    "3. Review settings: `!showconfig`\n"
-    "4. All scheduled times are **EST**."
+    "   `!setmusicchannel` · `!setsongpostchannel`\n\n"
+    "**Features:** `!enablefeature [quote|song]` / `!disablefeature [quote|song]`\n\n"
+    "**Scheduling:**\n"
+    "   `!settimezone <tz>` — e.g. `US/Eastern`, `Europe/London`, `Asia/Tokyo`\n"
+    "   `!setscheduletime quote 8:00` — set daily quote time\n"
+    "   `!setscheduletime song 12:00` — set daily song time\n\n"
+    "**Other:** `!showconfig` · `!preview rename` · `!preview song`\n"
+    "   `!contributors [quote|icon|song]` · `!mystats`"
 )
 
 _NO_PERM = "⚠️ You don't have permission to use this command."
 
 # ── Scheduler task tracking ──────────────────────────────────────────────────
-#
-# on_ready fires on EVERY reconnect (network drop, Discord restart, etc.),
-# not just the first boot.  Without cancelling old tasks, each reconnect
-# spawns a fresh pair of schedulers while the previous ones keep running —
-# after a few days you end up with N copies all firing simultaneously.
-#
-# Fix: store task references and cancel the old ones before creating new ones.
+# on_ready fires on every reconnect. We cancel the old task before spawning
+# a new one to prevent duplicate schedulers accumulating over time.
 
-_scheduler_tasks: list[asyncio.Task] = []
+_scheduler_task: list = []
 
-
-# ── Events ───────────────────────────────────────────────────────────────────
 
 @client.event
 async def on_ready():
-    global _scheduler_tasks
     log.info("✅ Logged in as %s", client.user)
     init_db()
 
-    # Cancel any schedulers left over from a previous connection.
-    for task in _scheduler_tasks:
+    for task in _scheduler_task:
         if not task.done():
             task.cancel()
-            log.info("🔄 Cancelled stale scheduler task: %s", task.get_name())
+            log.info("🔄 Cancelled stale scheduler task.")
+    _scheduler_task.clear()
 
-    _scheduler_tasks = [
-        client.loop.create_task(schedule_rename(client, QUOTE_TIME),     name="schedule_rename"),
-        client.loop.create_task(schedule_daily_song(client, SONG_TIME),  name="schedule_daily_song"),
-    ]
-    log.info("⏰ Scheduler tasks started (quote=%s, song=%s)", QUOTE_TIME, SONG_TIME)
+    task = client.loop.create_task(scheduler_loop(client), name="scheduler_loop")
+    _scheduler_task.append(task)
+    log.info("⏰ Scheduler started.")
 
 
 @client.event
 async def on_message(message: discord.Message):
-    # Ignore bots, DMs, and quoted/reply messages.
     if message.author.bot or not message.guild:
         return
     if message.reference is not None:
@@ -139,6 +129,52 @@ async def on_message(message: discord.Message):
             await message.channel.send(f'⚠️ Unknown feature "{arg}". Use `quote` or `song`.')
         return
 
+    # ── Set timezone (admin) ─────────────────────────────────────────────
+    if content_lower.startswith("!settimezone "):
+        if not is_admin:
+            await message.channel.send(_NO_PERM)
+            return
+        tz_str = content.split(" ", 1)[1].strip()
+        try:
+            pytz.timezone(tz_str)
+        except pytz.exceptions.UnknownTimeZoneError:
+            await message.channel.send(
+                f'⚠️ Unknown timezone `{tz_str}`.\n'
+                f'Use a standard tz name, e.g. `US/Eastern`, `Europe/London`, `Asia/Tokyo`.\n'
+                f'Full list: <https://en.wikipedia.org/wiki/List_of_tz_database_time_zones>'
+            )
+            return
+        set_config(gid, "timezone", tz_str)
+        await message.channel.send(f"✅ Timezone set to `{tz_str}`.")
+        return
+
+    # ── Set schedule time (admin) ────────────────────────────────────────
+    if content_lower.startswith("!setscheduletime "):
+        if not is_admin:
+            await message.channel.send(_NO_PERM)
+            return
+        parts = content.split()
+        if len(parts) < 3:
+            await message.channel.send("⚠️ Usage: `!setscheduletime [quote|song] <H:MM>`")
+            return
+        which = parts[1].lower()
+        time_str = parts[2]
+        if which not in ("quote", "song"):
+            await message.channel.send('⚠️ First argument must be `quote` or `song`.')
+            return
+        try:
+            h, m = time_str.split(":")
+            assert 0 <= int(h) <= 23 and 0 <= int(m) <= 59
+        except Exception:
+            await message.channel.send("⚠️ Time must be in `H:MM` or `HH:MM` format (24-hour).")
+            return
+        field = "quote_time" if which == "quote" else "song_time"
+        set_config(gid, field, time_str)
+        cfg = get_config(gid)
+        tz_name = cfg["timezone"] or "US/Eastern"
+        await message.channel.send(f"✅ {which.title()} time set to `{time_str}` ({tz_name}).")
+        return
+
     # ── Show config (admin) ──────────────────────────────────────────────
     if content_lower.startswith("!showconfig"):
         if not is_admin:
@@ -155,10 +191,48 @@ async def on_message(message: discord.Message):
         await message.channel.send(_SETUP_TEXT)
         return
 
+    # ── Preview (admin) ──────────────────────────────────────────────────
+    if content_lower.startswith("!preview "):
+        if not is_admin:
+            await message.channel.send(_NO_PERM)
+            return
+        arg = content_lower.split(" ", 1)[1].strip()
+        if arg == "rename":
+            await message.channel.send("⏳ Scanning channels for preview...")
+            await process_rename(gid, client, override_post_channel=message.channel, preview=True)
+        elif arg == "song":
+            await message.channel.send("⏳ Scanning music channel for preview...")
+            await process_daily_song(gid, client, override_post_channel=message.channel, preview=True)
+        else:
+            await message.channel.send('⚠️ Usage: `!preview rename` or `!preview song`')
+        return
+
+    # ── Contributors (admin) ─────────────────────────────────────────────
+    if content_lower.startswith("!contributors"):
+        if not is_admin:
+            await message.channel.send(_NO_PERM)
+            return
+        parts = content_lower.split()
+        if len(parts) < 2 or parts[1] not in ("quote", "icon", "song"):
+            await message.channel.send("⚠️ Usage: `!contributors [quote|icon|song]`")
+            return
+        category = parts[1]
+        status = await message.channel.send(f"⏳ Scanning {category} channel...")
+        result = await build_contributors(gid, client, category)
+        await status.edit(content=result)
+        return
+
+    # ── My stats (anyone) ────────────────────────────────────────────────
+    if content_lower.startswith("!mystats"):
+        status = await message.channel.send("⏳ Scanning channels for your stats...")
+        result = await build_mystats(gid, client, message.author.id, message.author.display_name)
+        await status.edit(content=result)
+        return
+
     # ── Public commands ──────────────────────────────────────────────────
     if content_lower.startswith("!rename"):
         cfg = get_config(gid)
-        if cfg[6]:
+        if cfg["enable_daily_quote"]:
             await process_rename(gid, client, override_post_channel=message.channel)
         else:
             await message.channel.send("⚠️ Daily Quote feature is disabled for this server.")
@@ -166,7 +240,7 @@ async def on_message(message: discord.Message):
 
     if content_lower.startswith("!song"):
         cfg = get_config(gid)
-        if cfg[7]:
+        if cfg["enable_daily_song"]:
             await process_daily_song(gid, client)
         else:
             await message.channel.send("⚠️ Daily Song feature is disabled for this server.")
