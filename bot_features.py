@@ -27,79 +27,139 @@ def is_music_link(line: str) -> bool:
     return bool(_MUSIC_PATTERN.search(line))
 
 
-# ── History helpers (reservoir sampling) ────────────────────────────────────
+# ── History helpers (two-stage fair sampling) ────────────────────────────────
 #
-# Classic Algorithm R (Vitter, 1985) with k=1.
-# Scans every message in the channel with O(1) memory — only one candidate
-# is held at a time.  After n eligible items the selected one has probability
-# 1/n, giving a uniform distribution identical to random.choice(full_list).
+# Problem: a user with 500 posts would dominate random.choice() over a user
+# with 5 posts.
+#
+# Solution — two stages:
+#   1. Stream all messages.  For each user, run an independent reservoir
+#      (Algorithm R, k=1) so every user ends up with one randomly chosen
+#      item from their own submissions.
+#   2. Pick one user uniformly from the contributor pool.
+#
+# Result: every contributor has an equal 1/U probability of being selected
+# (U = number of unique contributors), regardless of how many items they
+# posted.  Memory is O(U) — one stored item per unique user — rather than
+# O(total messages).
+#
+# User identity is keyed on Discord user ID (stable across display-name
+# changes) but we store the display name for the card/post.
 
 async def get_random_quote(channel) -> tuple[str | None, str | None]:
     if channel is None:
         return None, None
-    selected: tuple | None = None
-    count = 0        # eligible lines seen
-    scanned = 0      # total messages visited
+
+    # user_id -> (chosen_line, display_name, submission_count)
+    pool: dict[int, tuple[str, str, int]] = {}
+    scanned = 0
+
     async for msg in channel.history(limit=None, oldest_first=False):
         scanned += 1
         if msg.author.bot:
             continue
+        uid = msg.author.id
         for line in msg.content.strip().splitlines():
             stripped = line.strip()
-            if stripped and not stripped.startswith("!"):
-                count += 1
-                if random.randint(1, count) == 1:
-                    selected = (stripped, msg.author.display_name)
+            if not stripped or stripped.startswith("!"):
+                continue
+            prev_line, name, count = pool.get(uid, (None, msg.author.display_name, 0))
+            count += 1
+            if random.randint(1, count) == 1:
+                pool[uid] = (stripped, msg.author.display_name, count)
+            else:
+                pool[uid] = (prev_line, name, count)
+
+    if not pool:
+        log.info("[quote] scanned %d messages → 0 contributors", scanned)
+        return None, None
+
+    chosen_uid = random.choice(list(pool.keys()))
+    chosen_line, chosen_name, chosen_count = pool[chosen_uid]
+
+    counts = {name: c for _, name, c in pool.values()}
     log.info(
-        "[quote] scanned %d messages → %d eligible lines → selected: %r",
-        scanned, count, selected[0] if selected else None,
+        "[quote] scanned %d messages → %d contributors %s → picked %r from %s (%d submissions)",
+        scanned, len(pool), dict(counts), chosen_line, chosen_name, chosen_count,
     )
-    return selected or (None, None)
+    return chosen_line, chosen_name
 
 
 async def get_random_icon(channel) -> tuple[str | None, str | None]:
     if channel is None:
         return None, None
-    selected: tuple | None = None
-    count = 0
+
+    # user_id -> (chosen_url, display_name, submission_count)
+    pool: dict[int, tuple[str, str, int]] = {}
     scanned = 0
+
     async for msg in channel.history(limit=None, oldest_first=False):
         scanned += 1
         if msg.author.bot:
             continue
+        uid = msg.author.id
         for attachment in msg.attachments:
-            if attachment.content_type and attachment.content_type.startswith("image"):
-                count += 1
-                if random.randint(1, count) == 1:
-                    selected = (attachment.url, msg.author.display_name)
+            if not (attachment.content_type and attachment.content_type.startswith("image")):
+                continue
+            prev_url, name, count = pool.get(uid, (None, msg.author.display_name, 0))
+            count += 1
+            if random.randint(1, count) == 1:
+                pool[uid] = (attachment.url, msg.author.display_name, count)
+            else:
+                pool[uid] = (prev_url, name, count)
+
+    if not pool:
+        log.info("[icon] scanned %d messages → 0 contributors", scanned)
+        return None, None
+
+    chosen_uid = random.choice(list(pool.keys()))
+    chosen_url, chosen_name, chosen_count = pool[chosen_uid]
+
+    counts = {name: c for _, name, c in pool.values()}
     log.info(
-        "[icon] scanned %d messages → %d eligible images → selected from: %s",
-        scanned, count, selected[1] if selected else None,
+        "[icon] scanned %d messages → %d contributors %s → picked image from %s (%d submissions)",
+        scanned, len(pool), dict(counts), chosen_name, chosen_count,
     )
-    return selected or (None, None)
+    return chosen_url, chosen_name
 
 
 async def get_random_song(channel) -> tuple[str | None, str | None]:
     if channel is None:
         return None, None
-    selected: tuple | None = None
-    count = 0
+
+    # user_id -> (chosen_link, display_name, submission_count)
+    pool: dict[int, tuple[str, str, int]] = {}
     scanned = 0
+
     async for msg in channel.history(limit=None, oldest_first=False):
         scanned += 1
         if msg.author.bot:
             continue
+        uid = msg.author.id
         for line in msg.content.strip().splitlines():
             stripped = line.strip()
-            if stripped and is_music_link(stripped):
-                count += 1
-                if random.randint(1, count) == 1:
-                    selected = (stripped, msg.author.display_name)
+            if not stripped or not is_music_link(stripped):
+                continue
+            prev_link, name, count = pool.get(uid, (None, msg.author.display_name, 0))
+            count += 1
+            if random.randint(1, count) == 1:
+                pool[uid] = (stripped, msg.author.display_name, count)
+            else:
+                pool[uid] = (prev_link, name, count)
+
+    if not pool:
+        log.info("[song] scanned %d messages → 0 contributors", scanned)
+        return None, None
+
+    chosen_uid = random.choice(list(pool.keys()))
+    chosen_link, chosen_name, chosen_count = pool[chosen_uid]
+
+    counts = {name: c for _, name, c in pool.values()}
     log.info(
-        "[song] scanned %d messages → %d eligible links → selected: %r",
-        scanned, count, selected[0] if selected else None,
+        "[song] scanned %d messages → %d contributors %s → picked %r from %s (%d submissions)",
+        scanned, len(pool), dict(counts), chosen_link, chosen_name, chosen_count,
     )
-    return selected or (None, None)
+    return chosen_link, chosen_name
 
 
 # ── Core feature logic ───────────────────────────────────────────────────────
@@ -115,8 +175,6 @@ async def process_rename(guild_id: int, client: discord.Client, override_post_ch
         log.warning("[%s] Guild not found — skipping rename.", guild_id)
         return
 
-    # Scan quote and icon channels concurrently — independent channels,
-    # roughly halves wall time.
     (quote, quote_user), (image_url, icon_user) = await asyncio.gather(
         get_random_quote(quote_channel),
         get_random_icon(icon_channel),
