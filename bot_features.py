@@ -30,21 +30,18 @@ def is_music_link(line: str) -> bool:
 # ── History helpers (reservoir sampling) ────────────────────────────────────
 #
 # Classic Algorithm R (Vitter, 1985) with k=1.
-# We scan every message Discord has ever stored but hold only ONE candidate
-# in memory at a time.  After seeing n eligible items the current selection
-# has been kept with probability 1/n — i.e. every item has an equal final
-# probability of being chosen, regardless of channel size.
-#
-# Memory: O(1) regardless of channel length.
-# No storage on Railway: we read from Discord's API page-by-page (100 msgs
-# per HTTP call) and immediately discard each page after sampling from it.
+# Scans every message in the channel with O(1) memory — only one candidate
+# is held at a time.  After n eligible items the selected one has probability
+# 1/n, giving a uniform distribution identical to random.choice(full_list).
 
 async def get_random_quote(channel) -> tuple[str | None, str | None]:
     if channel is None:
         return None, None
     selected: tuple | None = None
-    count = 0
+    count = 0        # eligible lines seen
+    scanned = 0      # total messages visited
     async for msg in channel.history(limit=None, oldest_first=False):
+        scanned += 1
         if msg.author.bot:
             continue
         for line in msg.content.strip().splitlines():
@@ -53,6 +50,10 @@ async def get_random_quote(channel) -> tuple[str | None, str | None]:
                 count += 1
                 if random.randint(1, count) == 1:
                     selected = (stripped, msg.author.display_name)
+    log.info(
+        "[quote] scanned %d messages → %d eligible lines → selected: %r",
+        scanned, count, selected[0] if selected else None,
+    )
     return selected or (None, None)
 
 
@@ -61,7 +62,9 @@ async def get_random_icon(channel) -> tuple[str | None, str | None]:
         return None, None
     selected: tuple | None = None
     count = 0
+    scanned = 0
     async for msg in channel.history(limit=None, oldest_first=False):
+        scanned += 1
         if msg.author.bot:
             continue
         for attachment in msg.attachments:
@@ -69,6 +72,10 @@ async def get_random_icon(channel) -> tuple[str | None, str | None]:
                 count += 1
                 if random.randint(1, count) == 1:
                     selected = (attachment.url, msg.author.display_name)
+    log.info(
+        "[icon] scanned %d messages → %d eligible images → selected from: %s",
+        scanned, count, selected[1] if selected else None,
+    )
     return selected or (None, None)
 
 
@@ -77,7 +84,9 @@ async def get_random_song(channel) -> tuple[str | None, str | None]:
         return None, None
     selected: tuple | None = None
     count = 0
+    scanned = 0
     async for msg in channel.history(limit=None, oldest_first=False):
+        scanned += 1
         if msg.author.bot:
             continue
         for line in msg.content.strip().splitlines():
@@ -86,6 +95,10 @@ async def get_random_song(channel) -> tuple[str | None, str | None]:
                 count += 1
                 if random.randint(1, count) == 1:
                     selected = (stripped, msg.author.display_name)
+    log.info(
+        "[song] scanned %d messages → %d eligible links → selected: %r",
+        scanned, count, selected[0] if selected else None,
+    )
     return selected or (None, None)
 
 
@@ -102,8 +115,8 @@ async def process_rename(guild_id: int, client: discord.Client, override_post_ch
         log.warning("[%s] Guild not found — skipping rename.", guild_id)
         return
 
-    # Scan quote and icon channels concurrently — they're independent channels
-    # so there's no rate-limit conflict, and it roughly halves the wall time.
+    # Scan quote and icon channels concurrently — independent channels,
+    # roughly halves wall time.
     (quote, quote_user), (image_url, icon_user) = await asyncio.gather(
         get_random_quote(quote_channel),
         get_random_icon(icon_channel),
@@ -127,7 +140,6 @@ async def process_rename(guild_id: int, client: discord.Client, override_post_ch
         log.info('[%s] Server renamed to: "%s"', guild_id, quote)
     except discord.HTTPException as e:
         log.error("[%s] Failed to rename guild: %s", guild_id, e)
-        # Continue — still post the card even if the rename itself failed.
 
     image_file = await generate_card(
         quote,
@@ -138,7 +150,6 @@ async def process_rename(guild_id: int, client: discord.Client, override_post_ch
     if not image_file:
         return
 
-    # Build deduplicated list of channels to post to.
     channels_to_post = []
     if override_post_channel:
         channels_to_post.append(override_post_channel)
