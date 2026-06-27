@@ -20,6 +20,7 @@ logging.basicConfig(
 )
 logging.getLogger("discord.gateway").setLevel(logging.WARNING)
 logging.getLogger("discord.http").setLevel(logging.WARNING)
+logging.getLogger("discord.client").setLevel(logging.ERROR)   # suppress PyNaCl/voice warnings
 
 log = logging.getLogger(__name__)
 
