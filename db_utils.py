@@ -15,6 +15,7 @@ _VALID_CONFIG_FIELDS = frozenset({
     "song_post_channel",
     "enable_daily_quote",
     "enable_daily_song",
+    "enable_cooldown",
     "timezone",
     "quote_time",
     "song_time",
@@ -32,6 +33,7 @@ CREATE TABLE IF NOT EXISTS server_config (
     song_post_channel  INTEGER,
     enable_daily_quote INTEGER DEFAULT 1,
     enable_daily_song  INTEGER DEFAULT 1,
+    enable_cooldown    INTEGER DEFAULT 1,
     timezone           TEXT    DEFAULT 'US/Eastern',
     quote_time         TEXT    DEFAULT '4:00',
     song_time          TEXT    DEFAULT '10:00',
@@ -52,19 +54,19 @@ CREATE TABLE IF NOT EXISTS picks_history (
 )
 """
 
-# Columns added after the initial schema — safe to run against existing DBs.
 _MIGRATIONS = [
     ("timezone",        "TEXT DEFAULT 'US/Eastern'"),
     ("quote_time",      "TEXT DEFAULT '4:00'"),
     ("song_time",       "TEXT DEFAULT '10:00'"),
     ("last_quote_date", "TEXT"),
     ("last_song_date",  "TEXT"),
+    ("enable_cooldown", "INTEGER DEFAULT 1"),
 ]
 
 
 def db_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
-    conn.row_factory = sqlite3.Row   # access columns by name, not index
+    conn.row_factory = sqlite3.Row
     return conn
 
 
@@ -76,11 +78,15 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_history_guild_user
             ON picks_history(guild_id, user_id, category)
         """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_history_guild_cat_time
+            ON picks_history(guild_id, category, picked_at)
+        """)
         for col, definition in _MIGRATIONS:
             try:
                 conn.execute(f"ALTER TABLE server_config ADD COLUMN {col} {definition}")
             except sqlite3.OperationalError:
-                pass  # column already exists — fine
+                pass
     log.info("Database ready at %s", DB_FILE)
 
 
@@ -121,6 +127,7 @@ def show_config(guild_id: int) -> str:
         f"Song Post Channel: {c['song_post_channel'] or 'Not Set'}",
         f"Quote Feature:     {'Enabled' if c['enable_daily_quote'] else 'Disabled'}",
         f"Song Feature:      {'Enabled' if c['enable_daily_song']  else 'Disabled'}",
+        f"Cooldown:          {'Enabled' if c['enable_cooldown']    else 'Disabled'}",
         f"Timezone:          {c['timezone']   or 'US/Eastern'}",
         f"Quote Time:        {c['quote_time'] or '4:00'}",
         f"Song Time:         {c['song_time']  or '10:00'}",
@@ -128,7 +135,6 @@ def show_config(guild_id: int) -> str:
 
 
 def log_pick(guild_id: int, user_id: int, user_name: str, category: str, item: str) -> None:
-    """Record a successful pick in the history table."""
     picked_at = datetime.now(timezone.utc).isoformat()
     with db_conn() as conn:
         conn.execute(
@@ -139,8 +145,22 @@ def log_pick(guild_id: int, user_id: int, user_name: str, category: str, item: s
         conn.commit()
 
 
+def get_today_pick_counts(guild_id: int, category: str, since_utc: str) -> dict[int, int]:
+    """
+    Return {user_id: picks_today} for *category* since *since_utc* (ISO timestamp).
+    since_utc should be midnight of today in the guild's timezone, converted to UTC.
+    """
+    with db_conn() as conn:
+        rows = conn.execute("""
+            SELECT user_id, COUNT(*) AS count
+            FROM picks_history
+            WHERE guild_id=? AND category=? AND picked_at >= ?
+            GROUP BY user_id
+        """, (guild_id, category, since_utc)).fetchall()
+    return {row["user_id"]: row["count"] for row in rows}
+
+
 def get_user_last_picks(guild_id: int, user_id: int) -> dict[str, str]:
-    """Return {category: iso_timestamp} for the user's most recent pick per category."""
     with db_conn() as conn:
         rows = conn.execute("""
             SELECT category, MAX(picked_at) AS last_picked
