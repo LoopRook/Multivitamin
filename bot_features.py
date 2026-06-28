@@ -357,7 +357,6 @@ async def process_rename(
     ):
         channels_to_post.append(post_channel)
 
-    vote_emoji   = cfg["vote_emoji"] or "👍"
     post_chan_id = cfg["post_channel"]
 
     for channel in channels_to_post:
@@ -373,11 +372,10 @@ async def process_rename(
         # If post_channel isn't configured, fall back to whatever was sent.
         is_official = (post_chan_id and channel.id == post_chan_id) or (not post_chan_id)
         if cfg["enable_voting"] and is_official:
-            try:
-                await sent.add_reaction(vote_emoji)
-            except discord.HTTPException as e:
-                log.warning("[%s] Could not add vote reaction: %s", guild_id, e)
-            store_rename_post(guild_id, sent.id, sent.channel.id, quote, quote_user, quote_uid)
+            # Grab the attachment URL as a cached snapshot.
+            # (We always re-fetch fresh at bracket time since CDN URLs expire.)
+            img_url = sent.attachments[0].url if sent.attachments else None
+            store_rename_post(guild_id, sent.id, sent.channel.id, quote, quote_user, quote_uid, img_url)
 
 
 _is_song_searching: dict[int, bool] = {}
