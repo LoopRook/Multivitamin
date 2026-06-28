@@ -4,9 +4,10 @@ import os
 import discord
 import pytz
 
-from db_utils import init_db, set_config, show_config, get_config
+from db_utils import init_db, set_config, show_config, get_config, cancel_bracket, cancel_bracket
 from bracket import (
-    start_bracket, check_bracket_advancement, get_bracket_status_text,
+    start_bracket, start_test_bracket,
+    check_bracket_advancement, get_bracket_status_text,
 )
 from bot_features import (
     process_rename,
@@ -75,7 +76,8 @@ _SETUP_TEXT = (
     "   `!setbracketchannel` — run in your bracket channel\n"
     "   `!setbracketsize <4|8|16|32>` · `!setbracketvotingtime <hours>`\n"
     "   `!startbracket [year]` — seeds bracket by reaction count, uses Discord polls for matchups\n"
-    "   `!bracketstatus`"
+    "   `!testbracket` — test the full bracket flow using quote channel entries\n"
+    "   `!forcebracketadvance` · `!cancelbracket` · `!bracketstatus`"
 )
 
 _NO_PERM = "⚠️ You don't have permission to use this command."
