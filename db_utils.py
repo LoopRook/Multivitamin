@@ -353,3 +353,14 @@ def complete_bracket(bracket_id: int) -> None:
     with db_conn() as conn:
         conn.execute("UPDATE brackets SET status='complete' WHERE id=?", (bracket_id,))
         conn.commit()
+
+
+def cancel_bracket(bracket_id: int) -> None:
+    """Hard-delete a bracket and all its entries/matchups. Used for test cleanup."""
+    with db_conn() as conn:
+        conn.execute("DELETE FROM bracket_matchups WHERE bracket_id=?", (bracket_id,))
+        conn.execute("DELETE FROM bracket_entries  WHERE bracket_id=?", (bracket_id,))
+        conn.execute("DELETE FROM brackets          WHERE id=?",         (bracket_id,))
+        conn.commit()
+
+
