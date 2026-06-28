@@ -6,8 +6,7 @@ import pytz
 
 from db_utils import init_db, set_config, show_config, get_config
 from bracket import (
-    start_bracket, check_bracket_advancement,
-    get_bracket_status_text, validate_emoji,
+    start_bracket, check_bracket_advancement, get_bracket_status_text,
 )
 from bot_features import (
     process_rename,
@@ -72,12 +71,11 @@ _SETUP_TEXT = (
     "**Other:** `!showconfig` · `!preview rename` · `!preview song`\n"
     "   `!contributors [quote|icon|song]` · `!mystats`\n\n"
     "**Voting & Bracket:**\n"
-    "   `!enablefeature voting` — start tracking renames for bracket seeding\n"
-    "   `!setvoteemoji <emoji>` — emoji added to each rename post\n"
-    "   `!setbracketemoji <a> <b>` — matchup vote emojis (default 1️⃣ 2️⃣)\n"
+    "   `!enablefeature voting` — start tracking rename posts (any reaction counts as a vote)\n"
     "   `!setbracketchannel` — run in your bracket channel\n"
     "   `!setbracketsize <4|8|16|32>` · `!setbracketvotingtime <hours>`\n"
-    "   `!startbracket [year]` · `!bracketstatus`"
+    "   `!startbracket [year]` — seeds bracket by reaction count, uses Discord polls for matchups\n"
+    "   `!bracketstatus`"
 )
 
 _NO_PERM = "⚠️ You don't have permission to use this command."

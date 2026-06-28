@@ -1,5 +1,4 @@
 import logging
-import math
 import os
 import sqlite3
 from datetime import datetime, timezone
@@ -13,7 +12,6 @@ _VALID_CONFIG_FIELDS = frozenset({
     "song_post_channel", "enable_daily_quote", "enable_daily_song",
     "enable_cooldown", "enable_voting",
     "timezone", "quote_time", "song_time", "last_quote_date", "last_song_date",
-    "vote_emoji", "bracket_emoji_a", "bracket_emoji_b",
     "bracket_channel", "bracket_size", "bracket_voting_hours", "voting_enabled_at",
 })
 
@@ -34,9 +32,6 @@ CREATE TABLE IF NOT EXISTS server_config (
     song_time             TEXT    DEFAULT '10:00',
     last_quote_date       TEXT,
     last_song_date        TEXT,
-    vote_emoji            TEXT    DEFAULT '👍',
-    bracket_emoji_a       TEXT    DEFAULT '1️⃣',
-    bracket_emoji_b       TEXT    DEFAULT '2️⃣',
     bracket_channel       INTEGER,
     bracket_size          INTEGER DEFAULT 8,
     bracket_voting_hours  INTEGER DEFAULT 24,
@@ -65,6 +60,7 @@ CREATE TABLE IF NOT EXISTS rename_posts (
     quote       TEXT    NOT NULL,
     quote_user  TEXT,
     quote_uid   INTEGER,
+    image_url   TEXT,
     posted_at   TEXT    NOT NULL
 )
 """
@@ -113,7 +109,8 @@ CREATE TABLE IF NOT EXISTS bracket_matchups (
 )
 """
 
-_MIGRATIONS = [
+# Columns added after initial schema — safe to run against existing DBs
+_CONFIG_MIGRATIONS = [
     ("timezone",             "TEXT DEFAULT 'US/Eastern'"),
     ("quote_time",           "TEXT DEFAULT '4:00'"),
     ("song_time",            "TEXT DEFAULT '10:00'"),
@@ -121,13 +118,14 @@ _MIGRATIONS = [
     ("last_song_date",       "TEXT"),
     ("enable_cooldown",      "INTEGER DEFAULT 1"),
     ("enable_voting",        "INTEGER DEFAULT 0"),
-    ("vote_emoji",           "TEXT DEFAULT '👍'"),
-    ("bracket_emoji_a",      "TEXT DEFAULT '1️⃣'"),
-    ("bracket_emoji_b",      "TEXT DEFAULT '2️⃣'"),
     ("bracket_channel",      "INTEGER"),
     ("bracket_size",         "INTEGER DEFAULT 8"),
     ("bracket_voting_hours", "INTEGER DEFAULT 24"),
     ("voting_enabled_at",    "TEXT"),
+]
+
+_RENAME_POSTS_MIGRATIONS = [
+    ("image_url", "TEXT"),
 ]
 
 
@@ -148,9 +146,14 @@ def init_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_history_guild_user ON picks_history(guild_id, user_id, category)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_history_guild_cat_time ON picks_history(guild_id, category, picked_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_rename_posts_guild ON rename_posts(guild_id, posted_at)")
-        for col, definition in _MIGRATIONS:
+        for col, definition in _CONFIG_MIGRATIONS:
             try:
                 conn.execute(f"ALTER TABLE server_config ADD COLUMN {col} {definition}")
+            except sqlite3.OperationalError:
+                pass
+        for col, definition in _RENAME_POSTS_MIGRATIONS:
+            try:
+                conn.execute(f"ALTER TABLE rename_posts ADD COLUMN {col} {definition}")
             except sqlite3.OperationalError:
                 pass
     log.info("Database ready at %s", DB_FILE)
@@ -188,9 +191,6 @@ def show_config(guild_id: int) -> str:
         f"Song Feature:        {'Enabled' if c['enable_daily_song']  else 'Disabled'}",
         f"Cooldown:            {'Enabled' if c['enable_cooldown']    else 'Disabled'}",
         f"Voting:              {'Enabled' if c['enable_voting']      else 'Disabled'}",
-        f"Vote Emoji:          {c['vote_emoji']           or '👍'}",
-        f"Bracket Emoji A:     {c['bracket_emoji_a']     or '1️⃣'}",
-        f"Bracket Emoji B:     {c['bracket_emoji_b']     or '2️⃣'}",
         f"Bracket Size:        {c['bracket_size']         or 8}",
         f"Bracket Vote Hours:  {c['bracket_voting_hours'] or 24}",
         f"Timezone:            {c['timezone']             or 'US/Eastern'}",
@@ -199,7 +199,7 @@ def show_config(guild_id: int) -> str:
     ])
 
 
-# ── picks_history ────────────────────────────────────────────────────────────
+# ── picks_history ─────────────────────────────────────────────────────────────
 
 def log_pick(guild_id: int, user_id: int, user_name: str, category: str, item: str) -> None:
     with db_conn() as conn:
@@ -231,34 +231,37 @@ def get_user_last_picks(guild_id: int, user_id: int) -> dict[str, str]:
     return {row["category"]: row["last_picked"] for row in rows}
 
 
-# ── rename_posts ─────────────────────────────────────────────────────────────
+# ── rename_posts ──────────────────────────────────────────────────────────────
 
 def store_rename_post(
     guild_id: int, message_id: int, channel_id: int,
     quote: str, quote_user: str | None, quote_uid: int | None,
+    image_url: str | None = None,
 ) -> None:
-    posted_at = datetime.now(timezone.utc).isoformat()
     with db_conn() as conn:
         conn.execute(
-            "INSERT INTO rename_posts (guild_id, message_id, channel_id, quote, quote_user, quote_uid, posted_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (guild_id, message_id, channel_id, quote, quote_user, quote_uid, posted_at),
+            "INSERT INTO rename_posts "
+            "(guild_id, message_id, channel_id, quote, quote_user, quote_uid, image_url, posted_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (guild_id, message_id, channel_id, quote, quote_user, quote_uid,
+             image_url, datetime.now(timezone.utc).isoformat()),
         )
         conn.commit()
 
 
 def get_rename_posts_for_year(
-    guild_id: int, year_start_utc: str, year_end_utc: str, voting_enabled_at: str | None
+    guild_id: int, year_start_utc: str, year_end_utc: str, voting_enabled_at: str | None,
 ) -> list[sqlite3.Row]:
     since = max(year_start_utc, voting_enabled_at) if voting_enabled_at else year_start_utc
     with db_conn() as conn:
         return conn.execute(
-            "SELECT * FROM rename_posts WHERE guild_id=? AND posted_at >= ? AND posted_at <= ? ORDER BY posted_at",
+            "SELECT * FROM rename_posts "
+            "WHERE guild_id=? AND posted_at >= ? AND posted_at <= ? ORDER BY posted_at",
             (guild_id, since, year_end_utc),
         ).fetchall()
 
 
-# ── brackets ─────────────────────────────────────────────────────────────────
+# ── brackets ──────────────────────────────────────────────────────────────────
 
 def create_bracket(guild_id: int, year: int, size: int, voting_hours: int) -> int:
     with db_conn() as conn:
@@ -293,14 +296,10 @@ def get_bracket_entry(entry_id: int) -> sqlite3.Row | None:
         return conn.execute("SELECT * FROM bracket_entries WHERE id=?", (entry_id,)).fetchone()
 
 
-def create_bracket_matchup(
-    bracket_id: int, round_num: int, match_num: int,
-    entry_a_id: int, entry_b_id: int,
-) -> int:
+def create_bracket_matchup(bracket_id: int, round_num: int, match_num: int, entry_a_id: int, entry_b_id: int) -> int:
     with db_conn() as conn:
         cur = conn.execute(
-            "INSERT INTO bracket_matchups (bracket_id, round, match_num, entry_a_id, entry_b_id) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO bracket_matchups (bracket_id, round, match_num, entry_a_id, entry_b_id) VALUES (?, ?, ?, ?, ?)",
             (bracket_id, round_num, match_num, entry_a_id, entry_b_id),
         )
         conn.commit()
@@ -333,8 +332,7 @@ def set_matchup_winner(matchup_id: int, winner_entry_id: int) -> None:
         conn.commit()
 
 
-def get_round_winners_ordered(bracket_id: int, round_num: int) -> list[sqlite3.Row]:
-    """Winners from a completed round, ordered by match_num for correct bracket pairing."""
+def get_round_winners_ordered(bracket_id: int, round_num: int) -> list[int]:
     with db_conn() as conn:
         rows = conn.execute(
             "SELECT winner_entry_id FROM bracket_matchups "
@@ -348,8 +346,7 @@ def advance_bracket_round(bracket_id: int) -> int:
     with db_conn() as conn:
         conn.execute("UPDATE brackets SET current_round = current_round + 1 WHERE id=?", (bracket_id,))
         conn.commit()
-        row = conn.execute("SELECT current_round FROM brackets WHERE id=?", (bracket_id,)).fetchone()
-        return row["current_round"]
+        return conn.execute("SELECT current_round FROM brackets WHERE id=?", (bracket_id,)).fetchone()["current_round"]
 
 
 def complete_bracket(bracket_id: int) -> None:
