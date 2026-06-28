@@ -8,7 +8,7 @@ import aiohttp
 import discord
 import pytz
 
-from db_utils import get_config, set_config, log_pick, get_user_last_picks
+from db_utils import get_config, set_config, log_pick, get_user_last_picks, get_today_pick_counts
 from image_utils import generate_card, truncate_to_100_chars
 
 log = logging.getLogger(__name__)
@@ -33,25 +33,62 @@ def _guild_tz(cfg) -> pytz.BaseTzInfo:
 
 
 def _normalize_time(t: str) -> str:
-    """'4:00' → '04:00' for strftime('%H:%M') comparison."""
     h, m = t.strip().split(":")
     return f"{int(h):02d}:{int(m):02d}"
 
 
-# ── History helpers (two-stage fair sampling) ────────────────────────────────
+def _today_since_utc(tz: pytz.BaseTzInfo) -> str:
+    """
+    Return the UTC ISO timestamp for midnight-today in *tz*.
+    Used to scope 'today's picks' correctly per guild timezone.
+    """
+    now_local  = datetime.now(tz)
+    midnight   = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    return midnight.astimezone(pytz.utc).isoformat()
+
+
+def _weighted_choice(pool: dict[int, tuple], cooldown_counts: dict[int, int]) -> int:
+    """
+    Pick one user_id from *pool* using same-day cooldown weights.
+
+    Weight formula: 1 / (1 + picks_today)
+      0 picks today → weight 1.0  (full odds)
+      1 pick today  → weight 0.5  (half odds)
+      2 picks today → weight 0.33
+      ...never zero, resets at midnight in guild timezone.
+
+    Without cooldown (empty dict) all weights are 1.0, equivalent to random.choice.
+    """
+    uids    = list(pool.keys())
+    weights = [1 / (1 + cooldown_counts.get(uid, 0)) for uid in uids]
+
+    # Log any users whose weight was reduced
+    reduced = {
+        pool[uid][1]: f"{1/(1+cooldown_counts[uid]):.2f} ({cooldown_counts[uid]} picks today)"
+        for uid in uids if cooldown_counts.get(uid, 0) > 0
+    }
+    if reduced:
+        log.info("cooldown weights applied: %s", reduced)
+
+    return random.choices(uids, weights=weights, k=1)[0]
+
+
+# ── History helpers (two-stage fair sampling + optional cooldown) ────────────
 #
 # Stage 1 — per-user reservoir (Algorithm R, k=1): every user ends up with
-#            one randomly selected item from their own submissions.
-# Stage 2 — pick one user uniformly from the contributor pool.
+#            one randomly chosen item from their own submissions.
+# Stage 2 — weighted user selection:
+#            weight = 1 / (1 + picks_today_for_category)
+#            If cooldown is disabled, all weights are 1.0 (uniform).
 #
-# Result: every contributor has equal 1/U probability (U = unique contributors)
-# regardless of submission count.  Memory: O(U), not O(total messages).
-# Returns (item, display_name, user_id) — user_id needed for pick logging.
+# Returns (item, display_name, user_id).
 
-async def get_random_quote(channel) -> tuple[str | None, str | None, int | None]:
+async def get_random_quote(
+    channel,
+    cooldown_counts: dict[int, int] | None = None,
+) -> tuple[str | None, str | None, int | None]:
     if channel is None:
         return None, None, None
-    # pool: user_id -> (chosen_line, display_name, count)
     pool: dict[int, tuple[str, str, int]] = {}
     scanned = 0
     async for msg in channel.history(limit=None, oldest_first=False):
@@ -63,16 +100,16 @@ async def get_random_quote(channel) -> tuple[str | None, str | None, int | None]
             stripped = line.strip()
             if not stripped or stripped.startswith("!"):
                 continue
-            cur_line, name, count = pool.get(uid, (None, msg.author.display_name, 0))
+            cur, name, count = pool.get(uid, (None, msg.author.display_name, 0))
             count += 1
             if random.randint(1, count) == 1:
                 pool[uid] = (stripped, msg.author.display_name, count)
             else:
-                pool[uid] = (cur_line, name, count)
+                pool[uid] = (cur, name, count)
     if not pool:
         log.info("[quote] scanned %d messages → 0 contributors", scanned)
         return None, None, None
-    chosen_uid = random.choice(list(pool.keys()))
+    chosen_uid = _weighted_choice(pool, cooldown_counts or {})
     item, name, count = pool[chosen_uid]
     log.info(
         "[quote] scanned %d messages → %d contributors → picked %r from %s (%d submissions)",
@@ -81,7 +118,10 @@ async def get_random_quote(channel) -> tuple[str | None, str | None, int | None]
     return item, name, chosen_uid
 
 
-async def get_random_icon(channel) -> tuple[str | None, str | None, int | None]:
+async def get_random_icon(
+    channel,
+    cooldown_counts: dict[int, int] | None = None,
+) -> tuple[str | None, str | None, int | None]:
     if channel is None:
         return None, None, None
     pool: dict[int, tuple[str, str, int]] = {}
@@ -94,16 +134,16 @@ async def get_random_icon(channel) -> tuple[str | None, str | None, int | None]:
         for att in msg.attachments:
             if not (att.content_type and att.content_type.startswith("image")):
                 continue
-            cur_url, name, count = pool.get(uid, (None, msg.author.display_name, 0))
+            cur, name, count = pool.get(uid, (None, msg.author.display_name, 0))
             count += 1
             if random.randint(1, count) == 1:
                 pool[uid] = (att.url, msg.author.display_name, count)
             else:
-                pool[uid] = (cur_url, name, count)
+                pool[uid] = (cur, name, count)
     if not pool:
         log.info("[icon] scanned %d messages → 0 contributors", scanned)
         return None, None, None
-    chosen_uid = random.choice(list(pool.keys()))
+    chosen_uid = _weighted_choice(pool, cooldown_counts or {})
     url, name, count = pool[chosen_uid]
     log.info(
         "[icon] scanned %d messages → %d contributors → picked image from %s (%d submissions)",
@@ -112,7 +152,10 @@ async def get_random_icon(channel) -> tuple[str | None, str | None, int | None]:
     return url, name, chosen_uid
 
 
-async def get_random_song(channel) -> tuple[str | None, str | None, int | None]:
+async def get_random_song(
+    channel,
+    cooldown_counts: dict[int, int] | None = None,
+) -> tuple[str | None, str | None, int | None]:
     if channel is None:
         return None, None, None
     pool: dict[int, tuple[str, str, int]] = {}
@@ -126,16 +169,16 @@ async def get_random_song(channel) -> tuple[str | None, str | None, int | None]:
             stripped = line.strip()
             if not stripped or not is_music_link(stripped):
                 continue
-            cur_link, name, count = pool.get(uid, (None, msg.author.display_name, 0))
+            cur, name, count = pool.get(uid, (None, msg.author.display_name, 0))
             count += 1
             if random.randint(1, count) == 1:
                 pool[uid] = (stripped, msg.author.display_name, count)
             else:
-                pool[uid] = (cur_link, name, count)
+                pool[uid] = (cur, name, count)
     if not pool:
         log.info("[song] scanned %d messages → 0 contributors", scanned)
         return None, None, None
-    chosen_uid = random.choice(list(pool.keys()))
+    chosen_uid = _weighted_choice(pool, cooldown_counts or {})
     link, name, count = pool[chosen_uid]
     log.info(
         "[song] scanned %d messages → %d contributors → picked %r from %s (%d submissions)",
@@ -147,10 +190,6 @@ async def get_random_song(channel) -> tuple[str | None, str | None, int | None]:
 # ── Contribution scanner (used by !mystats and !contributors) ────────────────
 
 async def scan_contributions(channel, category: str) -> dict[int, tuple[str, int]]:
-    """
-    Scan *channel* and return {user_id: (display_name, count)} for *category*.
-    category must be 'quote', 'icon', or 'song'.
-    """
     if channel is None:
         return {}
     counts: dict[int, tuple[str, int]] = {}
@@ -181,13 +220,11 @@ async def scan_contributions(channel, category: str) -> dict[int, tuple[str, int
 
 
 async def build_mystats(guild_id: int, client: discord.Client, user_id: int, display_name: str) -> str:
-    """Return a formatted stats string for !mystats."""
     cfg = get_config(guild_id)
     quote_ch = client.get_channel(cfg["quote_channel"])
     icon_ch  = client.get_channel(cfg["icon_channel"])
     music_ch = client.get_channel(cfg["music_channel"])
 
-    # Scan all three channels concurrently
     q_counts, i_counts, s_counts = await asyncio.gather(
         scan_contributions(quote_ch, "quote"),
         scan_contributions(icon_ch,  "icon"),
@@ -212,7 +249,6 @@ async def build_mystats(guild_id: int, client: discord.Client, user_id: int, dis
 
 
 async def build_contributors(guild_id: int, client: discord.Client, category: str) -> str:
-    """Return a formatted contributor table string for !contributors."""
     cfg = get_config(guild_id)
     ch_map = {
         "quote": client.get_channel(cfg["quote_channel"]),
@@ -243,19 +279,29 @@ async def process_rename(
     override_post_channel=None,
     preview: bool = False,
 ) -> None:
-    cfg = get_config(guild_id)
-    quote_channel = client.get_channel(cfg["quote_channel"])
-    icon_channel  = client.get_channel(cfg["icon_channel"])
-    post_channel  = client.get_channel(cfg["post_channel"])
-    guild         = client.get_guild(guild_id)
-
+    cfg   = get_config(guild_id)
+    guild = client.get_guild(guild_id)
     if not guild:
         log.warning("[%s] Guild not found — skipping rename.", guild_id)
         return
 
+    # Fetch today's cooldown counts per category if cooldown is enabled.
+    # preview runs bypass cooldown so admins see unweighted results.
+    if cfg["enable_cooldown"] and not preview:
+        tz       = _guild_tz(cfg)
+        since    = _today_since_utc(tz)
+        q_cd     = get_today_pick_counts(guild_id, "quote", since)
+        i_cd     = get_today_pick_counts(guild_id, "icon",  since)
+    else:
+        q_cd = i_cd = {}
+
+    quote_channel = client.get_channel(cfg["quote_channel"])
+    icon_channel  = client.get_channel(cfg["icon_channel"])
+    post_channel  = client.get_channel(cfg["post_channel"])
+
     (quote, quote_user, quote_uid), (image_url, icon_user, icon_uid) = await asyncio.gather(
-        get_random_quote(quote_channel),
-        get_random_icon(icon_channel),
+        get_random_quote(quote_channel, cooldown_counts=q_cd),
+        get_random_icon( icon_channel,  cooldown_counts=i_cd),
     )
 
     if not quote or not image_url:
@@ -277,7 +323,6 @@ async def process_rename(
             log.info('[%s] Server renamed to: "%s"', guild_id, quote)
         except discord.HTTPException as e:
             log.error("[%s] Failed to rename guild: %s", guild_id, e)
-        # Log picks only on real runs, not previews
         if quote_uid:
             log_pick(guild_id, quote_uid, quote_user or "Unknown", "quote", quote)
         if icon_uid:
@@ -293,7 +338,6 @@ async def process_rename(
         return
 
     if preview:
-        # Preview: post only to the invoking channel with a header
         if override_post_channel:
             image_file.seek(0)
             try:
@@ -333,7 +377,7 @@ async def process_daily_song(
     if not preview and _is_song_searching.get(guild_id):
         log.warning("[%s] Song search already in progress — skipping.", guild_id)
         cfg = get_config(guild_id)
-        ch = override_post_channel or client.get_channel(cfg["song_post_channel"])
+        ch  = override_post_channel or client.get_channel(cfg["song_post_channel"])
         if ch:
             await ch.send("⚠️ Song search is already running. Please wait for it to finish.")
         return
@@ -342,6 +386,14 @@ async def process_daily_song(
         _is_song_searching[guild_id] = True
     try:
         cfg = get_config(guild_id)
+
+        if cfg["enable_cooldown"] and not preview:
+            tz    = _guild_tz(cfg)
+            since = _today_since_utc(tz)
+            s_cd  = get_today_pick_counts(guild_id, "song", since)
+        else:
+            s_cd = {}
+
         music_channel = client.get_channel(cfg["music_channel"])
         post_channel  = override_post_channel or client.get_channel(cfg["song_post_channel"])
 
@@ -352,7 +404,7 @@ async def process_daily_song(
             log.error("[%s] Song post channel not configured or not found.", guild_id)
             return
 
-        song, user, user_id = await get_random_song(music_channel)
+        song, user, user_id = await get_random_song(music_channel, cooldown_counts=s_cd)
         if not song:
             log.warning("[%s] No valid music link found in music channel.", guild_id)
             await post_channel.send("⚠️ No valid music link found in music channel.")
@@ -372,11 +424,6 @@ async def process_daily_song(
 
 
 # ── Scheduling (per-guild times and timezones) ───────────────────────────────
-#
-# Instead of two global sleep loops, a single loop wakes every 60 seconds
-# and checks each guild's configured time in its own timezone.
-# last_quote_date / last_song_date (stored as YYYY-MM-DD in the guild's tz)
-# prevent double-firing if the bot restarts mid-day.
 
 async def scheduler_loop(client: discord.Client) -> None:
     await client.wait_until_ready()
@@ -388,8 +435,8 @@ async def scheduler_loop(client: discord.Client) -> None:
             cfg  = get_config(guild.id)
             tz   = _guild_tz(cfg)
             now  = now_utc.astimezone(tz)
-            today     = now.strftime("%Y-%m-%d")
-            cur_time  = now.strftime("%H:%M")
+            today    = now.strftime("%Y-%m-%d")
+            cur_time = now.strftime("%H:%M")
 
             if cfg["enable_daily_quote"]:
                 scheduled = _normalize_time(cfg["quote_time"] or "04:00")
