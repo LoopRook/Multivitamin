@@ -5,6 +5,10 @@ import discord
 import pytz
 
 from db_utils import init_db, set_config, show_config, get_config
+from bracket import (
+    start_bracket, check_bracket_advancement,
+    get_bracket_status_text, validate_emoji,
+)
 from bot_features import (
     process_rename,
     process_daily_song,
@@ -45,12 +49,14 @@ _CHANNEL_SETTERS: dict[str, tuple[str, str]] = {
     "!setpostchannel":     ("post_channel",      "✅ This channel set as Post Channel."),
     "!setmusicchannel":    ("music_channel",     "✅ This channel set as Music Channel."),
     "!setsongpostchannel": ("song_post_channel", "✅ This channel set as Song Post Channel."),
+    "!setbracketchannel":  ("bracket_channel",   "✅ This channel set as Bracket Channel."),
 }
 
 _FEATURE_MAP: dict[str, tuple[str, str]] = {
     "quote":    ("enable_daily_quote", "Daily Quote"),
     "song":     ("enable_daily_song",  "Daily Song"),
     "cooldown": ("enable_cooldown",    "Cooldown"),
+    "voting":   ("enable_voting",      "Voting"),
 }
 
 _SETUP_TEXT = (
@@ -64,7 +70,14 @@ _SETUP_TEXT = (
     "   `!setscheduletime quote 8:00` — set daily quote time\n"
     "   `!setscheduletime song 12:00` — set daily song time\n\n"
     "**Other:** `!showconfig` · `!preview rename` · `!preview song`\n"
-    "   `!contributors [quote|icon|song]` · `!mystats`"
+    "   `!contributors [quote|icon|song]` · `!mystats`\n\n"
+    "**Voting & Bracket:**\n"
+    "   `!enablefeature voting` — start tracking renames for bracket seeding\n"
+    "   `!setvoteemoji <emoji>` — emoji added to each rename post\n"
+    "   `!setbracketemoji <a> <b>` — matchup vote emojis (default 1️⃣ 2️⃣)\n"
+    "   `!setbracketchannel` — run in your bracket channel\n"
+    "   `!setbracketsize <4|8|16|32>` · `!setbracketvotingtime <hours>`\n"
+    "   `!startbracket [year]` · `!bracketstatus`"
 )
 
 _NO_PERM = "⚠️ You don't have permission to use this command."
@@ -124,10 +137,17 @@ async def on_message(message: discord.Message):
         if arg in _FEATURE_MAP:
             db_field, label = _FEATURE_MAP[arg]
             set_config(gid, db_field, 1 if enabling else 0)
+            # When voting is first enabled, record the timestamp so the bracket
+            # knows which rename posts to include (only posts after this date).
+            if arg == "voting" and enabling:
+                cfg_now = get_config(gid)
+                if not cfg_now["voting_enabled_at"]:
+                    from datetime import datetime, timezone
+                    set_config(gid, "voting_enabled_at", datetime.now(timezone.utc).isoformat())
             verb = "enabled" if enabling else "disabled"
             await message.channel.send(f"✅ {label} feature {verb}.")
         else:
-            await message.channel.send(f'⚠️ Unknown feature "{arg}". Use `quote`, `song`, or `cooldown`.')
+            await message.channel.send(f'⚠️ Unknown feature "{arg}". Use `quote`, `song`, `cooldown`, or `voting`.')
         return
 
     # ── Set timezone (admin) ─────────────────────────────────────────────
