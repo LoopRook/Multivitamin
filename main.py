@@ -8,6 +8,7 @@ from db_utils import init_db, set_config, show_config, get_config, cancel_bracke
 from bracket import (
     start_bracket, start_test_bracket,
     check_bracket_advancement, get_bracket_status_text,
+    force_bracket_advance,
 )
 from bot_features import (
     process_rename,
