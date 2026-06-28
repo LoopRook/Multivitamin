@@ -48,8 +48,9 @@ _CHANNEL_SETTERS: dict[str, tuple[str, str]] = {
 }
 
 _FEATURE_MAP: dict[str, tuple[str, str]] = {
-    "quote": ("enable_daily_quote", "Daily Quote"),
-    "song":  ("enable_daily_song",  "Daily Song"),
+    "quote":    ("enable_daily_quote", "Daily Quote"),
+    "song":     ("enable_daily_song",  "Daily Song"),
+    "cooldown": ("enable_cooldown",    "Cooldown"),
 }
 
 _SETUP_TEXT = (
@@ -126,7 +127,7 @@ async def on_message(message: discord.Message):
             verb = "enabled" if enabling else "disabled"
             await message.channel.send(f"✅ {label} feature {verb}.")
         else:
-            await message.channel.send(f'⚠️ Unknown feature "{arg}". Use `quote` or `song`.')
+            await message.channel.send(f'⚠️ Unknown feature "{arg}". Use `quote`, `song`, or `cooldown`.')
         return
 
     # ── Set timezone (admin) ─────────────────────────────────────────────
