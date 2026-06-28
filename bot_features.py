@@ -8,7 +8,7 @@ import aiohttp
 import discord
 import pytz
 
-from db_utils import get_config, set_config, log_pick, get_user_last_picks, get_today_pick_counts
+from db_utils import get_config, set_config, log_pick, get_user_last_picks, get_today_pick_counts, store_rename_post
 from image_utils import generate_card, truncate_to_100_chars
 
 log = logging.getLogger(__name__)
@@ -357,12 +357,27 @@ async def process_rename(
     ):
         channels_to_post.append(post_channel)
 
+    vote_emoji   = cfg["vote_emoji"] or "👍"
+    post_chan_id = cfg["post_channel"]
+
     for channel in channels_to_post:
         image_file.seek(0)
         try:
-            await channel.send(file=discord.File(fp=image_file, filename="update.png"))
+            sent = await channel.send(file=discord.File(fp=image_file, filename="update.png"))
         except discord.HTTPException as e:
             log.error("[%s] Failed to post card to channel %s: %s", guild_id, channel.id, e)
+            continue
+
+        # Voting: add reaction and track the post for bracket seeding.
+        # We track the post_channel message (the "official" daily post).
+        # If post_channel isn't configured, fall back to whatever was sent.
+        is_official = (post_chan_id and channel.id == post_chan_id) or (not post_chan_id)
+        if cfg["enable_voting"] and is_official:
+            try:
+                await sent.add_reaction(vote_emoji)
+            except discord.HTTPException as e:
+                log.warning("[%s] Could not add vote reaction: %s", guild_id, e)
+            store_rename_post(guild_id, sent.id, sent.channel.id, quote, quote_user, quote_uid)
 
 
 _is_song_searching: dict[int, bool] = {}
@@ -449,3 +464,7 @@ async def scheduler_loop(client: discord.Client) -> None:
                 if cur_time == scheduled and cfg["last_song_date"] != today:
                     set_config(guild.id, "last_song_date", today)
                     await process_daily_song(guild.id, client)
+
+            # Check for bracket matchups that need tallying/advancing
+            from bracket import check_bracket_advancement
+            await check_bracket_advancement(guild.id, client)
