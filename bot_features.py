@@ -187,6 +187,33 @@ async def get_random_song(
     return link, name, chosen_uid
 
 
+
+
+async def get_contributor_quotes(channel) -> dict[int, tuple[str, str]]:
+    """
+    Scan *channel* and return {user_id: (quote, display_name)}.
+    One randomly selected quote per contributor, using the same per-user
+    reservoir sampling as get_random_quote.  Used by !testbracket.
+    """
+    if channel is None:
+        return {}
+    pool: dict[int, tuple[str, str, int]] = {}
+    async for msg in channel.history(limit=None, oldest_first=False):
+        if msg.author.bot:
+            continue
+        uid = msg.author.id
+        for line in msg.content.strip().splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("!"):
+                continue
+            cur, name, count = pool.get(uid, (None, msg.author.display_name, 0))
+            count += 1
+            if random.randint(1, count) == 1:
+                pool[uid] = (stripped, msg.author.display_name, count)
+            else:
+                pool[uid] = (cur, name, count)
+    return {uid: (quote, name) for uid, (quote, name, _) in pool.items()}
+
 # ── Contribution scanner (used by !mystats and !contributors) ────────────────
 
 async def scan_contributions(channel, category: str) -> dict[int, tuple[str, int]]:

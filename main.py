@@ -1,14 +1,13 @@
 import logging
 import os
+from datetime import datetime, timezone
 
 import discord
 import pytz
 
-from db_utils import init_db, set_config, show_config, get_config, cancel_bracket, cancel_bracket
-from bracket import (
-    start_bracket, start_test_bracket,
-    check_bracket_advancement, get_bracket_status_text,
-    force_bracket_advance,
+from db_utils import (
+    init_db, set_config, show_config, get_config,
+    cancel_bracket, get_active_bracket,
 )
 from bot_features import (
     process_rename,
@@ -17,8 +16,15 @@ from bot_features import (
     build_mystats,
     build_contributors,
 )
+from bracket import (
+    start_bracket,
+    start_test_bracket,
+    check_bracket_advancement,
+    get_bracket_status_text,
+    force_bracket_advance,
+)
 
-# ── Logging ──────────────────────────────────────────────────────────────────
+# ── Logging ───────────────────────────────────────────────────────────────────
 
 logging.basicConfig(
     level=logging.INFO,
@@ -30,11 +36,11 @@ logging.getLogger("discord.client").setLevel(logging.ERROR)
 
 log = logging.getLogger(__name__)
 
-# ── Config ───────────────────────────────────────────────────────────────────
+# ── Config ────────────────────────────────────────────────────────────────────
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 
-# ── Discord client ───────────────────────────────────────────────────────────
+# ── Client ────────────────────────────────────────────────────────────────────
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -42,7 +48,7 @@ intents.guilds = True
 intents.messages = True
 client = discord.Client(intents=intents)
 
-# ── Command tables ───────────────────────────────────────────────────────────
+# ── Command tables ────────────────────────────────────────────────────────────
 
 _CHANNEL_SETTERS: dict[str, tuple[str, str]] = {
     "!setquotechannel":    ("quote_channel",     "✅ This channel set as Quote Channel."),
@@ -62,45 +68,43 @@ _FEATURE_MAP: dict[str, tuple[str, str]] = {
 
 _SETUP_TEXT = (
     "**Bot Setup Guide:**\n"
-    "**Channel setup** (run each command in the target channel):\n"
+    "**Channels** (run each in the target channel):\n"
     "   `!setquotechannel` · `!seticonchannel` · `!setpostchannel`\n"
-    "   `!setmusicchannel` · `!setsongpostchannel`\n\n"
-    "**Features:** `!enablefeature [quote|song]` / `!disablefeature [quote|song]`\n\n"
+    "   `!setmusicchannel` · `!setsongpostchannel` · `!setbracketchannel`\n\n"
+    "**Features:** `!enablefeature [quote|song|cooldown|voting]`\n"
+    "             `!disablefeature [quote|song|cooldown|voting]`\n\n"
     "**Scheduling:**\n"
-    "   `!settimezone <tz>` — e.g. `US/Eastern`, `Europe/London`, `Asia/Tokyo`\n"
-    "   `!setscheduletime quote 8:00` — set daily quote time\n"
-    "   `!setscheduletime song 12:00` — set daily song time\n\n"
+    "   `!settimezone <tz>` — e.g. `US/Eastern`, `Europe/London`\n"
+    "   `!setscheduletime quote 8:00`\n"
+    "   `!setscheduletime song 12:00`\n\n"
+    "**Bracket:**\n"
+    "   `!setbracketsize <4|8|16|32>`\n"
+    "   `!setbracketvotingtime <hours>`\n"
+    "   `!startbracket [year]` · `!testbracket`\n"
+    "   `!forcebracketadvance` · `!bracketstatus` · `!cancelbracket`\n\n"
     "**Other:** `!showconfig` · `!preview rename` · `!preview song`\n"
-    "   `!contributors [quote|icon|song]` · `!mystats`\n\n"
-    "**Voting & Bracket:**\n"
-    "   `!enablefeature voting` — start tracking rename posts (any reaction counts as a vote)\n"
-    "   `!setbracketchannel` — run in your bracket channel\n"
-    "   `!setbracketsize <4|8|16|32>` · `!setbracketvotingtime <hours>`\n"
-    "   `!startbracket [year]` — seeds bracket by reaction count, uses Discord polls for matchups\n"
-    "   `!testbracket` — test the full bracket flow using quote channel entries\n"
-    "   `!forcebracketadvance` · `!cancelbracket` · `!bracketstatus`"
+    "   `!contributors [quote|icon|song]` · `!mystats`"
 )
 
 _NO_PERM = "⚠️ You don't have permission to use this command."
 
-# ── Scheduler task tracking ──────────────────────────────────────────────────
-# on_ready fires on every reconnect. We cancel the old task before spawning
-# a new one to prevent duplicate schedulers accumulating over time.
+# ── Scheduler dedup ───────────────────────────────────────────────────────────
 
 _scheduler_task: list = []
 
 
+# ── Events ────────────────────────────────────────────────────────────────────
+
 @client.event
 async def on_ready():
+    global _scheduler_task
     log.info("✅ Logged in as %s", client.user)
     init_db()
-
     for task in _scheduler_task:
         if not task.done():
             task.cancel()
             log.info("🔄 Cancelled stale scheduler task.")
     _scheduler_task.clear()
-
     task = client.loop.create_task(scheduler_loop(client), name="scheduler_loop")
     _scheduler_task.append(task)
     log.info("⏰ Scheduler started.")
@@ -118,7 +122,7 @@ async def on_message(message: discord.Message):
     gid           = message.guild.id
     is_admin      = message.author.guild_permissions.manage_guild
 
-    # ── Channel setters (admin) ──────────────────────────────────────────
+    # ── Channel setters ───────────────────────────────────────────────────
     for cmd, (field, reply) in _CHANNEL_SETTERS.items():
         if content_lower.startswith(cmd):
             if not is_admin:
@@ -128,7 +132,7 @@ async def on_message(message: discord.Message):
             await message.channel.send(reply)
             return
 
-    # ── Enable / disable feature (admin) ────────────────────────────────
+    # ── Enable / disable feature ──────────────────────────────────────────
     if content_lower.startswith("!enablefeature ") or content_lower.startswith("!disablefeature "):
         if not is_admin:
             await message.channel.send(_NO_PERM)
@@ -138,12 +142,9 @@ async def on_message(message: discord.Message):
         if arg in _FEATURE_MAP:
             db_field, label = _FEATURE_MAP[arg]
             set_config(gid, db_field, 1 if enabling else 0)
-            # When voting is first enabled, record the timestamp so the bracket
-            # knows which rename posts to include (only posts after this date).
             if arg == "voting" and enabling:
                 cfg_now = get_config(gid)
                 if not cfg_now["voting_enabled_at"]:
-                    from datetime import datetime, timezone
                     set_config(gid, "voting_enabled_at", datetime.now(timezone.utc).isoformat())
             verb = "enabled" if enabling else "disabled"
             await message.channel.send(f"✅ {label} feature {verb}.")
@@ -151,7 +152,7 @@ async def on_message(message: discord.Message):
             await message.channel.send(f'⚠️ Unknown feature "{arg}". Use `quote`, `song`, `cooldown`, or `voting`.')
         return
 
-    # ── Set timezone (admin) ─────────────────────────────────────────────
+    # ── Set timezone ──────────────────────────────────────────────────────
     if content_lower.startswith("!settimezone "):
         if not is_admin:
             await message.channel.send(_NO_PERM)
@@ -162,7 +163,7 @@ async def on_message(message: discord.Message):
         except pytz.exceptions.UnknownTimeZoneError:
             await message.channel.send(
                 f'⚠️ Unknown timezone `{tz_str}`.\n'
-                f'Use a standard tz name, e.g. `US/Eastern`, `Europe/London`, `Asia/Tokyo`.\n'
+                f'Use a tz database name, e.g. `US/Eastern`, `Europe/London`, `Asia/Tokyo`.\n'
                 f'Full list: <https://en.wikipedia.org/wiki/List_of_tz_database_time_zones>'
             )
             return
@@ -170,7 +171,7 @@ async def on_message(message: discord.Message):
         await message.channel.send(f"✅ Timezone set to `{tz_str}`.")
         return
 
-    # ── Set schedule time (admin) ────────────────────────────────────────
+    # ── Set schedule time ─────────────────────────────────────────────────
     if content_lower.startswith("!setscheduletime "):
         if not is_admin:
             await message.channel.send(_NO_PERM)
@@ -197,7 +198,7 @@ async def on_message(message: discord.Message):
         await message.channel.send(f"✅ {which.title()} time set to `{time_str}` ({tz_name}).")
         return
 
-    # ── Show config (admin) ──────────────────────────────────────────────
+    # ── Show config ───────────────────────────────────────────────────────
     if content_lower.startswith("!showconfig"):
         if not is_admin:
             await message.channel.send(_NO_PERM)
@@ -205,7 +206,7 @@ async def on_message(message: discord.Message):
         await message.channel.send(f"```\n{show_config(gid)}\n```")
         return
 
-    # ── Setup help (admin) ───────────────────────────────────────────────
+    # ── Setup help ────────────────────────────────────────────────────────
     if content_lower.startswith("!setup"):
         if not is_admin:
             await message.channel.send(_NO_PERM)
@@ -213,7 +214,7 @@ async def on_message(message: discord.Message):
         await message.channel.send(_SETUP_TEXT)
         return
 
-    # ── Preview (admin) ──────────────────────────────────────────────────
+    # ── Preview ───────────────────────────────────────────────────────────
     if content_lower.startswith("!preview "):
         if not is_admin:
             await message.channel.send(_NO_PERM)
@@ -229,7 +230,7 @@ async def on_message(message: discord.Message):
             await message.channel.send('⚠️ Usage: `!preview rename` or `!preview song`')
         return
 
-    # ── Contributors (admin) ─────────────────────────────────────────────
+    # ── Contributors ──────────────────────────────────────────────────────
     if content_lower.startswith("!contributors"):
         if not is_admin:
             await message.channel.send(_NO_PERM)
@@ -238,20 +239,110 @@ async def on_message(message: discord.Message):
         if len(parts) < 2 or parts[1] not in ("quote", "icon", "song"):
             await message.channel.send("⚠️ Usage: `!contributors [quote|icon|song]`")
             return
-        category = parts[1]
-        status = await message.channel.send(f"⏳ Scanning {category} channel...")
-        result = await build_contributors(gid, client, category)
+        status = await message.channel.send(f"⏳ Scanning {parts[1]} channel...")
+        result = await build_contributors(gid, client, parts[1])
         await status.edit(content=result)
         return
 
-    # ── My stats (anyone) ────────────────────────────────────────────────
+    # ── Set bracket size ──────────────────────────────────────────────────
+    if content_lower.startswith("!setbracketsize "):
+        if not is_admin:
+            await message.channel.send(_NO_PERM)
+            return
+        parts = content.split()
+        if len(parts) < 2:
+            await message.channel.send("⚠️ Usage: `!setbracketsize <4|8|16|32>`")
+            return
+        try:
+            import math
+            size = int(parts[1])
+            assert size >= 4 and math.log2(size).is_integer()
+        except Exception:
+            await message.channel.send("⚠️ Bracket size must be a power of 2: `4`, `8`, `16`, or `32`.")
+            return
+        set_config(gid, "bracket_size", size)
+        await message.channel.send(f"✅ Bracket size set to **{size}**.")
+        return
+
+    # ── Set bracket voting time ───────────────────────────────────────────
+    if content_lower.startswith("!setbracketvotingtime "):
+        if not is_admin:
+            await message.channel.send(_NO_PERM)
+            return
+        parts = content.split()
+        if len(parts) < 2:
+            await message.channel.send("⚠️ Usage: `!setbracketvotingtime <hours>` (e.g. `24`)")
+            return
+        try:
+            hours = int(parts[1])
+            assert 1 <= hours <= 168
+        except Exception:
+            await message.channel.send("⚠️ Hours must be a whole number between 1 and 168.")
+            return
+        set_config(gid, "bracket_voting_hours", hours)
+        await message.channel.send(f"✅ Bracket voting window set to **{hours} hour(s)** per matchup.")
+        return
+
+    # ── Start real bracket ────────────────────────────────────────────────
+    if content_lower.startswith("!startbracket"):
+        if not is_admin:
+            await message.channel.send(_NO_PERM)
+            return
+        parts = content.split()
+        year  = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else datetime.now().year
+        await message.channel.send(f"⏳ Seeding {year} bracket...")
+        success, msg = await start_bracket(gid, client, year)
+        await message.channel.send(msg)
+        return
+
+    # ── Test bracket ──────────────────────────────────────────────────────
+    if content_lower.startswith("!testbracket"):
+        if not is_admin:
+            await message.channel.send(_NO_PERM)
+            return
+        await message.channel.send("⏳ Setting up test bracket...")
+        success, msg = await start_test_bracket(gid, client)
+        await message.channel.send(msg)
+        return
+
+    # ── Force bracket advance ─────────────────────────────────────────────
+    if content_lower.startswith("!forcebracketadvance"):
+        if not is_admin:
+            await message.channel.send(_NO_PERM)
+            return
+        success, msg = await force_bracket_advance(gid, client)
+        await message.channel.send(msg)
+        return
+
+    # ── Bracket status ────────────────────────────────────────────────────
+    if content_lower.startswith("!bracketstatus"):
+        if not is_admin:
+            await message.channel.send(_NO_PERM)
+            return
+        await message.channel.send(get_bracket_status_text(gid))
+        return
+
+    # ── Cancel bracket ────────────────────────────────────────────────────
+    if content_lower.startswith("!cancelbracket"):
+        if not is_admin:
+            await message.channel.send(_NO_PERM)
+            return
+        bracket = get_active_bracket(gid)
+        if not bracket:
+            await message.channel.send("⚠️ No active bracket to cancel.")
+            return
+        cancel_bracket(bracket["id"])
+        await message.channel.send("🗑️ Active bracket cancelled and removed.")
+        return
+
+    # ── My stats ──────────────────────────────────────────────────────────
     if content_lower.startswith("!mystats"):
         status = await message.channel.send("⏳ Scanning channels for your stats...")
         result = await build_mystats(gid, client, message.author.id, message.author.display_name)
         await status.edit(content=result)
         return
 
-    # ── Public commands ──────────────────────────────────────────────────
+    # ── Manual rename ─────────────────────────────────────────────────────
     if content_lower.startswith("!rename"):
         cfg = get_config(gid)
         if cfg["enable_daily_quote"]:
@@ -260,6 +351,7 @@ async def on_message(message: discord.Message):
             await message.channel.send("⚠️ Daily Quote feature is disabled for this server.")
         return
 
+    # ── Manual song ───────────────────────────────────────────────────────
     if content_lower.startswith("!song"):
         cfg = get_config(gid)
         if cfg["enable_daily_song"]:
@@ -269,7 +361,7 @@ async def on_message(message: discord.Message):
         return
 
 
-# ── Entry point ──────────────────────────────────────────────────────────────
+# ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     if not TOKEN:
