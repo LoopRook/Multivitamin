@@ -242,6 +242,37 @@ async def _post_matchup(
 
 
 
+async def _post_round(
+    bracket_id: int,
+    round_num: int,
+    matchups: list[tuple[int, int, int]],
+    channel: discord.TextChannel,
+    cfg,
+    tz: pytz.BaseTzInfo,
+    client: discord.Client,
+    rename_posts: list,
+) -> None:
+    """Post all matchups for a round and record their message IDs and end times."""
+    voting_hours = cfg["bracket_voting_hours"] or 24
+    actual_size  = 2 ** math.ceil(math.log2(max(len(matchups) * 2, 2)))
+    total_rounds = int(math.log2(actual_size))
+    label        = _round_label(round_num, total_rounds)
+    ends_at_dt   = datetime.now(tz) + timedelta(hours=voting_hours)
+    ends_at_utc  = ends_at_dt.astimezone(pytz.utc).isoformat()
+
+    for match_num, (matchup_id, a_id, b_id) in enumerate(matchups):
+        entry_a = get_bracket_entry(a_id)
+        entry_b = get_bracket_entry(b_id)
+        poll_msg = await _post_matchup(
+            channel, matchup_id, entry_a, entry_b,
+            cfg, label, match_num, len(matchups), ends_at_dt,
+            client, rename_posts,
+        )
+        if poll_msg:
+            update_matchup_posted(matchup_id, poll_msg.id, channel.id, ends_at_utc)
+        await asyncio.sleep(1.5)
+
+
 async def start_test_bracket(guild_id: int, client: discord.Client) -> tuple[bool, str]:
     """
     Seed a bracket from the quote channel using reservoir sampling (one quote
