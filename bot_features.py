@@ -298,6 +298,41 @@ async def build_contributors(guild_id: int, client: discord.Client, category: st
     return "\n".join(lines)
 
 
+async def build_config(guild_id: int, client: discord.Client) -> str:
+    """
+    Return a formatted config string with channel IDs resolved to #channel-name.
+    Falls back to the raw ID if the channel can't be found (e.g. deleted channel).
+    """
+    from db_utils import show_config
+    c = show_config(guild_id)
+
+    def ch(cid) -> str:
+        if not cid:
+            return "Not Set"
+        channel = client.get_channel(cid)
+        return f"#{channel.name}" if channel else f"{cid} (not found)"
+
+    lines = [
+        f"Guild ID:            {c['guild_id']}",
+        f"Quote Channel:       {ch(c['quote_channel'])}",
+        f"Icon Channel:        {ch(c['icon_channel'])}",
+        f"Post Channel:        {ch(c['post_channel'])}",
+        f"Music Channel:       {ch(c['music_channel'])}",
+        f"Song Post Channel:   {ch(c['song_post_channel'])}",
+        f"Bracket Channel:     {ch(c['bracket_channel'])}",
+        f"Quote Feature:       {'Enabled' if c['enable_daily_quote'] else 'Disabled'}",
+        f"Song Feature:        {'Enabled' if c['enable_daily_song']  else 'Disabled'}",
+        f"Cooldown:            {'Enabled' if c['enable_cooldown']    else 'Disabled'}",
+        f"Voting:              {'Enabled' if c['enable_voting']      else 'Disabled'}",
+        f"Bracket Size:        {c['bracket_size'] or 8}",
+        f"Bracket Vote Hours:  {c['bracket_voting_hours'] or 24}",
+        f"Timezone:            {c['timezone'] or 'US/Eastern'}",
+        f"Quote Time:          {c['quote_time'] or '4:00'}",
+        f"Song Time:           {c['song_time'] or '10:00'}",
+    ]
+    return "\n".join(lines)
+
+
 # ── Core feature logic ───────────────────────────────────────────────────────
 
 async def process_rename(

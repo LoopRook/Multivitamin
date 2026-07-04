@@ -6,7 +6,7 @@ import discord
 import pytz
 
 from db_utils import (
-    init_db, set_config, show_config, get_config,
+    init_db, set_config, get_config,
     cancel_bracket, get_active_bracket,
 )
 from bot_features import (
@@ -15,6 +15,7 @@ from bot_features import (
     scheduler_loop,
     build_mystats,
     build_contributors,
+    build_config,
 )
 from bracket import (
     start_bracket,
@@ -203,7 +204,8 @@ async def on_message(message: discord.Message):
         if not is_admin:
             await message.channel.send(_NO_PERM)
             return
-        await message.channel.send(f"```\n{show_config(gid)}\n```")
+        cfg_text = await build_config(gid, client)
+        await message.channel.send(f"```\n{cfg_text}\n```")
         return
 
     # ── Setup help ────────────────────────────────────────────────────────
