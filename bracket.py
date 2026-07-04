@@ -145,10 +145,16 @@ async def _post_matchup(
     voting_hours = cfg["bracket_voting_hours"] or 24
     ends_str     = ends_at_dt.strftime("%b %d at %I:%M %p %Z")
 
-    # Find the most recent rename post for each quote to get its image
-    async def find_image(quote: str) -> str | None:
-        # Find matching rename_posts rows, most recent first
-        matches = [p for p in rename_posts if p["quote"] == quote]
+    # Test brackets pass _test_card_urls keyed by entry id — use those directly.
+    # Real brackets look up the most recent rename post for each quote.
+    test_card_urls = cfg.get("_test_card_urls", {}) if isinstance(cfg, dict) else {}
+
+    async def find_image(entry) -> str | None:
+        # Check test card cache first
+        if entry["id"] in test_card_urls:
+            return test_card_urls[entry["id"]]
+        # Fall back to rename_posts lookup
+        matches = [p for p in rename_posts if p["quote"] == entry["quote"]]
         matches.sort(key=lambda p: p["posted_at"], reverse=True)
         for post in matches:
             url = await _get_fresh_image_url(client, post["channel_id"], post["message_id"])
@@ -157,8 +163,8 @@ async def _post_matchup(
         return None
 
     img_a, img_b = await asyncio.gather(
-        find_image(entry_a["quote"]),
-        find_image(entry_b["quote"]),
+        find_image(entry_a),
+        find_image(entry_b),
     )
 
     # Build embeds — one per option, shown side by side
@@ -297,6 +303,57 @@ async def start_test_bracket(guild_id: int, client: discord.Client) -> tuple[boo
         lines.append(f'  **#{seed}** "{quote}" — *{user}* · {score} reactions (random)')
     await bracket_channel.send("\n".join(lines))
 
+    # Generate test cards for each nominee and post them to the bracket channel.
+    # We grab a random icon from the icon channel and generate a real card so
+    # the bracket embeds look identical to a real bracket.
+    # card_urls maps entry_id -> Discord CDN attachment URL for use in matchup embeds.
+    await bracket_channel.send("⏳ Generating test cards...")
+    card_urls: dict[int, str] = {}
+
+    icon_channel = client.get_channel(cfg["icon_channel"])
+
+    async def _make_test_card(entry_id: int, quote: str, user: str) -> None:
+        from bot_features import get_random_icon
+        from image_utils import generate_card
+        import aiohttp
+        _TIMEOUT = aiohttp.ClientTimeout(total=15)
+
+        icon_url, icon_user, _ = await get_random_icon(icon_channel)
+        if not icon_url:
+            return
+        try:
+            async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
+                async with session.get(icon_url) as resp:
+                    resp.raise_for_status()
+                    icon_bytes = await resp.read()
+        except Exception as e:
+            log.warning("Test card: failed to download icon: %s", e)
+            return
+        card = await generate_card(quote, user, icon_user or "Unknown", icon_bytes)
+        if not card:
+            return
+        try:
+            sent = await bracket_channel.send(
+                content=f"*Test card for: \"{quote}\"*",
+                file=discord.File(fp=card, filename=f"test_card_{entry_id}.png"),
+            )
+            if sent.attachments:
+                card_urls[entry_id] = sent.attachments[0].url
+        except discord.HTTPException as e:
+            log.warning("Test card: failed to post card: %s", e)
+
+    for eid, (score, quote, user) in zip(entry_ids, nominees):
+        await _make_test_card(eid, quote, user)
+        await asyncio.sleep(0.5)
+
+    # Build fake rename_posts-like list so _post_matchup can find card images.
+    # We pass entry_id directly via a synthetic lookup rather than rename_posts
+    # since test entries were never stored as rename posts.
+    # Patch card_urls into bracket entries via a closure in _post_round by
+    # storing them as test_card_urls on the cfg dict temporarily.
+    cfg_with_cards = dict(cfg)
+    cfg_with_cards["_test_card_urls"] = card_urls
+
     pairs = _first_round_pairs(entry_ids)
     matchup_rows = []
     for match_num, (a_id, b_id) in enumerate(pairs):
@@ -304,7 +361,7 @@ async def start_test_bracket(guild_id: int, client: discord.Client) -> tuple[boo
         matchup_rows.append((mid, a_id, b_id))
 
     tz = _guild_tz(cfg)
-    await _post_round(bracket_id, 1, matchup_rows, bracket_channel, cfg, tz, client, [])
+    await _post_round(bracket_id, 1, matchup_rows, bracket_channel, cfg_with_cards, tz, client, [])
 
     return True, (
         "✅ Test bracket started!\n"

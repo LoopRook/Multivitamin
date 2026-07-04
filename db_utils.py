@@ -177,26 +177,9 @@ def set_config(guild_id: int, field: str, value) -> None:
         conn.commit()
 
 
-def show_config(guild_id: int) -> str:
-    c = get_config(guild_id)
-    return "\n".join([
-        f"Guild ID:            {c['guild_id']}",
-        f"Quote Channel:       {c['quote_channel']        or 'Not Set'}",
-        f"Icon Channel:        {c['icon_channel']         or 'Not Set'}",
-        f"Post Channel:        {c['post_channel']         or 'Not Set'}",
-        f"Music Channel:       {c['music_channel']        or 'Not Set'}",
-        f"Song Post Channel:   {c['song_post_channel']    or 'Not Set'}",
-        f"Bracket Channel:     {c['bracket_channel']      or 'Not Set'}",
-        f"Quote Feature:       {'Enabled' if c['enable_daily_quote'] else 'Disabled'}",
-        f"Song Feature:        {'Enabled' if c['enable_daily_song']  else 'Disabled'}",
-        f"Cooldown:            {'Enabled' if c['enable_cooldown']    else 'Disabled'}",
-        f"Voting:              {'Enabled' if c['enable_voting']      else 'Disabled'}",
-        f"Bracket Size:        {c['bracket_size']         or 8}",
-        f"Bracket Vote Hours:  {c['bracket_voting_hours'] or 24}",
-        f"Timezone:            {c['timezone']             or 'US/Eastern'}",
-        f"Quote Time:          {c['quote_time']           or '4:00'}",
-        f"Song Time:           {c['song_time']            or '10:00'}",
-    ])
+def show_config(guild_id: int) -> dict:
+    """Return raw config row as a dict for display. Channel name resolution happens in bot_features."""
+    return dict(get_config(guild_id))
 
 
 # ── picks_history ─────────────────────────────────────────────────────────────
