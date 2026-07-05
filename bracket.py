@@ -31,6 +31,15 @@ log = logging.getLogger(__name__)
 _POLL_QUESTION_LIMIT = 300
 _POLL_ANSWER_LIMIT   = 55  # Discord hard limit for poll answer text
 
+# Discord allows max 10 embeds and 10 files per message; 4 matchups = 8 of each.
+_MATCHUPS_PER_CARD_MESSAGE = 4
+
+# Test-bracket card images, generated in memory by start_test_bracket.
+# Module-level so the bytes survive across rounds (round 2+ is posted from a
+# fresh get_config() in force_bracket_advance / check_bracket_advancement).
+# bracket_id -> {entry_id -> card PNG bytes}
+_test_card_cache: dict[int, dict[int, bytes]] = {}
+
 
 def _guild_tz(cfg) -> pytz.BaseTzInfo:
     try:
@@ -126,105 +135,55 @@ async def _dramatic_coin_flip(channel: discord.TextChannel, name_a: str, name_b:
     return winner
 
 
+async def _get_card_bytes(
+    entry,
+    bracket_id: int,
+    client: discord.Client,
+    rename_posts: list,
+) -> bytes | None:
+    """
+    Card image bytes for a bracket entry.
+    Test brackets serve from _test_card_cache (populated by start_test_bracket).
+    Real brackets find the most recent matching rename post and download the
+    attachment fresh (CDN URLs expire, so the stored snapshot is never used).
+    """
+    import aiohttp
+
+    cached = _test_card_cache.get(bracket_id, {})
+    if entry["id"] in cached:
+        return cached[entry["id"]]
+
+    _TIMEOUT = aiohttp.ClientTimeout(total=15)
+    matches = [p for p in rename_posts if p["quote"] == entry["quote"]]
+    matches.sort(key=lambda p: p["posted_at"], reverse=True)
+    for post in matches:
+        url = await _get_fresh_image_url(client, post["channel_id"], post["message_id"])
+        if not url:
+            continue
+        try:
+            async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
+                async with session.get(url) as resp:
+                    resp.raise_for_status()
+                    return await resp.read()
+        except Exception as e:
+            log.warning("Could not download card image: %s", e)
+    return None
+
+
 async def _post_matchup(
     channel: discord.TextChannel,
     matchup_id: int,
     entry_a, entry_b,
-    cfg,
     round_label: str,
     match_num: int,
     total_matches: int,
-    ends_at_dt: datetime,
-    client: discord.Client,
-    rename_posts: list,
+    voting_hours: int,
 ) -> discord.Message | None:
     """
-    Post one message containing both card images (as file attachments) and two
-    embeds referencing them via attachment://, then a Discord native poll.
-    Both cards appear in a single post so users see them side by side.
-    Returns the poll message (used for vote tallying).
+    Post the Discord native poll for one matchup.  The matchup cards are shown
+    in the round's combined card message (see _post_round), so this is poll-only.
+    Returns the poll message (its ID is recorded for vote tallying).
     """
-    from io import BytesIO
-    import aiohttp
-    _TIMEOUT = aiohttp.ClientTimeout(total=15)
-
-    voting_hours = cfg["bracket_voting_hours"] or 24
-    ends_str     = ends_at_dt.strftime("%b %d at %I:%M %p %Z")
-
-    # Test brackets store card bytes keyed by entry id.
-    # Real brackets fetch the attachment from the original rename post message.
-    test_card_bytes: dict[int, bytes] = cfg.get("_test_card_bytes", {}) if isinstance(cfg, dict) else {}
-
-    async def get_card_bytes(entry) -> bytes | None:
-        # Test bracket — bytes already in memory
-        if entry["id"] in test_card_bytes:
-            return test_card_bytes[entry["id"]]
-        # Real bracket — find the most recent matching rename post and download
-        matches = [p for p in rename_posts if p["quote"] == entry["quote"]]
-        matches.sort(key=lambda p: p["posted_at"], reverse=True)
-        for post in matches:
-            url = await _get_fresh_image_url(client, post["channel_id"], post["message_id"])
-            if not url:
-                continue
-            try:
-                async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
-                    async with session.get(url) as resp:
-                        resp.raise_for_status()
-                        return await resp.read()
-            except Exception as e:
-                log.warning("Could not download card image: %s", e)
-        return None
-
-    bytes_a, bytes_b = await asyncio.gather(
-        get_card_bytes(entry_a),
-        get_card_bytes(entry_b),
-    )
-
-    # Build embeds using attachment:// so both images appear in the same message.
-    # If no image is available for an entry, the embed still shows — just no image.
-    color_a = discord.Color.blue()
-    color_b = discord.Color.red()
-
-    embed_a = discord.Embed(
-        title=f"Option A  ·  #{entry_a['seed']} seed",
-        description=(
-            f'**"{entry_a["quote"]}"**\n'
-            f'*submitted by {entry_a["quote_user"] or "Unknown"}*\n'
-            f'{entry_a["season_reactions"]} reactions this season'
-        ),
-        color=color_a,
-    )
-    embed_b = discord.Embed(
-        title=f"Option B  ·  #{entry_b['seed']} seed",
-        description=(
-            f'**"{entry_b["quote"]}"**\n'
-            f'*submitted by {entry_b["quote_user"] or "Unknown"}*\n'
-            f'{entry_b["season_reactions"]} reactions this season'
-        ),
-        color=color_b,
-    )
-
-    files = []
-    if bytes_a:
-        files.append(discord.File(BytesIO(bytes_a), filename="card_a.png"))
-        embed_a.set_image(url="attachment://card_a.png")
-    if bytes_b:
-        files.append(discord.File(BytesIO(bytes_b), filename="card_b.png"))
-        embed_b.set_image(url="attachment://card_b.png")
-
-    header = (
-        f"─────────────────────────\n"
-        f"🏆 **{round_label}** — Match {match_num + 1} of {total_matches}\n"
-        f"Voting closes **{ends_str}**"
-    )
-
-    try:
-        await channel.send(content=header, embeds=[embed_a, embed_b], files=files)
-    except discord.HTTPException as e:
-        log.error("Failed to post matchup embeds: %s", e)
-        return None
-
-    # Discord poll
     answer_a = f"A: {entry_a['quote']}"[:_POLL_ANSWER_LIMIT]
     answer_b = f"B: {entry_b['quote']}"[:_POLL_ANSWER_LIMIT]
     question = f"{round_label} — Match {match_num + 1} of {total_matches}: Which name wins?"[:_POLL_QUESTION_LIMIT]
@@ -234,12 +193,10 @@ async def _post_matchup(
     poll.add_answer(text=answer_b)
 
     try:
-        poll_msg = await channel.send(poll=poll)
-        return poll_msg
+        return await channel.send(poll=poll)
     except discord.HTTPException as e:
-        log.error("Failed to post poll: %s", e)
+        log.error("Failed to post poll for matchup %s: %s", matchup_id, e)
         return None
-
 
 
 async def _post_round(
@@ -252,21 +209,79 @@ async def _post_round(
     client: discord.Client,
     rename_posts: list,
 ) -> None:
-    """Post all matchups for a round and record their message IDs and end times."""
+    """
+    Post a round as one combined card message (all matchup cards as embeds,
+    batched to respect Discord's 10-embed/10-file limits) followed by one
+    poll message per matchup.  Poll message IDs and end times are recorded
+    for the advancement scheduler.
+    """
+    from io import BytesIO
+
     voting_hours = cfg["bracket_voting_hours"] or 24
     actual_size  = 2 ** math.ceil(math.log2(max(len(matchups) * 2, 2)))
     total_rounds = int(math.log2(actual_size))
     label        = _round_label(round_num, total_rounds)
     ends_at_dt   = datetime.now(tz) + timedelta(hours=voting_hours)
     ends_at_utc  = ends_at_dt.astimezone(pytz.utc).isoformat()
+    ends_str     = ends_at_dt.strftime("%b %d at %I:%M %p %Z")
 
+    # Collect entries and card bytes for every matchup before posting anything.
+    prepared = []  # (match_num, matchup_id, entry_a, entry_b, bytes_a, bytes_b)
     for match_num, (matchup_id, a_id, b_id) in enumerate(matchups):
         entry_a = get_bracket_entry(a_id)
         entry_b = get_bracket_entry(b_id)
+        bytes_a, bytes_b = await asyncio.gather(
+            _get_card_bytes(entry_a, bracket_id, client, rename_posts),
+            _get_card_bytes(entry_b, bracket_id, client, rename_posts),
+        )
+        prepared.append((match_num, matchup_id, entry_a, entry_b, bytes_a, bytes_b))
+
+    # Combined card message(s): every matchup's cards as labeled embeds, with
+    # the images attached to the same message via the attachment:// scheme.
+    for batch_start in range(0, len(prepared), _MATCHUPS_PER_CARD_MESSAGE):
+        batch  = prepared[batch_start:batch_start + _MATCHUPS_PER_CARD_MESSAGE]
+        embeds = []
+        files  = []
+        for match_num, _mid, entry_a, entry_b, bytes_a, bytes_b in batch:
+            for side, entry, card, color in (
+                ("A", entry_a, bytes_a, discord.Color.blue()),
+                ("B", entry_b, bytes_b, discord.Color.red()),
+            ):
+                embed = discord.Embed(
+                    title=f"Match {match_num + 1} — Option {side}  ·  #{entry['seed']} seed",
+                    description=(
+                        f'**"{entry["quote"]}"**\n'
+                        f'*submitted by {entry["quote_user"] or "Unknown"}*\n'
+                        f'{entry["season_reactions"]} reactions this season'
+                    ),
+                    color=color,
+                )
+                if card:
+                    filename = f"card_m{match_num + 1}{side.lower()}.png"
+                    files.append(discord.File(BytesIO(card), filename=filename))
+                    embed.set_image(url=f"attachment://{filename}")
+                embeds.append(embed)
+
+        if batch_start == 0:
+            header = (
+                f"─────────────────────────\n"
+                f"🏆 **{label}** — {len(matchups)} matchup(s)\n"
+                f"Voting closes **{ends_str}** — polls below!"
+            )
+        else:
+            header = f"🏆 **{label}** *(continued)*"
+
+        try:
+            await channel.send(content=header, embeds=embeds, files=files)
+        except discord.HTTPException as e:
+            log.error("Failed to post round card message: %s", e)
+        await asyncio.sleep(1.5)
+
+    # One poll per matchup, in match order.
+    for match_num, matchup_id, entry_a, entry_b, _ba, _bb in prepared:
         poll_msg = await _post_matchup(
             channel, matchup_id, entry_a, entry_b,
-            cfg, label, match_num, len(matchups), ends_at_dt,
-            client, rename_posts,
+            label, match_num, len(matchups), voting_hours,
         )
         if poll_msg:
             update_matchup_posted(matchup_id, poll_msg.id, channel.id, ends_at_utc)
@@ -351,9 +366,9 @@ async def start_test_bracket(guild_id: int, client: discord.Client) -> tuple[boo
         lines.append(f'  **#{seed}** "{quote}" — *{user}* · {score} reactions (random)')
     await bracket_channel.send("\n".join(lines))
 
-    # Generate card images for each nominee upfront and store the bytes in memory.
-    # _post_matchup will pick them up via cfg["_test_card_bytes"] and send both
-    # cards as attachments in a single matchup post (attachment:// scheme).
+    # Generate card images for each nominee upfront and store the bytes in
+    # _test_card_cache so _get_card_bytes can serve them in every round —
+    # including round 2+, which is posted from a fresh get_config().
     await bracket_channel.send("⏳ Generating test cards...")
     card_bytes_map: dict[int, bytes] = {}
 
@@ -384,8 +399,7 @@ async def start_test_bracket(guild_id: int, client: discord.Client) -> tuple[boo
     for eid, (score, quote, user) in zip(entry_ids, nominees):
         await _make_test_card(eid, quote, user)
 
-    cfg_with_cards = dict(cfg)
-    cfg_with_cards["_test_card_bytes"] = card_bytes_map
+    _test_card_cache[bracket_id] = card_bytes_map
 
     pairs = _first_round_pairs(entry_ids)
     matchup_rows = []
@@ -394,7 +408,7 @@ async def start_test_bracket(guild_id: int, client: discord.Client) -> tuple[boo
         matchup_rows.append((mid, a_id, b_id))
 
     tz = _guild_tz(cfg)
-    await _post_round(bracket_id, 1, matchup_rows, bracket_channel, cfg_with_cards, tz, client, [])
+    await _post_round(bracket_id, 1, matchup_rows, bracket_channel, cfg, tz, client, [])
 
     return True, (
         "✅ Test bracket started!\n"
@@ -476,6 +490,7 @@ async def force_bracket_advance(guild_id: int, client: discord.Client) -> tuple[
     if len(winners) == 1:
         champion = get_bracket_entry(winners[0])
         complete_bracket(bracket["id"])
+        _test_card_cache.pop(bracket["id"], None)
         await bracket_channel.send(
             f"\n🎊🏆🎊 **CHAMPION** 🎊🏆🎊\n\n"
             f'**"{champion["quote"]}"**\n'
@@ -665,6 +680,7 @@ async def check_bracket_advancement(guild_id: int, client: discord.Client) -> No
     if len(winners) == 1:
         champion = get_bracket_entry(winners[0])
         complete_bracket(bracket["id"])
+        _test_card_cache.pop(bracket["id"], None)
         await bracket_channel.send(
             f"\n🎊🏆🎊 **{bracket['year']} SERVER NAME CHAMPION** 🎊🏆🎊\n\n"
             f'**"{champion["quote"]}"**\n'
