@@ -326,6 +326,7 @@ async def build_config(guild_id: int, client: discord.Client) -> str:
         f"Voting:              {'Enabled' if c['enable_voting']      else 'Disabled'}",
         f"Bracket Size:        {c['bracket_size'] or 8}",
         f"Bracket Vote Hours:  {c['bracket_voting_hours'] or 24}",
+        f"Bracket Pacing:      {c.get('bracket_pacing') or 'round'}",
         f"Timezone:            {c['timezone'] or 'US/Eastern'}",
         f"Quote Time:          {c['quote_time'] or '4:00'}",
         f"Song Time:           {c['song_time'] or '10:00'}",

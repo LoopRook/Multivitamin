@@ -81,6 +81,7 @@ _SETUP_TEXT = (
     "**Bracket:**\n"
     "   `!setbracketsize <4|8|16|32>`\n"
     "   `!setbracketvotingtime <hours>`\n"
+    "   `!setbracketpacing [round|daily]`\n"
     "   `!startbracket [year]` · `!testbracket`\n"
     "   `!forcebracketadvance` · `!bracketstatus` · `!cancelbracket`\n\n"
     "**Other:** `!showconfig` · `!preview rename` · `!preview song`\n"
@@ -283,6 +284,21 @@ async def on_message(message: discord.Message):
             return
         set_config(gid, "bracket_voting_hours", hours)
         await message.channel.send(f"✅ Bracket voting window set to **{hours} hour(s)** per matchup.")
+        return
+
+    # ── Set bracket pacing ────────────────────────────────────────────────
+    if content_lower.startswith("!setbracketpacing"):
+        if not is_admin:
+            await message.channel.send(_NO_PERM)
+            return
+        parts = content_lower.split()
+        if len(parts) < 2 or parts[1] not in ("round", "daily"):
+            await message.channel.send("⚠️ Usage: `!setbracketpacing [round|daily]`")
+            return
+        pacing = parts[1]
+        set_config(gid, "bracket_pacing", pacing)
+        detail = "matchups will post all at once" if pacing == "round" else "one matchup per day"
+        await message.channel.send(f"✅ Bracket pacing set to **{pacing}** — {detail}.")
         return
 
     # ── Start real bracket ────────────────────────────────────────────────
