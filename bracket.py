@@ -92,20 +92,20 @@ async def _get_fresh_image_url(client: discord.Client, channel_id: int, message_
 async def _get_poll_votes(client: discord.Client, channel_id: int, message_id: int) -> tuple[int, int]:
     """
     Return (votes_a, votes_b) from a Discord poll message.
-    poll.results is populated once the poll has ended (which it will be by the
-    time our scheduler calls this, since ends_at matches the poll duration).
+    Uses answer.vote_count directly — poll.results is not available in discord.py 2.7.1.
+    Answers are ordered by insertion order (A=index 0, B=index 1).
     """
     try:
         channel = client.get_channel(channel_id)
         if not channel:
             return 0, 0
         msg = await channel.fetch_message(message_id)
-        if not msg.poll or not msg.poll.results:
-            # Poll may not have fully resolved yet — return zeroes, scheduler
-            # will retry next cycle.
+        if not msg.poll:
             return 0, 0
-        votes = {ac.id: ac.count for ac in msg.poll.results.answer_counts}
-        return votes.get(1, 0), votes.get(2, 0)
+        answers = msg.poll.answers
+        if len(answers) < 2:
+            return 0, 0
+        return answers[0].vote_count, answers[1].vote_count
     except Exception as e:
         log.warning("Could not fetch poll results (msg %s): %s", message_id, e)
         return 0, 0
@@ -439,15 +439,19 @@ async def force_bracket_advance(guild_id: int, client: discord.Client) -> tuple[
                 msg = await ch.fetch_message(m["message_id"])
                 if msg.poll:
                     try:
-                        # Ends the poll immediately; returns updated message with results
+                        # end_poll() ends immediately and returns updated message
                         msg = await msg.end_poll()
                     except discord.HTTPException:
-                        # Already ended — re-fetch for results
+                        # Already ended — re-fetch
                         msg = await ch.fetch_message(m["message_id"])
-                    if msg.poll and msg.poll.results:
-                        counts  = {ac.id: ac.count for ac in msg.poll.results.answer_counts}
-                        votes_a = counts.get(1, 0)
-                        votes_b = counts.get(2, 0)
+                    # Use answer.vote_count — poll.results not available in 2.7.1
+                    if msg.poll and len(msg.poll.answers) >= 2:
+                        votes_a = msg.poll.answers[0].vote_count
+                        votes_b = msg.poll.answers[1].vote_count
+                        log.info(
+                            "[%s] Poll %s results: A=%d B=%d",
+                            guild_id, m["message_id"], votes_a, votes_b,
+                        )
         except Exception as e:
             log.warning("[%s] Could not end poll for matchup %s: %s", guild_id, m["id"], e)
 
@@ -622,10 +626,20 @@ async def check_bracket_advancement(guild_id: int, client: discord.Client) -> No
         entry_b  = get_bracket_entry(m["entry_b_id"])
         votes_a, votes_b = await _get_poll_votes(client, m["channel_id"], m["message_id"])
 
+        # Only retry on 0-0 if the poll isn't finalized yet.
+        # Once finalized, 0-0 is a genuine tie and should go to coin flip.
         if votes_a == 0 and votes_b == 0:
-            log.info("[%s] Poll results not yet available for matchup %s — retrying next cycle.", guild_id, m["id"])
-            all_complete = False
-            continue
+            try:
+                ch = client.get_channel(m["channel_id"])
+                if ch:
+                    msg = await ch.fetch_message(m["message_id"])
+                    if msg.poll and not msg.poll.is_finalized:
+                        log.info("[%s] Poll not yet finalized for matchup %s — retrying.", guild_id, m["id"])
+                        all_complete = False
+                        continue
+            except Exception:
+                pass
+            log.info("[%s] Poll 0-0 and finalized for matchup %s — coin flip.", guild_id, m["id"])
 
         if votes_a > votes_b:
             winner_id = m["entry_a_id"]
