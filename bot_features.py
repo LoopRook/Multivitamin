@@ -8,7 +8,7 @@ import aiohttp
 import discord
 import pytz
 
-from db_utils import get_config, set_config, log_pick, get_user_last_picks, get_today_pick_counts
+from db_utils import get_config, set_config, log_pick, get_user_last_picks, get_today_pick_counts, store_rename_post
 from image_utils import generate_card, truncate_to_100_chars
 
 log = logging.getLogger(__name__)
@@ -187,6 +187,33 @@ async def get_random_song(
     return link, name, chosen_uid
 
 
+
+
+async def get_contributor_quotes(channel) -> dict[int, tuple[str, str]]:
+    """
+    Scan *channel* and return {user_id: (quote, display_name)}.
+    One randomly selected quote per contributor, using the same per-user
+    reservoir sampling as get_random_quote.  Used by !testbracket.
+    """
+    if channel is None:
+        return {}
+    pool: dict[int, tuple[str, str, int]] = {}
+    async for msg in channel.history(limit=None, oldest_first=False):
+        if msg.author.bot:
+            continue
+        uid = msg.author.id
+        for line in msg.content.strip().splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("!"):
+                continue
+            cur, name, count = pool.get(uid, (None, msg.author.display_name, 0))
+            count += 1
+            if random.randint(1, count) == 1:
+                pool[uid] = (stripped, msg.author.display_name, count)
+            else:
+                pool[uid] = (cur, name, count)
+    return {uid: (quote, name) for uid, (quote, name, _) in pool.items()}
+
 # ── Contribution scanner (used by !mystats and !contributors) ────────────────
 
 async def scan_contributions(channel, category: str) -> dict[int, tuple[str, int]]:
@@ -268,6 +295,41 @@ async def build_contributors(guild_id: int, client: discord.Client, category: st
     lines = [f"📊 **{label} contributors**"]
     for name, count in sorted_entries:
         lines.append(f"  {name} — **{count}** submission{'s' if count != 1 else ''}")
+    return "\n".join(lines)
+
+
+async def build_config(guild_id: int, client: discord.Client) -> str:
+    """
+    Return a formatted config string with channel IDs resolved to #channel-name.
+    Falls back to the raw ID if the channel can't be found (e.g. deleted channel).
+    """
+    from db_utils import show_config
+    c = show_config(guild_id)
+
+    def ch(cid) -> str:
+        if not cid:
+            return "Not Set"
+        channel = client.get_channel(cid)
+        return f"#{channel.name}" if channel else f"{cid} (not found)"
+
+    lines = [
+        f"Guild ID:            {c['guild_id']}",
+        f"Quote Channel:       {ch(c['quote_channel'])}",
+        f"Icon Channel:        {ch(c['icon_channel'])}",
+        f"Post Channel:        {ch(c['post_channel'])}",
+        f"Music Channel:       {ch(c['music_channel'])}",
+        f"Song Post Channel:   {ch(c['song_post_channel'])}",
+        f"Bracket Channel:     {ch(c['bracket_channel'])}",
+        f"Quote Feature:       {'Enabled' if c['enable_daily_quote'] else 'Disabled'}",
+        f"Song Feature:        {'Enabled' if c['enable_daily_song']  else 'Disabled'}",
+        f"Cooldown:            {'Enabled' if c['enable_cooldown']    else 'Disabled'}",
+        f"Voting:              {'Enabled' if c['enable_voting']      else 'Disabled'}",
+        f"Bracket Size:        {c['bracket_size'] or 8}",
+        f"Bracket Vote Hours:  {c['bracket_voting_hours'] or 24}",
+        f"Timezone:            {c['timezone'] or 'US/Eastern'}",
+        f"Quote Time:          {c['quote_time'] or '4:00'}",
+        f"Song Time:           {c['song_time'] or '10:00'}",
+    ]
     return "\n".join(lines)
 
 
@@ -357,12 +419,25 @@ async def process_rename(
     ):
         channels_to_post.append(post_channel)
 
+    post_chan_id = cfg["post_channel"]
+
     for channel in channels_to_post:
         image_file.seek(0)
         try:
-            await channel.send(file=discord.File(fp=image_file, filename="update.png"))
+            sent = await channel.send(file=discord.File(fp=image_file, filename="update.png"))
         except discord.HTTPException as e:
             log.error("[%s] Failed to post card to channel %s: %s", guild_id, channel.id, e)
+            continue
+
+        # Voting: add reaction and track the post for bracket seeding.
+        # We track the post_channel message (the "official" daily post).
+        # If post_channel isn't configured, fall back to whatever was sent.
+        is_official = (post_chan_id and channel.id == post_chan_id) or (not post_chan_id)
+        if cfg["enable_voting"] and is_official:
+            # Grab the attachment URL as a cached snapshot.
+            # (We always re-fetch fresh at bracket time since CDN URLs expire.)
+            img_url = sent.attachments[0].url if sent.attachments else None
+            store_rename_post(guild_id, sent.id, sent.channel.id, quote, quote_user, quote_uid, img_url)
 
 
 _is_song_searching: dict[int, bool] = {}
@@ -449,3 +524,7 @@ async def scheduler_loop(client: discord.Client) -> None:
                 if cur_time == scheduled and cfg["last_song_date"] != today:
                     set_config(guild.id, "last_song_date", today)
                     await process_daily_song(guild.id, client)
+
+            # Check for bracket matchups that need tallying/advancing
+            from bracket import check_bracket_advancement
+            await check_bracket_advancement(guild.id, client)
