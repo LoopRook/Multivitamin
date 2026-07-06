@@ -1,9 +1,11 @@
 import logging
 import os
 from datetime import datetime
+from typing import Literal, Optional
 
 import discord
 import pytz
+from discord import app_commands
 
 from db_utils import (
     init_db, set_config, get_config,
@@ -23,7 +25,6 @@ from bracket import (
     start_bracket,
     start_season_bracket,
     start_test_bracket,
-    check_bracket_advancement,
     get_bracket_status_text,
     force_bracket_advance,
 )
@@ -40,28 +41,9 @@ logging.getLogger("discord.client").setLevel(logging.ERROR)
 
 log = logging.getLogger(__name__)
 
-# ── Config ────────────────────────────────────────────────────────────────────
-
 TOKEN = os.getenv("DISCORD_TOKEN")
 
-# ── Client ────────────────────────────────────────────────────────────────────
-
-intents = discord.Intents.default()
-intents.message_content = True
-intents.guilds = True
-intents.messages = True
-client = discord.Client(intents=intents)
-
-# ── Command tables ────────────────────────────────────────────────────────────
-
-_CHANNEL_SETTERS: dict[str, tuple[str, str]] = {
-    "!setquotechannel":    ("quote_channel",     "✅ This channel set as Quote Channel."),
-    "!seticonchannel":     ("icon_channel",      "✅ This channel set as Icon Channel."),
-    "!setpostchannel":     ("post_channel",      "✅ This channel set as Post Channel."),
-    "!setmusicchannel":    ("music_channel",     "✅ This channel set as Music Channel."),
-    "!setsongpostchannel": ("song_post_channel", "✅ This channel set as Song Post Channel."),
-    "!setbracketchannel":  ("bracket_channel",   "✅ This channel set as Bracket Channel."),
-}
+# ── Shared config tables ──────────────────────────────────────────────────────
 
 _FEATURE_MAP: dict[str, tuple[str, str]] = {
     "quote":    ("enable_daily_quote", "Daily Quote"),
@@ -70,142 +52,115 @@ _FEATURE_MAP: dict[str, tuple[str, str]] = {
 }
 
 _SETUP_TEXT = (
-    "**Bot Setup Guide:**\n"
-    "**Channels** (run each in the target channel):\n"
-    "   `!setquotechannel` · `!seticonchannel` · `!setpostchannel`\n"
-    "   `!setmusicchannel` · `!setsongpostchannel` · `!setbracketchannel`\n\n"
-    "**Features:** `!enablefeature [quote|song|cooldown]`\n"
-    "             `!disablefeature [quote|song|cooldown]`\n"
+    "**Bot Setup Guide** — all commands are slash (`/`) commands.\n\n"
+    "**Channels** (each takes an optional channel; defaults to where you run it):\n"
+    "   `/config postchannel` — official rename cards (tracked for brackets)\n"
+    "   `/config quotechannel` · `/config iconchannel` · `/config musicchannel`\n"
+    "   `/config songpostchannel` · `/config bracketchannel`\n\n"
+    "**Features:** `/config feature <quote|song|cooldown> <on/off>`\n"
     "   *(Bracket tracking is always on once a Post Channel is set.)*\n\n"
     "**Scheduling:**\n"
-    "   `!settimezone <tz>` — e.g. `US/Eastern`, `Europe/London`\n"
-    "   `!setscheduletime quote 8:00`\n"
-    "   `!setscheduletime song 12:00`\n\n"
+    "   `/config timezone <tz>` — e.g. `US/Eastern`, `Europe/London`\n"
+    "   `/config scheduletime <quote|song> <H:MM>`\n\n"
     "**Bracket:**\n"
-    "   `!setbracketsize <4|8|16|32>`\n"
-    "   `!setbracketvotingtime <hours>`\n"
-    "   `!setbracketpacing [round|daily]`\n"
-    "   `!startbracket [year]` · `!startbracket season <name>` · `!testbracket`\n"
-    "   `!forcebracketadvance` · `!bracketstatus` · `!cancelbracket`\n\n"
-    "**Seasons:**\n"
-    "   `!addseason <start> <end> <name>` — dates as `YYYY-MM-DD`\n"
-    "   `!listseasons` · `!removeseason <name>`\n\n"
-    "**Admins** (Manage Server):\n"
-    "   `!addadmin @user` · `!removeadmin @user` · `!listadmins`\n\n"
-    "**Other:** `!showconfig` · `!preview rename` · `!preview song`\n"
-    "   `!contributors [quote|icon|song]` · `!mystats`\n\n"
-    "**See every command:** `!help` (or `!commands`)"
+    "   `/bracket size` · `/bracket votingtime` · `/bracket pacing`\n"
+    "   `/bracket start [year] [season]` · `/bracket test`\n"
+    "   `/bracket forceadvance` · `/bracket status` · `/bracket cancel`\n\n"
+    "**Seasons:** `/season add <start> <end> <name>` · `/season list` · `/season remove`\n\n"
+    "**Admins** (Manage Server): `/admin add` · `/admin remove` · `/admin list`\n\n"
+    "**Other:** `/showconfig` · `/preview` · `/contributors` · `/mystats`\n\n"
+    "**See every command:** `/help`"
 )
 
-_NO_PERM = "⚠️ You don't have permission to use this command."
+_WELCOME_TEXT = (
+    "👋 **Thanks for adding me!**\n"
+    "I rename your server daily from community-submitted quotes, post a daily song, and run "
+    "reaction-seeded bracket championships for your favourite names.\n\n"
+    "**Get started:** run `/setup` for the full guide, or `/help` to see every command.\n"
+    "Most servers begin with `/config postchannel` and `/config quotechannel`.\n"
+    "*(Slash commands can take a few minutes to appear right after inviting.)*"
+)
+
+# Old prefix commands people might still type — nudge them to slash.
+_LEGACY_HINTS = {
+    "!help", "!commands", "!setup", "!rename", "!song",
+    "!mystats", "!bracketstatus", "!showconfig", "!startbracket", "!testbracket",
+}
 
 
 def build_help_embed(is_admin: bool = False, is_manager: bool = False) -> discord.Embed:
     """
-    Command reference grouped by category.
-    Admin-only sections are included only when *is_admin* is True, so ordinary
-    members see just the commands they can actually run.  The bot-admin roster
-    section is shown only to *is_manager* (Manage Server) users.
+    Slash-command reference grouped by category.
+    Admin-only sections are included only when *is_admin* is True; the bot-admin
+    roster section is shown only to *is_manager* (Manage Server) users.
     """
-    if is_admin:
-        description = (
-            "All commands use the `!` prefix. The **(Admin)** sections below require the "
-            "*Manage Server* permission or bot-admin status. The bot ignores replies, so "
-            "quoting a message won't trigger anything."
-        )
-    else:
-        description = (
-            "All commands use the `!` prefix. The bot ignores replies, so quoting a message "
-            "won't trigger anything."
-        )
-
     embed = discord.Embed(
         title="📖 Command Reference",
-        description=description,
+        description="All commands are slash (`/`) commands — type `/` and pick this bot from the list.",
         color=discord.Color.blurple(),
     )
-
     embed.add_field(
         name="🌐 Everyone",
         value=(
-            "`!rename` — trigger a rename now\n"
-            "`!song` — post the song of the day\n"
-            "`!mystats` — your submission counts & last picks\n"
-            "`!help` · `!commands` — show this list"
+            "`/rename` — trigger a rename now\n"
+            "`/song` — post the song of the day\n"
+            "`/mystats` — your submission counts & last picks\n"
+            "`/help` — show this list"
         ),
         inline=False,
     )
-
     if not is_admin:
         return embed
 
     embed.add_field(
-        name="📺 Channels (Admin) — run inside the target channel",
+        name="📺 Channels (Admin) — `/config …` (optional channel arg)",
         value=(
-            "`!setquotechannel` — quote submissions\n"
-            "`!seticonchannel` — icon images\n"
-            "`!setpostchannel` — official rename cards (tracked for brackets)\n"
-            "`!setmusicchannel` — song links\n"
-            "`!setsongpostchannel` — daily song posts\n"
-            "`!setbracketchannel` — bracket matchups & results"
+            "`/config quotechannel` — quote submissions\n"
+            "`/config iconchannel` — icon images\n"
+            "`/config postchannel` — official rename cards (tracked for brackets)\n"
+            "`/config musicchannel` — song links\n"
+            "`/config songpostchannel` — daily song posts\n"
+            "`/config bracketchannel` — bracket matchups & results"
         ),
         inline=False,
     )
     embed.add_field(
-        name="🎚️ Features (Admin)",
+        name="🎚️ Features & Scheduling (Admin)",
         value=(
-            "`!enablefeature <name>` · `!disablefeature <name>`\n"
-            "Names: `quote`, `song`, `cooldown`\n"
-            "*(Bracket tracking is always on once a Post Channel is set.)*"
+            "`/config feature <quote|song|cooldown> <on/off>`\n"
+            "*(Bracket tracking is always on once a Post Channel is set.)*\n"
+            "`/config timezone <tz>` — IANA name, e.g. `US/Eastern`\n"
+            "`/config scheduletime <quote|song> <H:MM>`"
         ),
         inline=False,
     )
     embed.add_field(
-        name="⏰ Scheduling (Admin)",
+        name="🏆 Bracket (Admin)",
         value=(
-            "`!settimezone <tz>` — IANA name, e.g. `US/Eastern`\n"
-            "`!setscheduletime quote 8:00`\n"
-            "`!setscheduletime song 12:00`"
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="🏆 Bracket Setup (Admin)",
-        value=(
-            "`!setbracketsize <4|8|16|32>`\n"
-            "`!setbracketvotingtime <hours>` — 1 to 168\n"
-            "`!setbracketpacing <round|daily>` — all matchups at once, or one at a time"
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="🏆 Bracket Actions (Admin)",
-        value=(
-            "`!startbracket [year]` — seed a bracket for a calendar year\n"
-            "`!startbracket season <name>` — seed from a season's window\n"
-            "`!testbracket` — test bracket with random scores\n"
-            "`!forcebracketadvance` — tally current polls now & advance\n"
-            "`!bracketstatus` — current round, pacing & progress\n"
-            "`!cancelbracket` — delete the active bracket"
+            "`/bracket size <4|8|16|32>` · `/bracket votingtime <hours>`\n"
+            "`/bracket pacing <round|daily>` — all at once, or one per day\n"
+            "`/bracket start [year] [season]` — seed from a year or a season\n"
+            "`/bracket test` — test bracket with random scores\n"
+            "`/bracket forceadvance` · `/bracket status` · `/bracket cancel`"
         ),
         inline=False,
     )
     embed.add_field(
         name="📅 Seasons (Admin)",
         value=(
-            "`!addseason <start> <end> <name>` — dates as `YYYY-MM-DD`\n"
-            "`!listseasons` — list defined seasons\n"
-            "`!removeseason <name>` — delete a season"
+            "`/season add <start> <end> <name>` — dates as `YYYY-MM-DD`\n"
+            "`/season list` — list defined seasons\n"
+            "`/season remove <name>` — delete a season"
         ),
         inline=False,
     )
     embed.add_field(
         name="ℹ️ Info & Preview (Admin)",
         value=(
-            "`!showconfig` — current settings\n"
-            "`!contributors <quote|icon|song>` — submission leaderboard\n"
-            "`!preview rename` · `!preview song` — dry run, posts here only\n"
-            "`!setup` — quick setup guide"
+            "`/showconfig` — current settings\n"
+            "`/contributors <quote|icon|song>` — submission leaderboard\n"
+            "`/preview <rename|song>` — dry run, posts here only\n"
+            "`/setup` — quick setup guide"
         ),
         inline=False,
     )
@@ -213,9 +168,9 @@ def build_help_embed(is_admin: bool = False, is_manager: bool = False) -> discor
         embed.add_field(
             name="👑 Bot Admins (Manage Server only)",
             value=(
-                "`!addadmin @user` — grant bot-admin access\n"
-                "`!removeadmin @user` — revoke bot-admin access\n"
-                "`!listadmins` — list current bot-admins"
+                "`/admin add <user>` — grant bot-admin access\n"
+                "`/admin remove <user>` — revoke bot-admin access\n"
+                "`/admin list` — list current bot-admins"
             ),
             inline=False,
         )
@@ -237,454 +192,483 @@ def _parse_season_dates(start_str: str, end_str: str, tz) -> tuple[str, str]:
     return start_utc.isoformat(), end_utc.isoformat()
 
 
-# ── Scheduler dedup ───────────────────────────────────────────────────────────
+# ── Client ────────────────────────────────────────────────────────────────────
 
-_scheduler_task: list = []
+class QotdClient(discord.Client):
+    def __init__(self):
+        intents = discord.Intents.default()
+        # message_content is required to scan quote/icon/song channel history.
+        intents.message_content = True
+        super().__init__(intents=intents)
+        self.tree = app_commands.CommandTree(self)
+        self._scheduler_task = None
 
+    async def setup_hook(self) -> None:
+        # Runs once after login, before the gateway connects — good place to
+        # prepare the DB and register/sync slash commands globally.
+        init_db()
+        await self.tree.sync()
+        log.info("✅ Slash commands synced globally.")
 
-# ── Events ────────────────────────────────────────────────────────────────────
-
-@client.event
-async def on_ready():
-    global _scheduler_task
-    log.info("✅ Logged in as %s", client.user)
-    init_db()
-    for task in _scheduler_task:
-        if not task.done():
-            task.cancel()
+    async def on_ready(self) -> None:
+        log.info("✅ Logged in as %s (%d guild(s))", self.user, len(self.guilds))
+        # (Re)start the scheduler, cancelling any stale task from a prior connect.
+        if self._scheduler_task and not self._scheduler_task.done():
+            self._scheduler_task.cancel()
             log.info("🔄 Cancelled stale scheduler task.")
-    _scheduler_task.clear()
-    task = client.loop.create_task(scheduler_loop(client), name="scheduler_loop")
-    _scheduler_task.append(task)
-    log.info("⏰ Scheduler started.")
+        self._scheduler_task = self.loop.create_task(scheduler_loop(self), name="scheduler_loop")
+        log.info("⏰ Scheduler started.")
 
+    async def on_guild_join(self, guild: discord.Guild) -> None:
+        log.info("➕ Joined guild %s (%s)", guild.id, guild.name)
+        get_config(guild.id)  # ensure a config row exists
+        channel = _welcome_channel(guild)
+        if channel:
+            try:
+                await channel.send(_WELCOME_TEXT)
+            except discord.HTTPException as e:
+                log.warning("[%s] Could not send welcome message: %s", guild.id, e)
 
-@client.event
-async def on_message(message: discord.Message):
-    if message.author.bot or not message.guild:
-        return
-    if message.reference is not None:
-        return
+    async def on_guild_remove(self, guild: discord.Guild) -> None:
+        # Keep the guild's data in case of a re-invite; just log the departure.
+        log.info("➖ Removed from guild %s (%s) — data retained.", guild.id, guild.name)
 
-    content       = message.content.strip()
-    content_lower = content.lower()
-    gid           = message.guild.id
-    # Manage Server holders always count as admins; so do users granted bot-admin.
-    # Managing the bot-admin roster itself requires Manage Server (is_manager).
-    is_manager    = message.author.guild_permissions.manage_guild
-    is_admin      = is_manager or is_bot_admin(gid, message.author.id)
-
-    # ── Help / command list (anyone) ──────────────────────────────────────
-    if content_lower.startswith("!help") or content_lower.startswith("!commands"):
-        embed = build_help_embed(is_admin, is_manager)
-        try:
-            await message.channel.send(embed=embed)
-        except discord.HTTPException:
-            # Fall back to plain text if embeds aren't permitted here, keeping
-            # the same admin/non-admin gating as the embed.
-            lines = [f"**{embed.title}**", embed.description, ""]
-            for f in embed.fields:
-                lines += [f"__{f.name}__", f.value, ""]
-            await message.channel.send("\n".join(lines))
-        return
-
-    # ── Channel setters ───────────────────────────────────────────────────
-    for cmd, (field, reply) in _CHANNEL_SETTERS.items():
-        if content_lower.startswith(cmd):
-            if not is_admin:
-                await message.channel.send(_NO_PERM)
-                return
-            set_config(gid, field, message.channel.id)
-            await message.channel.send(reply)
+    async def on_message(self, message: discord.Message) -> None:
+        # The bot uses slash commands now; nudge anyone still typing old ! commands.
+        if message.author.bot or not message.guild:
             return
+        first = message.content.strip().lower().split(" ", 1)[0]
+        if first in _LEGACY_HINTS:
+            try:
+                await message.channel.send(
+                    "ℹ️ I've moved to **slash commands** — type `/help` to see everything "
+                    "(start typing `/` and pick me from the list)."
+                )
+            except discord.HTTPException:
+                pass
 
-    # ── Enable / disable feature ──────────────────────────────────────────
-    if content_lower.startswith("!enablefeature ") or content_lower.startswith("!disablefeature "):
-        if not is_admin:
-            await message.channel.send(_NO_PERM)
-            return
-        enabling = content_lower.startswith("!enablefeature ")
-        arg = content_lower.split(" ", 1)[1].strip()
-        if arg in _FEATURE_MAP:
-            db_field, label = _FEATURE_MAP[arg]
-            set_config(gid, db_field, 1 if enabling else 0)
-            verb = "enabled" if enabling else "disabled"
-            await message.channel.send(f"✅ {label} feature {verb}.")
-        elif arg == "voting":
-            await message.channel.send(
-                "ℹ️ Voting is no longer a toggle — bracket tracking is always on once a "
-                "**Post Channel** is set (`!setpostchannel`). See `!help` for bracket & season commands."
-            )
+
+client = QotdClient()
+
+
+def _welcome_channel(guild: discord.Guild) -> Optional[discord.abc.Messageable]:
+    """Best channel to greet a new guild in: system channel, else first sendable text channel."""
+    me = guild.me
+    if guild.system_channel and guild.system_channel.permissions_for(me).send_messages:
+        return guild.system_channel
+    for ch in guild.text_channels:
+        if ch.permissions_for(me).send_messages:
+            return ch
+    return None
+
+
+# ── Permission checks ─────────────────────────────────────────────────────────
+
+def _perms(interaction: discord.Interaction) -> tuple[bool, bool]:
+    """Return (is_admin, is_manager). is_admin = Manage Server OR bot-admin."""
+    is_manager = interaction.user.guild_permissions.manage_guild
+    is_admin   = is_manager or is_bot_admin(interaction.guild_id, interaction.user.id)
+    return is_admin, is_manager
+
+
+def admin_only():
+    async def predicate(interaction: discord.Interaction) -> bool:
+        is_admin, _ = _perms(interaction)
+        return is_admin
+    return app_commands.check(predicate)
+
+
+def manager_only():
+    async def predicate(interaction: discord.Interaction) -> bool:
+        return interaction.user.guild_permissions.manage_guild
+    return app_commands.check(predicate)
+
+
+@client.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
+    if isinstance(error, app_commands.CheckFailure):
+        text = "⚠️ You don't have permission to use this command."
+    else:
+        log.exception("Slash command error in guild %s: %s", interaction.guild_id, error)
+        text = "⚠️ Something went wrong running that command."
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(text, ephemeral=True)
         else:
-            await message.channel.send(f'⚠️ Unknown feature "{arg}". Use `quote`, `song`, or `cooldown`.')
+            await interaction.response.send_message(text, ephemeral=True)
+    except discord.HTTPException:
+        pass
+
+
+# ── /config group ─────────────────────────────────────────────────────────────
+
+config_group = app_commands.Group(name="config", description="Server configuration", guild_only=True)
+
+
+async def _set_channel(interaction: discord.Interaction, field: str, label: str,
+                       channel: Optional[discord.TextChannel]) -> None:
+    target = channel or interaction.channel
+    set_config(interaction.guild_id, field, target.id)
+    await interaction.response.send_message(f"✅ {label} set to {target.mention}.", ephemeral=True)
+
+
+@config_group.command(name="quotechannel", description="Set the channel where users post quotes")
+@admin_only()
+async def config_quotechannel(interaction: discord.Interaction, channel: Optional[discord.TextChannel] = None):
+    await _set_channel(interaction, "quote_channel", "Quote channel", channel)
+
+
+@config_group.command(name="iconchannel", description="Set the channel where users post icon images")
+@admin_only()
+async def config_iconchannel(interaction: discord.Interaction, channel: Optional[discord.TextChannel] = None):
+    await _set_channel(interaction, "icon_channel", "Icon channel", channel)
+
+
+@config_group.command(name="postchannel", description="Set the channel where rename cards are posted (tracked for brackets)")
+@admin_only()
+async def config_postchannel(interaction: discord.Interaction, channel: Optional[discord.TextChannel] = None):
+    await _set_channel(interaction, "post_channel", "Post channel", channel)
+
+
+@config_group.command(name="musicchannel", description="Set the channel where users post song links")
+@admin_only()
+async def config_musicchannel(interaction: discord.Interaction, channel: Optional[discord.TextChannel] = None):
+    await _set_channel(interaction, "music_channel", "Music channel", channel)
+
+
+@config_group.command(name="songpostchannel", description="Set the channel where the song of the day is posted")
+@admin_only()
+async def config_songpostchannel(interaction: discord.Interaction, channel: Optional[discord.TextChannel] = None):
+    await _set_channel(interaction, "song_post_channel", "Song post channel", channel)
+
+
+@config_group.command(name="bracketchannel", description="Set the channel where bracket matchups & results post")
+@admin_only()
+async def config_bracketchannel(interaction: discord.Interaction, channel: Optional[discord.TextChannel] = None):
+    await _set_channel(interaction, "bracket_channel", "Bracket channel", channel)
+
+
+@config_group.command(name="feature", description="Enable or disable a feature")
+@app_commands.describe(feature="Which feature", enabled="Turn it on or off")
+@admin_only()
+async def config_feature(interaction: discord.Interaction,
+                         feature: Literal["quote", "song", "cooldown"], enabled: bool):
+    field, label = _FEATURE_MAP[feature]
+    set_config(interaction.guild_id, field, 1 if enabled else 0)
+    verb = "enabled" if enabled else "disabled"
+    await interaction.response.send_message(f"✅ {label} feature {verb}.", ephemeral=True)
+
+
+@config_group.command(name="timezone", description="Set the server timezone (IANA name)")
+@app_commands.describe(tz="e.g. US/Eastern, Europe/London, Asia/Tokyo")
+@admin_only()
+async def config_timezone(interaction: discord.Interaction, tz: str):
+    try:
+        pytz.timezone(tz)
+    except pytz.exceptions.UnknownTimeZoneError:
+        await interaction.response.send_message(
+            f"⚠️ Unknown timezone `{tz}`. Use a tz database name, e.g. `US/Eastern`, `Europe/London`.\n"
+            f"Full list: <https://en.wikipedia.org/wiki/List_of_tz_database_time_zones>",
+            ephemeral=True,
+        )
         return
+    set_config(interaction.guild_id, "timezone", tz)
+    await interaction.response.send_message(f"✅ Timezone set to `{tz}`.", ephemeral=True)
 
-    # ── Set timezone ──────────────────────────────────────────────────────
-    if content_lower.startswith("!settimezone "):
-        if not is_admin:
-            await message.channel.send(_NO_PERM)
-            return
-        tz_str = content.split(" ", 1)[1].strip()
-        try:
-            pytz.timezone(tz_str)
-        except pytz.exceptions.UnknownTimeZoneError:
-            await message.channel.send(
-                f'⚠️ Unknown timezone `{tz_str}`.\n'
-                f'Use a tz database name, e.g. `US/Eastern`, `Europe/London`, `Asia/Tokyo`.\n'
-                f'Full list: <https://en.wikipedia.org/wiki/List_of_tz_database_time_zones>'
-            )
-            return
-        set_config(gid, "timezone", tz_str)
-        await message.channel.send(f"✅ Timezone set to `{tz_str}`.")
+
+@config_group.command(name="scheduletime", description="Set the daily quote or song time (24-hour)")
+@app_commands.describe(which="quote or song", time="H:MM or HH:MM, 24-hour, e.g. 8:00")
+@admin_only()
+async def config_scheduletime(interaction: discord.Interaction,
+                              which: Literal["quote", "song"], time: str):
+    try:
+        h, m = time.split(":")
+        assert 0 <= int(h) <= 23 and 0 <= int(m) <= 59
+    except Exception:
+        await interaction.response.send_message(
+            "⚠️ Time must be in `H:MM` or `HH:MM` format (24-hour).", ephemeral=True)
         return
+    set_config(interaction.guild_id, "quote_time" if which == "quote" else "song_time", time)
+    cfg = get_config(interaction.guild_id)
+    tz_name = cfg["timezone"] or "US/Eastern"
+    await interaction.response.send_message(
+        f"✅ {which.title()} time set to `{time}` ({tz_name}).", ephemeral=True)
 
-    # ── Set schedule time ─────────────────────────────────────────────────
-    if content_lower.startswith("!setscheduletime "):
-        if not is_admin:
-            await message.channel.send(_NO_PERM)
-            return
-        parts = content.split()
-        if len(parts) < 3:
-            await message.channel.send("⚠️ Usage: `!setscheduletime [quote|song] <H:MM>`")
-            return
-        which = parts[1].lower()
-        time_str = parts[2]
-        if which not in ("quote", "song"):
-            await message.channel.send('⚠️ First argument must be `quote` or `song`.')
-            return
-        try:
-            h, m = time_str.split(":")
-            assert 0 <= int(h) <= 23 and 0 <= int(m) <= 59
-        except Exception:
-            await message.channel.send("⚠️ Time must be in `H:MM` or `HH:MM` format (24-hour).")
-            return
-        field = "quote_time" if which == "quote" else "song_time"
-        set_config(gid, field, time_str)
-        cfg = get_config(gid)
-        tz_name = cfg["timezone"] or "US/Eastern"
-        await message.channel.send(f"✅ {which.title()} time set to `{time_str}` ({tz_name}).")
+
+client.tree.add_command(config_group)
+
+
+# ── /bracket group ────────────────────────────────────────────────────────────
+
+bracket_group = app_commands.Group(name="bracket", description="Bracket championship", guild_only=True)
+
+
+@bracket_group.command(name="size", description="Set the bracket size (power of 2)")
+@admin_only()
+async def bracket_size(interaction: discord.Interaction, size: Literal[4, 8, 16, 32]):
+    set_config(interaction.guild_id, "bracket_size", size)
+    await interaction.response.send_message(f"✅ Bracket size set to **{size}**.", ephemeral=True)
+
+
+@bracket_group.command(name="votingtime", description="Set the voting window per matchup, in hours (1–168)")
+@admin_only()
+async def bracket_votingtime(interaction: discord.Interaction, hours: app_commands.Range[int, 1, 168]):
+    set_config(interaction.guild_id, "bracket_voting_hours", hours)
+    await interaction.response.send_message(
+        f"✅ Bracket voting window set to **{hours} hour(s)** per matchup.", ephemeral=True)
+
+
+@bracket_group.command(name="pacing", description="Post all matchups at once, or one per day")
+@admin_only()
+async def bracket_pacing(interaction: discord.Interaction, mode: Literal["round", "daily"]):
+    set_config(interaction.guild_id, "bracket_pacing", mode)
+    detail = "matchups will post all at once" if mode == "round" else "one matchup per day"
+    await interaction.response.send_message(f"✅ Bracket pacing set to **{mode}** — {detail}.", ephemeral=True)
+
+
+@bracket_group.command(name="start", description="Start a bracket for a calendar year or a season")
+@app_commands.describe(year="Calendar year (defaults to current year)",
+                       season="Season name (overrides year if given)")
+@admin_only()
+async def bracket_start(interaction: discord.Interaction,
+                        year: Optional[int] = None, season: Optional[str] = None):
+    await interaction.response.defer(ephemeral=True)
+    if season:
+        _, msg = await start_season_bracket(interaction.guild_id, client, season)
+    else:
+        y = year or datetime.now().year
+        _, msg = await start_bracket(interaction.guild_id, client, y)
+    await interaction.followup.send(msg, ephemeral=True)
+
+
+@bracket_group.command(name="test", description="Start a test bracket from the quote channel (random scores)")
+@admin_only()
+async def bracket_test(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    _, msg = await start_test_bracket(interaction.guild_id, client)
+    await interaction.followup.send(msg, ephemeral=True)
+
+
+@bracket_group.command(name="forceadvance", description="Tally current polls now and advance the bracket")
+@admin_only()
+async def bracket_forceadvance(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    _, msg = await force_bracket_advance(interaction.guild_id, client)
+    await interaction.followup.send(msg, ephemeral=True)
+
+
+@bracket_group.command(name="status", description="Show the current bracket's round, pacing & progress")
+@admin_only()
+async def bracket_status(interaction: discord.Interaction):
+    await interaction.response.send_message(get_bracket_status_text(interaction.guild_id), ephemeral=True)
+
+
+@bracket_group.command(name="cancel", description="Delete the active bracket")
+@admin_only()
+async def bracket_cancel(interaction: discord.Interaction):
+    bracket = get_active_bracket(interaction.guild_id)
+    if not bracket:
+        await interaction.response.send_message("⚠️ No active bracket to cancel.", ephemeral=True)
         return
+    cancel_bracket(bracket["id"])
+    await interaction.response.send_message("🗑️ Active bracket cancelled and removed.", ephemeral=True)
 
-    # ── Show config ───────────────────────────────────────────────────────
-    if content_lower.startswith("!showconfig"):
-        if not is_admin:
-            await message.channel.send(_NO_PERM)
-            return
-        cfg_text = await build_config(gid, client)
-        await message.channel.send(f"```\n{cfg_text}\n```")
+
+client.tree.add_command(bracket_group)
+
+
+# ── /season group ─────────────────────────────────────────────────────────────
+
+season_group = app_commands.Group(name="season", description="Named date ranges for brackets", guild_only=True)
+
+
+@season_group.command(name="add", description="Define a season (date range) for scoped brackets")
+@app_commands.describe(start="Start date YYYY-MM-DD", end="End date YYYY-MM-DD", name="Season name")
+@admin_only()
+async def season_add(interaction: discord.Interaction, start: str, end: str, name: str):
+    name = name.strip()
+    cfg = get_config(interaction.guild_id)
+    try:
+        tz = pytz.timezone(cfg["timezone"] or "US/Eastern")
+    except pytz.exceptions.UnknownTimeZoneError:
+        tz = pytz.timezone("US/Eastern")
+    try:
+        start_utc, end_utc = _parse_season_dates(start, end, tz)
+    except ValueError:
+        await interaction.response.send_message(
+            "⚠️ Invalid dates. Use `YYYY-MM-DD` for both, and make sure the end is on/after the start.",
+            ephemeral=True)
         return
+    if add_season(interaction.guild_id, name, start_utc, end_utc):
+        await interaction.response.send_message(
+            f"✅ Season **{name}** created: {start} → {end}.\n"
+            f"Start it any time with `/bracket start season:{name}`.", ephemeral=True)
+    else:
+        await interaction.response.send_message(
+            f'⚠️ A season named "{name}" already exists. Remove it first with `/season remove`.', ephemeral=True)
 
-    # ── Setup help ────────────────────────────────────────────────────────
-    if content_lower.startswith("!setup"):
-        if not is_admin:
-            await message.channel.send(_NO_PERM)
-            return
-        await message.channel.send(_SETUP_TEXT)
+
+@season_group.command(name="list", description="List defined seasons")
+@admin_only()
+async def season_list(interaction: discord.Interaction):
+    seasons = get_seasons(interaction.guild_id)
+    if not seasons:
+        await interaction.response.send_message(
+            "No seasons defined. Create one with `/season add`.", ephemeral=True)
         return
+    lines = ["**Seasons:**"]
+    for s in seasons:
+        lines.append(f'• **{s["name"]}** — {s["start_at"][:10]} → {s["end_at"][:10]}')
+    lines.append("\nStart one with `/bracket start season:<name>`.")
+    await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
-    # ── Bot admin roster (Manage Server only) ─────────────────────────────
-    if content_lower.startswith("!addadmin") or content_lower.startswith("!removeadmin"):
-        if not is_manager:
-            await message.channel.send(
-                "⚠️ Only members with the **Manage Server** permission can manage bot-admins."
-            )
-            return
-        adding = content_lower.startswith("!addadmin")
-        verb   = "addadmin" if adding else "removeadmin"
 
-        # Resolve the target: prefer a mention, otherwise a raw user ID.
-        target_id = target_name = None
-        if message.mentions:
-            target      = message.mentions[0]
-            target_id   = target.id
-            target_name = target.display_name
-        else:
-            parts = content.split()
-            if len(parts) >= 2 and parts[1].isdigit():
-                target_id = int(parts[1])
-                member    = message.guild.get_member(target_id)
-                target_name = member.display_name if member else str(target_id)
+@season_group.command(name="remove", description="Delete a season")
+@app_commands.describe(name="Season name to delete")
+@admin_only()
+async def season_remove(interaction: discord.Interaction, name: str):
+    if remove_season(interaction.guild_id, name.strip()):
+        await interaction.response.send_message(f"🗑️ Season **{name}** removed.", ephemeral=True)
+    else:
+        await interaction.response.send_message(
+            f'⚠️ No season named "{name}". See `/season list`.', ephemeral=True)
 
-        if not target_id:
-            await message.channel.send(f"⚠️ Usage: `!{verb} @user` (you can also pass a user ID).")
-            return
 
-        if adding:
-            created = add_bot_admin(gid, target_id, message.author.id)
-            if created:
-                await message.channel.send(f"✅ **{target_name}** is now a bot-admin and can use admin commands.")
-            else:
-                await message.channel.send(f"ℹ️ **{target_name}** is already a bot-admin.")
-        else:
-            removed = remove_bot_admin(gid, target_id)
-            if removed:
-                await message.channel.send(f"✅ **{target_name}** is no longer a bot-admin.")
-            else:
-                await message.channel.send(f"ℹ️ **{target_name}** wasn't a bot-admin.")
+client.tree.add_command(season_group)
+
+
+# ── /admin group (Manage Server only) ─────────────────────────────────────────
+
+admin_group = app_commands.Group(name="admin", description="Bot-admin roster (Manage Server only)", guild_only=True)
+
+
+@admin_group.command(name="add", description="Grant a user bot-admin access")
+@app_commands.describe(user="Member to grant bot-admin access")
+@manager_only()
+async def admin_add(interaction: discord.Interaction, user: discord.Member):
+    if add_bot_admin(interaction.guild_id, user.id, interaction.user.id):
+        await interaction.response.send_message(
+            f"✅ **{user.display_name}** is now a bot-admin and can use admin commands.", ephemeral=True)
+    else:
+        await interaction.response.send_message(
+            f"ℹ️ **{user.display_name}** is already a bot-admin.", ephemeral=True)
+
+
+@admin_group.command(name="remove", description="Revoke a user's bot-admin access")
+@app_commands.describe(user="Member to revoke bot-admin access from")
+@manager_only()
+async def admin_remove(interaction: discord.Interaction, user: discord.Member):
+    if remove_bot_admin(interaction.guild_id, user.id):
+        await interaction.response.send_message(
+            f"✅ **{user.display_name}** is no longer a bot-admin.", ephemeral=True)
+    else:
+        await interaction.response.send_message(
+            f"ℹ️ **{user.display_name}** wasn't a bot-admin.", ephemeral=True)
+
+
+@admin_group.command(name="list", description="List current bot-admins")
+@manager_only()
+async def admin_list(interaction: discord.Interaction):
+    admin_ids = get_bot_admins(interaction.guild_id)
+    if not admin_ids:
+        await interaction.response.send_message(
+            "No bot-admins configured. Anyone with **Manage Server** already has admin access.", ephemeral=True)
         return
+    lines = ["**Bot Admins** *(in addition to Manage Server holders)*:"]
+    for uid in admin_ids:
+        member = interaction.guild.get_member(uid)
+        lines.append(f"• {member.display_name if member else f'User {uid}'} (`{uid}`)")
+    await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
-    # ── List bot admins (Manage Server only) ──────────────────────────────
-    if content_lower.startswith("!listadmins"):
-        if not is_manager:
-            await message.channel.send(
-                "⚠️ Only members with the **Manage Server** permission can view the bot-admin list."
-            )
-            return
-        admin_ids = get_bot_admins(gid)
-        if not admin_ids:
-            await message.channel.send(
-                "No bot-admins configured. Anyone with the **Manage Server** permission already has admin access."
-            )
-            return
-        lines = ["**Bot Admins** *(in addition to Manage Server holders)*:"]
-        for uid in admin_ids:
-            member = message.guild.get_member(uid)
-            lines.append(f"• {member.display_name if member else f'User {uid}'} (`{uid}`)")
-        await message.channel.send("\n".join(lines))
-        return
 
-    # ── Preview ───────────────────────────────────────────────────────────
-    if content_lower.startswith("!preview "):
-        if not is_admin:
-            await message.channel.send(_NO_PERM)
-            return
-        arg = content_lower.split(" ", 1)[1].strip()
-        if arg == "rename":
-            await message.channel.send("⏳ Scanning channels for preview...")
-            await process_rename(gid, client, override_post_channel=message.channel, preview=True)
-        elif arg == "song":
-            await message.channel.send("⏳ Scanning music channel for preview...")
-            await process_daily_song(gid, client, override_post_channel=message.channel, preview=True)
-        else:
-            await message.channel.send('⚠️ Usage: `!preview rename` or `!preview song`')
-        return
+client.tree.add_command(admin_group)
 
-    # ── Contributors ──────────────────────────────────────────────────────
-    if content_lower.startswith("!contributors"):
-        if not is_admin:
-            await message.channel.send(_NO_PERM)
-            return
-        parts = content_lower.split()
-        if len(parts) < 2 or parts[1] not in ("quote", "icon", "song"):
-            await message.channel.send("⚠️ Usage: `!contributors [quote|icon|song]`")
-            return
-        status = await message.channel.send(f"⏳ Scanning {parts[1]} channel...")
-        result = await build_contributors(gid, client, parts[1])
-        await status.edit(content=result)
-        return
 
-    # ── Set bracket size ──────────────────────────────────────────────────
-    if content_lower.startswith("!setbracketsize "):
-        if not is_admin:
-            await message.channel.send(_NO_PERM)
-            return
-        parts = content.split()
-        if len(parts) < 2:
-            await message.channel.send("⚠️ Usage: `!setbracketsize <4|8|16|32>`")
-            return
-        try:
-            import math
-            size = int(parts[1])
-            assert size >= 4 and math.log2(size).is_integer()
-        except Exception:
-            await message.channel.send("⚠️ Bracket size must be a power of 2: `4`, `8`, `16`, or `32`.")
-            return
-        set_config(gid, "bracket_size", size)
-        await message.channel.send(f"✅ Bracket size set to **{size}**.")
-        return
+# ── Top-level commands ────────────────────────────────────────────────────────
 
-    # ── Set bracket voting time ───────────────────────────────────────────
-    if content_lower.startswith("!setbracketvotingtime "):
-        if not is_admin:
-            await message.channel.send(_NO_PERM)
-            return
-        parts = content.split()
-        if len(parts) < 2:
-            await message.channel.send("⚠️ Usage: `!setbracketvotingtime <hours>` (e.g. `24`)")
-            return
-        try:
-            hours = int(parts[1])
-            assert 1 <= hours <= 168
-        except Exception:
-            await message.channel.send("⚠️ Hours must be a whole number between 1 and 168.")
-            return
-        set_config(gid, "bracket_voting_hours", hours)
-        await message.channel.send(f"✅ Bracket voting window set to **{hours} hour(s)** per matchup.")
-        return
+@client.tree.command(name="help", description="Show the command reference")
+@app_commands.guild_only()
+async def help_cmd(interaction: discord.Interaction):
+    is_admin, is_manager = _perms(interaction)
+    await interaction.response.send_message(embed=build_help_embed(is_admin, is_manager), ephemeral=True)
 
-    # ── Set bracket pacing ────────────────────────────────────────────────
-    if content_lower.startswith("!setbracketpacing"):
-        if not is_admin:
-            await message.channel.send(_NO_PERM)
-            return
-        parts = content_lower.split()
-        if len(parts) < 2 or parts[1] not in ("round", "daily"):
-            await message.channel.send("⚠️ Usage: `!setbracketpacing [round|daily]`")
-            return
-        pacing = parts[1]
-        set_config(gid, "bracket_pacing", pacing)
-        detail = "matchups will post all at once" if pacing == "round" else "one matchup per day"
-        await message.channel.send(f"✅ Bracket pacing set to **{pacing}** — {detail}.")
-        return
 
-    # ── Seasons ───────────────────────────────────────────────────────────
-    if content_lower.startswith("!addseason"):
-        if not is_admin:
-            await message.channel.send(_NO_PERM)
-            return
-        parts = content.split(None, 3)   # !addseason, <start>, <end>, <name...>
-        if len(parts) < 4:
-            await message.channel.send(
-                "⚠️ Usage: `!addseason <start> <end> <name>`\n"
-                "Dates are `YYYY-MM-DD` in your server's timezone. "
-                "Example: `!addseason 2026-10-01 2026-10-31 Halloween 2026`"
-            )
-            return
-        _, start_str, end_str, name = parts
-        name = name.strip()
-        cfg  = get_config(gid)
-        try:
-            tz = pytz.timezone(cfg["timezone"] or "US/Eastern")
-        except pytz.exceptions.UnknownTimeZoneError:
-            tz = pytz.timezone("US/Eastern")
-        try:
-            start_utc, end_utc = _parse_season_dates(start_str, end_str, tz)
-        except ValueError:
-            await message.channel.send(
-                "⚠️ Invalid dates. Use `YYYY-MM-DD` for both, and make sure the end is on/after the start."
-            )
-            return
-        if add_season(gid, name, start_utc, end_utc):
-            await message.channel.send(
-                f"✅ Season **{name}** created: {start_str} → {end_str}.\n"
-                f"Start it any time with `!startbracket season {name}`."
-            )
-        else:
-            await message.channel.send(f'⚠️ A season named "{name}" already exists. Remove it first with `!removeseason`.')
-        return
+@client.tree.command(name="setup", description="Show the setup guide")
+@app_commands.guild_only()
+@admin_only()
+async def setup_cmd(interaction: discord.Interaction):
+    await interaction.response.send_message(_SETUP_TEXT, ephemeral=True)
 
-    if content_lower.startswith("!listseasons"):
-        if not is_admin:
-            await message.channel.send(_NO_PERM)
-            return
-        seasons = get_seasons(gid)
-        if not seasons:
-            await message.channel.send("No seasons defined. Create one with `!addseason <start> <end> <name>`.")
-            return
-        lines = ["**Seasons:**"]
-        for s in seasons:
-            lines.append(f'• **{s["name"]}** — {s["start_at"][:10]} → {s["end_at"][:10]}')
-        lines.append("\nStart one with `!startbracket season <name>`.")
-        await message.channel.send("\n".join(lines))
-        return
 
-    if content_lower.startswith("!removeseason"):
-        if not is_admin:
-            await message.channel.send(_NO_PERM)
-            return
-        arg = content.split(None, 1)
-        name = arg[1].strip() if len(arg) > 1 else ""
-        if not name:
-            await message.channel.send("⚠️ Usage: `!removeseason <name>`")
-            return
-        if remove_season(gid, name):
-            await message.channel.send(f"🗑️ Season **{name}** removed.")
-        else:
-            await message.channel.send(f'⚠️ No season named "{name}". See `!listseasons`.')
-        return
+@client.tree.command(name="showconfig", description="Show this server's current settings")
+@app_commands.guild_only()
+@admin_only()
+async def showconfig_cmd(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    text = await build_config(interaction.guild_id, client)
+    await interaction.followup.send(f"```\n{text}\n```", ephemeral=True)
 
-    # ── Start real bracket (by year or by season) ─────────────────────────
-    if content_lower.startswith("!startbracket"):
-        if not is_admin:
-            await message.channel.send(_NO_PERM)
-            return
-        parts = content.split()
-        if len(parts) > 1 and parts[1].lower() == "season":
-            # Everything after "season" is the season name (may contain spaces).
-            season_name = content.split(None, 2)[2].strip() if len(parts) > 2 else ""
-            if not season_name:
-                await message.channel.send("⚠️ Usage: `!startbracket season <name>` — see `!listseasons`.")
-                return
-            await message.channel.send(f'⏳ Seeding "{season_name}" season bracket...')
-            success, msg = await start_season_bracket(gid, client, season_name)
-            await message.channel.send(msg)
-            return
-        year = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else datetime.now().year
-        await message.channel.send(f"⏳ Seeding {year} bracket...")
-        success, msg = await start_bracket(gid, client, year)
-        await message.channel.send(msg)
-        return
 
-    # ── Test bracket ──────────────────────────────────────────────────────
-    if content_lower.startswith("!testbracket"):
-        if not is_admin:
-            await message.channel.send(_NO_PERM)
-            return
-        await message.channel.send("⏳ Setting up test bracket...")
-        success, msg = await start_test_bracket(gid, client)
-        await message.channel.send(msg)
-        return
+@client.tree.command(name="contributors", description="Submission leaderboard for a channel")
+@app_commands.guild_only()
+@admin_only()
+async def contributors_cmd(interaction: discord.Interaction, category: Literal["quote", "icon", "song"]):
+    await interaction.response.defer(ephemeral=True)
+    result = await build_contributors(interaction.guild_id, client, category)
+    await interaction.followup.send(result, ephemeral=True)
 
-    # ── Force bracket advance ─────────────────────────────────────────────
-    if content_lower.startswith("!forcebracketadvance"):
-        if not is_admin:
-            await message.channel.send(_NO_PERM)
-            return
-        success, msg = await force_bracket_advance(gid, client)
-        await message.channel.send(msg)
-        return
 
-    # ── Bracket status ────────────────────────────────────────────────────
-    if content_lower.startswith("!bracketstatus"):
-        if not is_admin:
-            await message.channel.send(_NO_PERM)
-            return
-        await message.channel.send(get_bracket_status_text(gid))
-        return
+@client.tree.command(name="preview", description="Dry run a rename or song, posted here only")
+@app_commands.guild_only()
+@admin_only()
+async def preview_cmd(interaction: discord.Interaction, what: Literal["rename", "song"]):
+    await interaction.response.defer(ephemeral=True)
+    if what == "rename":
+        await process_rename(interaction.guild_id, client, override_post_channel=interaction.channel, preview=True)
+    else:
+        await process_daily_song(interaction.guild_id, client, override_post_channel=interaction.channel, preview=True)
+    await interaction.followup.send("✅ Preview posted above.", ephemeral=True)
 
-    # ── Cancel bracket ────────────────────────────────────────────────────
-    if content_lower.startswith("!cancelbracket"):
-        if not is_admin:
-            await message.channel.send(_NO_PERM)
-            return
-        bracket = get_active_bracket(gid)
-        if not bracket:
-            await message.channel.send("⚠️ No active bracket to cancel.")
-            return
-        cancel_bracket(bracket["id"])
-        await message.channel.send("🗑️ Active bracket cancelled and removed.")
-        return
 
-    # ── My stats ──────────────────────────────────────────────────────────
-    if content_lower.startswith("!mystats"):
-        status = await message.channel.send("⏳ Scanning channels for your stats...")
-        result = await build_mystats(gid, client, message.author.id, message.author.display_name)
-        await status.edit(content=result)
-        return
+@client.tree.command(name="mystats", description="Your submission counts and last-picked dates")
+@app_commands.guild_only()
+async def mystats_cmd(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    result = await build_mystats(interaction.guild_id, client, interaction.user.id, interaction.user.display_name)
+    await interaction.followup.send(result, ephemeral=True)
 
-    # ── Manual rename ─────────────────────────────────────────────────────
-    if content_lower.startswith("!rename"):
-        cfg = get_config(gid)
-        if get_active_bracket(gid):
-            await message.channel.send(
-                "⚠️ A bracket is currently running — renames are paused until it finishes. "
-                "The winning name will become the server name."
-            )
-            return
-        if cfg["enable_daily_quote"]:
-            await process_rename(gid, client, override_post_channel=message.channel)
-        else:
-            await message.channel.send("⚠️ Daily Quote feature is disabled for this server.")
-        return
 
-    # ── Manual song ───────────────────────────────────────────────────────
-    if content_lower.startswith("!song"):
-        cfg = get_config(gid)
-        if cfg["enable_daily_song"]:
-            await process_daily_song(gid, client)
-        else:
-            await message.channel.send("⚠️ Daily Song feature is disabled for this server.")
+@client.tree.command(name="rename", description="Trigger a server rename now")
+@app_commands.guild_only()
+async def rename_cmd(interaction: discord.Interaction):
+    gid = interaction.guild_id
+    if get_active_bracket(gid):
+        await interaction.response.send_message(
+            "⚠️ A bracket is currently running — renames are paused until it finishes. "
+            "The winning name will become the server name.", ephemeral=True)
         return
+    cfg = get_config(gid)
+    if not cfg["enable_daily_quote"]:
+        await interaction.response.send_message(
+            "⚠️ Daily Quote feature is disabled for this server.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    await process_rename(gid, client, override_post_channel=interaction.channel)
+    await interaction.followup.send("✅ Rename posted.", ephemeral=True)
+
+
+@client.tree.command(name="song", description="Post the song of the day now")
+@app_commands.guild_only()
+async def song_cmd(interaction: discord.Interaction):
+    gid = interaction.guild_id
+    cfg = get_config(gid)
+    if not cfg["enable_daily_song"]:
+        await interaction.response.send_message(
+            "⚠️ Daily Song feature is disabled for this server.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    await process_daily_song(gid, client)
+    await interaction.followup.send("✅ Song of the day posted.", ephemeral=True)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
