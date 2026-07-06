@@ -665,6 +665,12 @@ async def on_message(message: discord.Message):
     # ── Manual rename ─────────────────────────────────────────────────────
     if content_lower.startswith("!rename"):
         cfg = get_config(gid)
+        if get_active_bracket(gid):
+            await message.channel.send(
+                "⚠️ A bracket is currently running — renames are paused until it finishes. "
+                "The winning name will become the server name."
+            )
+            return
         if cfg["enable_daily_quote"]:
             await process_rename(gid, client, override_post_channel=message.channel)
         else:
