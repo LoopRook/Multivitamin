@@ -86,7 +86,21 @@ CREATE TABLE IF NOT EXISTS brackets (
     status        TEXT    DEFAULT 'active',
     current_round INTEGER DEFAULT 1,
     voting_hours  INTEGER DEFAULT 24,
-    created_at    TEXT    NOT NULL
+    created_at    TEXT    NOT NULL,
+    label         TEXT,             -- display name, e.g. '2026', 'Halloween 2026', 'TEST'
+    range_start   TEXT,             -- ISO UTC start of the seeding window (NULL for test)
+    range_end     TEXT              -- ISO UTC end of the seeding window (NULL for test)
+)
+"""
+
+_CREATE_SEASONS = """
+CREATE TABLE IF NOT EXISTS seasons (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id    INTEGER NOT NULL,
+    name        TEXT    NOT NULL,
+    start_at    TEXT    NOT NULL,   -- ISO UTC
+    end_at      TEXT    NOT NULL,   -- ISO UTC
+    created_at  TEXT    NOT NULL
 )
 """
 
@@ -141,6 +155,12 @@ _RENAME_POSTS_MIGRATIONS = [
     ("image_url", "TEXT"),
 ]
 
+_BRACKET_MIGRATIONS = [
+    ("label",       "TEXT"),
+    ("range_start", "TEXT"),
+    ("range_end",   "TEXT"),
+]
+
 
 def db_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
@@ -157,6 +177,8 @@ def init_db() -> None:
         conn.execute(_CREATE_BRACKETS)
         conn.execute(_CREATE_BRACKET_ENTRIES)
         conn.execute(_CREATE_BRACKET_MATCHUPS)
+        conn.execute(_CREATE_SEASONS)
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_seasons_guild_name ON seasons(guild_id, name COLLATE NOCASE)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_history_guild_user ON picks_history(guild_id, user_id, category)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_history_guild_cat_time ON picks_history(guild_id, category, picked_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_rename_posts_guild ON rename_posts(guild_id, posted_at)")
@@ -168,6 +190,11 @@ def init_db() -> None:
         for col, definition in _RENAME_POSTS_MIGRATIONS:
             try:
                 conn.execute(f"ALTER TABLE rename_posts ADD COLUMN {col} {definition}")
+            except sqlite3.OperationalError:
+                pass
+        for col, definition in _BRACKET_MIGRATIONS:
+            try:
+                conn.execute(f"ALTER TABLE brackets ADD COLUMN {col} {definition}")
             except sqlite3.OperationalError:
                 pass
     log.info("Database ready at %s", DB_FILE)
@@ -292,25 +319,42 @@ def store_rename_post(
         conn.commit()
 
 
-def get_rename_posts_for_year(
-    guild_id: int, year_start_utc: str, year_end_utc: str, voting_enabled_at: str | None,
+def get_rename_posts_in_range(
+    guild_id: int, start_utc: str, end_utc: str, floor_utc: str | None = None,
 ) -> list[sqlite3.Row]:
-    since = max(year_start_utc, voting_enabled_at) if voting_enabled_at else year_start_utc
+    """
+    Tracked rename posts with posted_at in [start_utc, end_utc].
+    *floor_utc* (typically voting_enabled_at) raises the lower bound so posts
+    from before tracking began are never included.
+    """
+    since = max(start_utc, floor_utc) if floor_utc else start_utc
     with db_conn() as conn:
         return conn.execute(
             "SELECT * FROM rename_posts "
             "WHERE guild_id=? AND posted_at >= ? AND posted_at <= ? ORDER BY posted_at",
-            (guild_id, since, year_end_utc),
+            (guild_id, since, end_utc),
         ).fetchall()
+
+
+# Backwards-compatible alias — year brackets are just a range query.
+def get_rename_posts_for_year(
+    guild_id: int, year_start_utc: str, year_end_utc: str, voting_enabled_at: str | None,
+) -> list[sqlite3.Row]:
+    return get_rename_posts_in_range(guild_id, year_start_utc, year_end_utc, voting_enabled_at)
 
 
 # ── brackets ──────────────────────────────────────────────────────────────────
 
-def create_bracket(guild_id: int, year: int, size: int, voting_hours: int) -> int:
+def create_bracket(
+    guild_id: int, year: int, size: int, voting_hours: int,
+    label: str | None = None, range_start: str | None = None, range_end: str | None = None,
+) -> int:
     with db_conn() as conn:
         cur = conn.execute(
-            "INSERT INTO brackets (guild_id, year, size, voting_hours, created_at) VALUES (?, ?, ?, ?, ?)",
-            (guild_id, year, size, voting_hours, datetime.now(timezone.utc).isoformat()),
+            "INSERT INTO brackets (guild_id, year, size, voting_hours, created_at, label, range_start, range_end) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (guild_id, year, size, voting_hours, datetime.now(timezone.utc).isoformat(),
+             label, range_start, range_end),
         )
         conn.commit()
         return cur.lastrowid
@@ -405,5 +449,50 @@ def cancel_bracket(bracket_id: int) -> None:
         conn.execute("DELETE FROM bracket_entries  WHERE bracket_id=?", (bracket_id,))
         conn.execute("DELETE FROM brackets          WHERE id=?",         (bracket_id,))
         conn.commit()
+
+
+# ── seasons ───────────────────────────────────────────────────────────────────
+# A season is a named date range per guild. Brackets can be seeded from a season's
+# window (e.g. monthly or holiday competitions) instead of a whole calendar year.
+
+def add_season(guild_id: int, name: str, start_at: str, end_at: str) -> bool:
+    """Create a season. Returns False if the guild already has one by that name (case-insensitive)."""
+    with db_conn() as conn:
+        try:
+            conn.execute(
+                "INSERT INTO seasons (guild_id, name, start_at, end_at, created_at) VALUES (?, ?, ?, ?, ?)",
+                (guild_id, name, start_at, end_at, datetime.now(timezone.utc).isoformat()),
+            )
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+
+def get_season(guild_id: int, name: str) -> sqlite3.Row | None:
+    with db_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM seasons WHERE guild_id=? AND name=? COLLATE NOCASE",
+            (guild_id, name),
+        ).fetchone()
+
+
+def get_seasons(guild_id: int) -> list[sqlite3.Row]:
+    with db_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM seasons WHERE guild_id=? ORDER BY start_at",
+            (guild_id,),
+        ).fetchall()
+
+
+def remove_season(guild_id: int, name: str) -> bool:
+    """Delete a season by name. Returns False if no such season existed."""
+    with db_conn() as conn:
+        cur = conn.execute(
+            "DELETE FROM seasons WHERE guild_id=? AND name=? COLLATE NOCASE",
+            (guild_id, name),
+        )
+        conn.commit()
+        return cur.rowcount > 0
 
 
