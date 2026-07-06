@@ -8,7 +8,10 @@ import aiohttp
 import discord
 import pytz
 
-from db_utils import get_config, set_config, log_pick, get_user_last_picks, get_today_pick_counts, store_rename_post
+from db_utils import (
+    get_config, set_config, log_pick, get_user_last_picks,
+    get_today_pick_counts, store_rename_post, get_active_bracket,
+)
 from image_utils import generate_card, truncate_to_100_chars
 
 log = logging.getLogger(__name__)
@@ -356,6 +359,12 @@ async def process_rename(
     guild = client.get_guild(guild_id)
     if not guild:
         log.warning("[%s] Guild not found — skipping rename.", guild_id)
+        return
+
+    # While a bracket is running, the server name is frozen — the bracket winner
+    # sets it. Renames resume once the bracket completes. Previews are exempt.
+    if not preview and get_active_bracket(guild_id):
+        log.info("[%s] Active bracket — skipping rename (server name frozen until winner).", guild_id)
         return
 
     # Fetch today's cooldown counts per category if cooldown is enabled.
