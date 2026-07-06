@@ -104,6 +104,22 @@ CREATE TABLE IF NOT EXISTS seasons (
 )
 """
 
+_CREATE_CUSTOM_FEATURES = """
+CREATE TABLE IF NOT EXISTS custom_features (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id       INTEGER NOT NULL,
+    name           TEXT    NOT NULL,   -- display caption AND key, e.g. 'Meme of the Day'
+    emoji          TEXT,               -- optional prefix emoji
+    content_type   TEXT    NOT NULL,   -- 'media' | 'link' | 'music' | 'text'
+    source_channel INTEGER NOT NULL,   -- channel to sample from
+    post_channel   INTEGER NOT NULL,   -- channel to post into
+    post_time      TEXT    NOT NULL,   -- 'HH:MM' in the guild timezone
+    enabled        INTEGER DEFAULT 1,
+    last_run_date  TEXT,               -- 'YYYY-MM-DD' in guild tz (double-fire guard)
+    created_at     TEXT    NOT NULL
+)
+"""
+
 _CREATE_BRACKET_ENTRIES = """
 CREATE TABLE IF NOT EXISTS bracket_entries (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -149,6 +165,7 @@ _CONFIG_MIGRATIONS = [
     ("bracket_voting_hours", "INTEGER DEFAULT 24"),
     ("voting_enabled_at",    "TEXT"),
     ("bracket_pacing",       "TEXT DEFAULT 'round'"),
+    ("song_migrated",        "INTEGER DEFAULT 0"),
 ]
 
 _RENAME_POSTS_MIGRATIONS = [
@@ -179,6 +196,8 @@ def init_db() -> None:
         conn.execute(_CREATE_BRACKET_MATCHUPS)
         conn.execute(_CREATE_SEASONS)
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_seasons_guild_name ON seasons(guild_id, name COLLATE NOCASE)")
+        conn.execute(_CREATE_CUSTOM_FEATURES)
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_custom_features_guild_name ON custom_features(guild_id, name COLLATE NOCASE)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_history_guild_user ON picks_history(guild_id, user_id, category)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_history_guild_cat_time ON picks_history(guild_id, category, picked_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_rename_posts_guild ON rename_posts(guild_id, posted_at)")
@@ -197,7 +216,37 @@ def init_db() -> None:
                 conn.execute(f"ALTER TABLE brackets ADD COLUMN {col} {definition}")
             except sqlite3.OperationalError:
                 pass
+        _migrate_song_to_custom_feature(conn)
     log.info("Database ready at %s", DB_FILE)
+
+
+def _migrate_song_to_custom_feature(conn: sqlite3.Connection) -> None:
+    """
+    One-time: turn each guild's built-in song-of-the-day config into a
+    'Song of the Day' custom feature (content_type 'music'), preserving its
+    channels/time/enabled/last-run. Idempotent via the song_migrated flag —
+    it runs once per guild and never resurrects a feature the admin deleted.
+    """
+    rows = conn.execute(
+        "SELECT guild_id, music_channel, song_post_channel, song_time, "
+        "enable_daily_song, last_song_date FROM server_config "
+        "WHERE COALESCE(song_migrated, 0) = 0"
+    ).fetchall()
+    now = datetime.now(timezone.utc).isoformat()
+    for r in rows:
+        if r["music_channel"] and r["song_post_channel"]:
+            conn.execute(
+                "INSERT OR IGNORE INTO custom_features "
+                "(guild_id, name, emoji, content_type, source_channel, post_channel, "
+                " post_time, enabled, last_run_date, created_at) "
+                "VALUES (?, 'Song of the Day', '🎵', 'music', ?, ?, ?, ?, ?, ?)",
+                (r["guild_id"], r["music_channel"], r["song_post_channel"],
+                 r["song_time"] or "10:00",
+                 1 if (r["enable_daily_song"] is None or r["enable_daily_song"]) else 0,
+                 r["last_song_date"], now),
+            )
+        conn.execute("UPDATE server_config SET song_migrated=1 WHERE guild_id=?", (r["guild_id"],))
+    conn.commit()
 
 
 def get_config(guild_id: int) -> sqlite3.Row:
@@ -494,5 +543,82 @@ def remove_season(guild_id: int, name: str) -> bool:
         )
         conn.commit()
         return cur.rowcount > 0
+
+
+# ── custom_features ───────────────────────────────────────────────────────────
+# Admin-defined "X of the day" features (e.g. Meme of the Day). Each is a per-guild
+# named row with its own source/post channels and post time. Song-of-the-day is
+# migrated into this table as a 'music' feature.
+
+def add_custom_feature(
+    guild_id: int, name: str, emoji: str | None, content_type: str,
+    source_channel: int, post_channel: int, post_time: str,
+) -> bool:
+    """Create a custom feature. Returns False if the guild already has one by that name (case-insensitive)."""
+    with db_conn() as conn:
+        try:
+            conn.execute(
+                "INSERT INTO custom_features "
+                "(guild_id, name, emoji, content_type, source_channel, post_channel, post_time, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (guild_id, name, emoji, content_type, source_channel, post_channel,
+                 post_time, datetime.now(timezone.utc).isoformat()),
+            )
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+
+def get_custom_feature(guild_id: int, name: str) -> sqlite3.Row | None:
+    with db_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM custom_features WHERE guild_id=? AND name=? COLLATE NOCASE",
+            (guild_id, name),
+        ).fetchone()
+
+
+def get_custom_features(guild_id: int) -> list[sqlite3.Row]:
+    with db_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM custom_features WHERE guild_id=? ORDER BY post_time, name",
+            (guild_id,),
+        ).fetchall()
+
+
+def count_custom_features(guild_id: int) -> int:
+    with db_conn() as conn:
+        return conn.execute(
+            "SELECT COUNT(*) AS n FROM custom_features WHERE guild_id=?", (guild_id,),
+        ).fetchone()["n"]
+
+
+def remove_custom_feature(guild_id: int, name: str) -> bool:
+    """Delete a custom feature by name. Returns False if no such feature existed."""
+    with db_conn() as conn:
+        cur = conn.execute(
+            "DELETE FROM custom_features WHERE guild_id=? AND name=? COLLATE NOCASE",
+            (guild_id, name),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def set_custom_feature_enabled(guild_id: int, name: str, enabled: bool) -> bool:
+    """Enable/disable a custom feature. Returns False if no such feature existed."""
+    with db_conn() as conn:
+        cur = conn.execute(
+            "UPDATE custom_features SET enabled=? WHERE guild_id=? AND name=? COLLATE NOCASE",
+            (1 if enabled else 0, guild_id, name),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def set_custom_feature_run_date(feature_id: int, date: str) -> None:
+    """Record the last date a feature fired (guild-tz YYYY-MM-DD), for double-fire prevention."""
+    with db_conn() as conn:
+        conn.execute("UPDATE custom_features SET last_run_date=? WHERE id=?", (date, feature_id))
+        conn.commit()
 
 
