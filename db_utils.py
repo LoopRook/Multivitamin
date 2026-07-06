@@ -41,6 +41,16 @@ CREATE TABLE IF NOT EXISTS server_config (
 )
 """
 
+_CREATE_BOT_ADMINS = """
+CREATE TABLE IF NOT EXISTS bot_admins (
+    guild_id    INTEGER NOT NULL,
+    user_id     INTEGER NOT NULL,
+    added_by    INTEGER,
+    added_at    TEXT    NOT NULL,
+    PRIMARY KEY (guild_id, user_id)
+)
+"""
+
 _CREATE_HISTORY = """
 CREATE TABLE IF NOT EXISTS picks_history (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -141,6 +151,7 @@ def db_conn() -> sqlite3.Connection:
 def init_db() -> None:
     with db_conn() as conn:
         conn.execute(_CREATE_CONFIG)
+        conn.execute(_CREATE_BOT_ADMINS)
         conn.execute(_CREATE_HISTORY)
         conn.execute(_CREATE_RENAME_POSTS)
         conn.execute(_CREATE_BRACKETS)
@@ -183,6 +194,52 @@ def set_config(guild_id: int, field: str, value) -> None:
 def show_config(guild_id: int) -> dict:
     """Return raw config row as a dict for display. Channel name resolution happens in bot_features."""
     return dict(get_config(guild_id))
+
+
+# ── bot_admins ────────────────────────────────────────────────────────────────
+# Bot-level admins are stored per guild. They grant admin command access to users
+# who don't hold Discord's Manage Server permission. Managing the roster itself
+# still requires Manage Server (see main.py).
+
+def add_bot_admin(guild_id: int, user_id: int, added_by: int | None) -> bool:
+    """Grant bot-admin to a user. Returns False if they were already an admin."""
+    with db_conn() as conn:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO bot_admins (guild_id, user_id, added_by, added_at) VALUES (?, ?, ?, ?)",
+            (guild_id, user_id, added_by, datetime.now(timezone.utc).isoformat()),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def remove_bot_admin(guild_id: int, user_id: int) -> bool:
+    """Revoke bot-admin from a user. Returns False if they weren't an admin."""
+    with db_conn() as conn:
+        cur = conn.execute(
+            "DELETE FROM bot_admins WHERE guild_id=? AND user_id=?",
+            (guild_id, user_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def get_bot_admins(guild_id: int) -> list[int]:
+    """Return the user IDs of all bot-admins for a guild."""
+    with db_conn() as conn:
+        rows = conn.execute(
+            "SELECT user_id FROM bot_admins WHERE guild_id=? ORDER BY added_at",
+            (guild_id,),
+        ).fetchall()
+    return [row["user_id"] for row in rows]
+
+
+def is_bot_admin(guild_id: int, user_id: int) -> bool:
+    with db_conn() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM bot_admins WHERE guild_id=? AND user_id=?",
+            (guild_id, user_id),
+        ).fetchone()
+    return row is not None
 
 
 # ── picks_history ─────────────────────────────────────────────────────────────
