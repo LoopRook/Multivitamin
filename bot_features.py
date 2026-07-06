@@ -303,7 +303,7 @@ async def build_config(guild_id: int, client: discord.Client) -> str:
     Return a formatted config string with channel IDs resolved to #channel-name.
     Falls back to the raw ID if the channel can't be found (e.g. deleted channel).
     """
-    from db_utils import show_config
+    from db_utils import show_config, get_seasons
     c = show_config(guild_id)
 
     def ch(cid) -> str:
@@ -311,6 +311,15 @@ async def build_config(guild_id: int, client: discord.Client) -> str:
             return "Not Set"
         channel = client.get_channel(cid)
         return f"#{channel.name}" if channel else f"{cid} (not found)"
+
+    # Bracket tracking is always on once a post channel is set.
+    if c["post_channel"]:
+        since = c["voting_enabled_at"]
+        tracking = f"On (since {since[:10]})" if since else "On (awaiting first rename)"
+    else:
+        tracking = "Off (set a Post Channel to enable)"
+
+    season_count = len(get_seasons(guild_id))
 
     lines = [
         f"Guild ID:            {c['guild_id']}",
@@ -323,10 +332,11 @@ async def build_config(guild_id: int, client: discord.Client) -> str:
         f"Quote Feature:       {'Enabled' if c['enable_daily_quote'] else 'Disabled'}",
         f"Song Feature:        {'Enabled' if c['enable_daily_song']  else 'Disabled'}",
         f"Cooldown:            {'Enabled' if c['enable_cooldown']    else 'Disabled'}",
-        f"Voting:              {'Enabled' if c['enable_voting']      else 'Disabled'}",
+        f"Bracket Tracking:    {tracking}",
         f"Bracket Size:        {c['bracket_size'] or 8}",
         f"Bracket Vote Hours:  {c['bracket_voting_hours'] or 24}",
         f"Bracket Pacing:      {c.get('bracket_pacing') or 'round'}",
+        f"Seasons Defined:     {season_count}",
         f"Timezone:            {c['timezone'] or 'US/Eastern'}",
         f"Quote Time:          {c['quote_time'] or '4:00'}",
         f"Song Time:           {c['song_time'] or '10:00'}",
@@ -430,15 +440,19 @@ async def process_rename(
             log.error("[%s] Failed to post card to channel %s: %s", guild_id, channel.id, e)
             continue
 
-        # Voting: add reaction and track the post for bracket seeding.
-        # We track the post_channel message (the "official" daily post).
-        # If post_channel isn't configured, fall back to whatever was sent.
-        is_official = (post_chan_id and channel.id == post_chan_id) or (not post_chan_id)
-        if cfg["enable_voting"] and is_official:
+        # Bracket tracking: record the official daily post so its reactions can
+        # seed a bracket later. Tracking is always on once a post channel is set;
+        # we only track the configured post_channel message (never !rename run in
+        # an arbitrary channel). voting_enabled_at is stamped once as a
+        # "tracking since" floor so brackets never count pre-tracking history.
+        is_official = post_chan_id and channel.id == post_chan_id
+        if is_official:
             # Grab the attachment URL as a cached snapshot.
             # (We always re-fetch fresh at bracket time since CDN URLs expire.)
             img_url = sent.attachments[0].url if sent.attachments else None
             store_rename_post(guild_id, sent.id, sent.channel.id, quote, quote_user, quote_uid, img_url)
+            if not cfg["voting_enabled_at"]:
+                set_config(guild_id, "voting_enabled_at", datetime.now(pytz.utc).isoformat())
 
 
 _is_song_searching: dict[int, bool] = {}

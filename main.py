@@ -1,6 +1,6 @@
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime
 
 import discord
 import pytz
@@ -9,6 +9,7 @@ from db_utils import (
     init_db, set_config, get_config,
     cancel_bracket, get_active_bracket,
     add_bot_admin, remove_bot_admin, get_bot_admins, is_bot_admin,
+    add_season, get_seasons, remove_season,
 )
 from bot_features import (
     process_rename,
@@ -20,6 +21,7 @@ from bot_features import (
 )
 from bracket import (
     start_bracket,
+    start_season_bracket,
     start_test_bracket,
     check_bracket_advancement,
     get_bracket_status_text,
@@ -65,7 +67,6 @@ _FEATURE_MAP: dict[str, tuple[str, str]] = {
     "quote":    ("enable_daily_quote", "Daily Quote"),
     "song":     ("enable_daily_song",  "Daily Song"),
     "cooldown": ("enable_cooldown",    "Cooldown"),
-    "voting":   ("enable_voting",      "Voting"),
 }
 
 _SETUP_TEXT = (
@@ -73,8 +74,9 @@ _SETUP_TEXT = (
     "**Channels** (run each in the target channel):\n"
     "   `!setquotechannel` · `!seticonchannel` · `!setpostchannel`\n"
     "   `!setmusicchannel` · `!setsongpostchannel` · `!setbracketchannel`\n\n"
-    "**Features:** `!enablefeature [quote|song|cooldown|voting]`\n"
-    "             `!disablefeature [quote|song|cooldown|voting]`\n\n"
+    "**Features:** `!enablefeature [quote|song|cooldown]`\n"
+    "             `!disablefeature [quote|song|cooldown]`\n"
+    "   *(Bracket tracking is always on once a Post Channel is set.)*\n\n"
     "**Scheduling:**\n"
     "   `!settimezone <tz>` — e.g. `US/Eastern`, `Europe/London`\n"
     "   `!setscheduletime quote 8:00`\n"
@@ -83,8 +85,11 @@ _SETUP_TEXT = (
     "   `!setbracketsize <4|8|16|32>`\n"
     "   `!setbracketvotingtime <hours>`\n"
     "   `!setbracketpacing [round|daily]`\n"
-    "   `!startbracket [year]` · `!testbracket`\n"
+    "   `!startbracket [year]` · `!startbracket season <name>` · `!testbracket`\n"
     "   `!forcebracketadvance` · `!bracketstatus` · `!cancelbracket`\n\n"
+    "**Seasons:**\n"
+    "   `!addseason <start> <end> <name>` — dates as `YYYY-MM-DD`\n"
+    "   `!listseasons` · `!removeseason <name>`\n\n"
     "**Admins** (Manage Server):\n"
     "   `!addadmin @user` · `!removeadmin @user` · `!listadmins`\n\n"
     "**Other:** `!showconfig` · `!preview rename` · `!preview song`\n"
@@ -139,7 +144,7 @@ def build_help_embed(is_admin: bool = False, is_manager: bool = False) -> discor
         value=(
             "`!setquotechannel` — quote submissions\n"
             "`!seticonchannel` — icon images\n"
-            "`!setpostchannel` — official rename cards (tracked for voting)\n"
+            "`!setpostchannel` — official rename cards (tracked for brackets)\n"
             "`!setmusicchannel` — song links\n"
             "`!setsongpostchannel` — daily song posts\n"
             "`!setbracketchannel` — bracket matchups & results"
@@ -150,7 +155,8 @@ def build_help_embed(is_admin: bool = False, is_manager: bool = False) -> discor
         name="🎚️ Features (Admin)",
         value=(
             "`!enablefeature <name>` · `!disablefeature <name>`\n"
-            "Names: `quote`, `song`, `cooldown`, `voting`"
+            "Names: `quote`, `song`, `cooldown`\n"
+            "*(Bracket tracking is always on once a Post Channel is set.)*"
         ),
         inline=False,
     )
@@ -175,11 +181,21 @@ def build_help_embed(is_admin: bool = False, is_manager: bool = False) -> discor
     embed.add_field(
         name="🏆 Bracket Actions (Admin)",
         value=(
-            "`!startbracket [year]` — seed a real bracket from reactions\n"
+            "`!startbracket [year]` — seed a bracket for a calendar year\n"
+            "`!startbracket season <name>` — seed from a season's window\n"
             "`!testbracket` — test bracket with random scores\n"
             "`!forcebracketadvance` — tally current polls now & advance\n"
             "`!bracketstatus` — current round, pacing & progress\n"
             "`!cancelbracket` — delete the active bracket"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="📅 Seasons (Admin)",
+        value=(
+            "`!addseason <start> <end> <name>` — dates as `YYYY-MM-DD`\n"
+            "`!listseasons` — list defined seasons\n"
+            "`!removeseason <name>` — delete a season"
         ),
         inline=False,
     )
@@ -204,6 +220,22 @@ def build_help_embed(is_admin: bool = False, is_manager: bool = False) -> discor
             inline=False,
         )
     return embed
+
+
+def _parse_season_dates(start_str: str, end_str: str, tz) -> tuple[str, str]:
+    """
+    Parse two YYYY-MM-DD dates (interpreted in *tz*) into ISO UTC bounds:
+    the start's 00:00:00 and the end's 23:59:59. Raises ValueError on a bad
+    format or if the end date precedes the start date.
+    """
+    start_d = datetime.strptime(start_str, "%Y-%m-%d")
+    end_d   = datetime.strptime(end_str,   "%Y-%m-%d")
+    start_utc = tz.localize(start_d.replace(hour=0,  minute=0,  second=0)).astimezone(pytz.utc)
+    end_utc   = tz.localize(end_d.replace(hour=23, minute=59, second=59)).astimezone(pytz.utc)
+    if end_utc < start_utc:
+        raise ValueError("end date precedes start date")
+    return start_utc.isoformat(), end_utc.isoformat()
+
 
 # ── Scheduler dedup ───────────────────────────────────────────────────────────
 
@@ -276,14 +308,15 @@ async def on_message(message: discord.Message):
         if arg in _FEATURE_MAP:
             db_field, label = _FEATURE_MAP[arg]
             set_config(gid, db_field, 1 if enabling else 0)
-            if arg == "voting" and enabling:
-                cfg_now = get_config(gid)
-                if not cfg_now["voting_enabled_at"]:
-                    set_config(gid, "voting_enabled_at", datetime.now(timezone.utc).isoformat())
             verb = "enabled" if enabling else "disabled"
             await message.channel.send(f"✅ {label} feature {verb}.")
+        elif arg == "voting":
+            await message.channel.send(
+                "ℹ️ Voting is no longer a toggle — bracket tracking is always on once a "
+                "**Post Channel** is set (`!setpostchannel`). See `!help` for bracket & season commands."
+            )
         else:
-            await message.channel.send(f'⚠️ Unknown feature "{arg}". Use `quote`, `song`, `cooldown`, or `voting`.')
+            await message.channel.send(f'⚠️ Unknown feature "{arg}". Use `quote`, `song`, or `cooldown`.')
         return
 
     # ── Set timezone ──────────────────────────────────────────────────────
@@ -494,13 +527,89 @@ async def on_message(message: discord.Message):
         await message.channel.send(f"✅ Bracket pacing set to **{pacing}** — {detail}.")
         return
 
-    # ── Start real bracket ────────────────────────────────────────────────
+    # ── Seasons ───────────────────────────────────────────────────────────
+    if content_lower.startswith("!addseason"):
+        if not is_admin:
+            await message.channel.send(_NO_PERM)
+            return
+        parts = content.split(None, 3)   # !addseason, <start>, <end>, <name...>
+        if len(parts) < 4:
+            await message.channel.send(
+                "⚠️ Usage: `!addseason <start> <end> <name>`\n"
+                "Dates are `YYYY-MM-DD` in your server's timezone. "
+                "Example: `!addseason 2026-10-01 2026-10-31 Halloween 2026`"
+            )
+            return
+        _, start_str, end_str, name = parts
+        name = name.strip()
+        cfg  = get_config(gid)
+        try:
+            tz = pytz.timezone(cfg["timezone"] or "US/Eastern")
+        except pytz.exceptions.UnknownTimeZoneError:
+            tz = pytz.timezone("US/Eastern")
+        try:
+            start_utc, end_utc = _parse_season_dates(start_str, end_str, tz)
+        except ValueError:
+            await message.channel.send(
+                "⚠️ Invalid dates. Use `YYYY-MM-DD` for both, and make sure the end is on/after the start."
+            )
+            return
+        if add_season(gid, name, start_utc, end_utc):
+            await message.channel.send(
+                f"✅ Season **{name}** created: {start_str} → {end_str}.\n"
+                f"Start it any time with `!startbracket season {name}`."
+            )
+        else:
+            await message.channel.send(f'⚠️ A season named "{name}" already exists. Remove it first with `!removeseason`.')
+        return
+
+    if content_lower.startswith("!listseasons"):
+        if not is_admin:
+            await message.channel.send(_NO_PERM)
+            return
+        seasons = get_seasons(gid)
+        if not seasons:
+            await message.channel.send("No seasons defined. Create one with `!addseason <start> <end> <name>`.")
+            return
+        lines = ["**Seasons:**"]
+        for s in seasons:
+            lines.append(f'• **{s["name"]}** — {s["start_at"][:10]} → {s["end_at"][:10]}')
+        lines.append("\nStart one with `!startbracket season <name>`.")
+        await message.channel.send("\n".join(lines))
+        return
+
+    if content_lower.startswith("!removeseason"):
+        if not is_admin:
+            await message.channel.send(_NO_PERM)
+            return
+        arg = content.split(None, 1)
+        name = arg[1].strip() if len(arg) > 1 else ""
+        if not name:
+            await message.channel.send("⚠️ Usage: `!removeseason <name>`")
+            return
+        if remove_season(gid, name):
+            await message.channel.send(f"🗑️ Season **{name}** removed.")
+        else:
+            await message.channel.send(f'⚠️ No season named "{name}". See `!listseasons`.')
+        return
+
+    # ── Start real bracket (by year or by season) ─────────────────────────
     if content_lower.startswith("!startbracket"):
         if not is_admin:
             await message.channel.send(_NO_PERM)
             return
         parts = content.split()
-        year  = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else datetime.now().year
+        if len(parts) > 1 and parts[1].lower() == "season":
+            # Everything after "season" is the season name (may contain spaces).
+            season_name = content.split(None, 2)[2].strip() if len(parts) > 2 else ""
+            if not season_name:
+                await message.channel.send("⚠️ Usage: `!startbracket season <name>` — see `!listseasons`.")
+                return
+            await message.channel.send(f'⏳ Seeding "{season_name}" season bracket...')
+            success, msg = await start_season_bracket(gid, client, season_name)
+            await message.channel.send(msg)
+            return
+        year = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else datetime.now().year
         await message.channel.send(f"⏳ Seeding {year} bracket...")
         success, msg = await start_bracket(gid, client, year)
         await message.channel.send(msg)

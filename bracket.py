@@ -18,12 +18,13 @@ import pytz
 
 from db_utils import (
     get_config, set_config, cancel_bracket,
-    get_rename_posts_for_year,
+    get_rename_posts_in_range,
     create_bracket, get_active_bracket,
     create_bracket_entry, get_bracket_entry,
     create_bracket_matchup, update_matchup_posted,
     get_active_round_matchups, set_matchup_winner,
     get_round_winners_ordered, advance_bracket_round, complete_bracket,
+    get_season,
 )
 
 log = logging.getLogger(__name__)
@@ -58,12 +59,38 @@ def _guild_tz(cfg) -> pytz.BaseTzInfo:
 
 
 def _rename_posts_for_bracket(guild_id: int, bracket, cfg, tz: pytz.BaseTzInfo) -> list:
-    """Rename posts for a real bracket's year (empty for test brackets, year==0)."""
+    """
+    Rename posts within a bracket's seeding window, used to re-fetch card images
+    in later rounds.  Uses the range persisted on the bracket (range_start/end);
+    falls back to the calendar year for legacy brackets that predate those
+    columns.  Empty for test brackets (year==0, no range).
+    """
+    start = _bracket_col(bracket, "range_start")
+    end   = _bracket_col(bracket, "range_end")
+    if start and end:
+        return list(get_rename_posts_in_range(guild_id, start, end, cfg["voting_enabled_at"]))
     year = bracket["year"]
     if year <= 0:
         return []
     year_start, year_end = _year_utc_range(year, tz)
-    return list(get_rename_posts_for_year(guild_id, year_start, year_end, cfg["voting_enabled_at"]))
+    return list(get_rename_posts_in_range(guild_id, year_start, year_end, cfg["voting_enabled_at"]))
+
+
+def _bracket_col(bracket, col: str):
+    """Safely read a possibly-absent bracket column (legacy rows / old Row objects)."""
+    try:
+        return bracket[col]
+    except (IndexError, KeyError):
+        return None
+
+
+def _bracket_label(bracket) -> str:
+    """Display label for a bracket: explicit label, else the year, else 'Bracket'."""
+    label = _bracket_col(bracket, "label")
+    if label:
+        return label
+    year = bracket["year"]
+    return "TEST" if year == 0 else str(year)
 
 
 def _year_utc_range(year: int, tz: pytz.BaseTzInfo) -> tuple[str, str]:
@@ -456,7 +483,7 @@ async def start_test_bracket(guild_id: int, client: discord.Client) -> tuple[boo
     nominees = scored[:actual_size]
     total_rounds = int(math.log2(actual_size))
 
-    bracket_id = create_bracket(guild_id, 0, actual_size, voting_hours)
+    bracket_id = create_bracket(guild_id, 0, actual_size, voting_hours, label="TEST")
     entry_ids  = []
     for seed, (score, quote, user) in enumerate(nominees, start=1):
         eid = create_bracket_entry(bracket_id, seed, quote, user, score)
@@ -650,8 +677,17 @@ async def force_bracket_advance(guild_id: int, client: discord.Client) -> tuple[
 
 # ── Core public functions ─────────────────────────────────────────────────────
 
-async def start_bracket(guild_id: int, client: discord.Client, year: int) -> tuple[bool, str]:
-    """Seed and launch a real bracket for *year*, seeded by reaction counts."""
+async def _start_range_bracket(
+    guild_id: int, client: discord.Client,
+    range_start_utc: str, range_end_utc: str,
+    label: str, year_value: int, scope_desc: str,
+) -> tuple[bool, str]:
+    """
+    Shared seeding + launch for real brackets over an arbitrary date window.
+    *label* is the display name ('2026', 'Halloween 2026'); *year_value* is stored
+    in the bracket's year column (must be > 0 so it isn't treated as a test bracket);
+    *scope_desc* appears in the "no posts found" and tally messages.
+    """
     cfg = get_config(guild_id)
 
     if get_active_bracket(guild_id):
@@ -667,17 +703,16 @@ async def start_bracket(guild_id: int, client: discord.Client, year: int) -> tup
     if not math.log2(bracket_size).is_integer():
         return False, f"⚠️ Bracket size must be a power of 2 (4, 8, 16, 32). Currently: {bracket_size}."
 
-    tz = _guild_tz(cfg)
-    year_start, year_end = _year_utc_range(year, tz)
-    posts = get_rename_posts_for_year(guild_id, year_start, year_end, cfg["voting_enabled_at"])
+    tz    = _guild_tz(cfg)
+    posts = get_rename_posts_in_range(guild_id, range_start_utc, range_end_utc, cfg["voting_enabled_at"])
 
     if not posts:
         return False, (
-            f"⚠️ No rename posts found for {year}. "
-            f"Make sure voting is enabled (`!enablefeature voting`) and renames have occurred."
+            f"⚠️ No rename posts found for {scope_desc}. "
+            f"Renames are tracked automatically once a post channel is set (`!setpostchannel`)."
         )
 
-    await bracket_channel.send(f"⏳ Tallying reactions from {len(posts)} rename posts for {year}...")
+    await bracket_channel.send(f"⏳ Tallying reactions from {len(posts)} rename posts for {scope_desc}...")
 
     scored: list[tuple[int, str, str | None]] = []
     for post in posts:
@@ -693,7 +728,7 @@ async def start_bracket(guild_id: int, client: discord.Client, year: int) -> tup
     ranked = sorted(best.items(), key=lambda x: x[1][0], reverse=True)
 
     if len(ranked) < 2:
-        return False, f"⚠️ Only {len(ranked)} unique rename(s) found — need at least 2."
+        return False, f"⚠️ Only {len(ranked)} unique rename(s) found for {scope_desc} — need at least 2."
 
     actual_size = bracket_size
     while actual_size > len(ranked) and actual_size > 2:
@@ -706,7 +741,10 @@ async def start_bracket(guild_id: int, client: discord.Client, year: int) -> tup
 
     nominees = ranked[:actual_size]
 
-    bracket_id = create_bracket(guild_id, year, actual_size, voting_hours)
+    bracket_id = create_bracket(
+        guild_id, year_value, actual_size, voting_hours,
+        label=label, range_start=range_start_utc, range_end=range_end_utc,
+    )
     entry_ids  = []
     for seed, (quote, (score, user)) in enumerate(nominees, start=1):
         eid = create_bracket_entry(bracket_id, seed, quote, user, score)
@@ -714,7 +752,7 @@ async def start_bracket(guild_id: int, client: discord.Client, year: int) -> tup
 
     total_rounds = int(math.log2(actual_size))
     lines = [
-        f"🏆 **{year} Server Name Championship — {actual_size}-name bracket!**",
+        f"🏆 **{label} Server Name Championship — {actual_size}-name bracket!**",
         f"Seeded by total reactions · {total_rounds} round(s) · {voting_hours}h per matchup\n",
     ]
     for seed, (quote, (score, user)) in enumerate(nominees, start=1):
@@ -729,7 +767,39 @@ async def start_bracket(guild_id: int, client: discord.Client, year: int) -> tup
 
     await _post_round(bracket_id, 1, matchup_rows, bracket_channel, cfg, tz, client, list(posts))
 
-    return True, f"✅ Bracket started! {actual_size} nominees, {len(pairs)} first-round matchup(s)."
+    return True, f"✅ {label} bracket started! {actual_size} nominees, {len(pairs)} first-round matchup(s)."
+
+
+async def start_bracket(guild_id: int, client: discord.Client, year: int) -> tuple[bool, str]:
+    """Seed and launch a real bracket for a calendar *year*, seeded by reaction counts."""
+    cfg = get_config(guild_id)
+    tz  = _guild_tz(cfg)
+    year_start, year_end = _year_utc_range(year, tz)
+    return await _start_range_bracket(
+        guild_id, client, year_start, year_end,
+        label=str(year), year_value=year, scope_desc=str(year),
+    )
+
+
+async def start_season_bracket(guild_id: int, client: discord.Client, season_name: str) -> tuple[bool, str]:
+    """Seed and launch a bracket from a named season's date window."""
+    season = get_season(guild_id, season_name)
+    if not season:
+        return False, (
+            f'⚠️ No season named "{season_name}". '
+            f"Create one with `!addseason <start> <end> <name>` or see `!listseasons`."
+        )
+    # Display the season's real name (preserves original casing) and derive the
+    # stored year from the window start so it's never mistaken for a test bracket.
+    name = season["name"]
+    try:
+        year_value = datetime.fromisoformat(season["start_at"]).year
+    except ValueError:
+        year_value = datetime.now(pytz.utc).year
+    return await _start_range_bracket(
+        guild_id, client, season["start_at"], season["end_at"],
+        label=name, year_value=max(year_value, 1), scope_desc=f'season "{name}"',
+    )
 
 
 async def check_bracket_advancement(guild_id: int, client: discord.Client) -> None:
@@ -827,7 +897,7 @@ async def check_bracket_advancement(guild_id: int, client: discord.Client) -> No
         complete_bracket(bracket["id"])
         _test_card_cache.pop(bracket["id"], None)
         await bracket_channel.send(
-            f"\n🎊🏆🎊 **{bracket['year']} SERVER NAME CHAMPION** 🎊🏆🎊\n\n"
+            f"\n🎊🏆🎊 **{_bracket_label(bracket)} SERVER NAME CHAMPION** 🎊🏆🎊\n\n"
             f'**"{champion["quote"]}"**\n'
             f'*submitted by {champion["quote_user"] or "Unknown"} · '
             f'{champion["season_reactions"]} reactions this season*\n\n'
@@ -863,9 +933,8 @@ def get_bracket_status_text(guild_id: int) -> str:
     label        = _round_label(bracket["current_round"], total_rounds)
     matchups     = get_active_round_matchups(bracket["id"], bracket["current_round"])
     done         = sum(1 for m in matchups if m["status"] == "complete")
-    year_label   = "TEST" if bracket["year"] == 0 else str(bracket["year"])
     lines = [
-        f"**{year_label} Bracket** — {label}",
+        f"**{_bracket_label(bracket)} Bracket** — {label}",
         f"Size: {bracket['size']} · Round {bracket['current_round']}/{total_rounds} · "
         f"{done}/{len(matchups)} matchups complete",
         f"Pacing: **{pacing}**" + (" (all matchups at once)" if pacing == "round" else " (one matchup per day)"),
