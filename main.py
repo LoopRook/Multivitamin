@@ -8,6 +8,7 @@ import pytz
 from db_utils import (
     init_db, set_config, get_config,
     cancel_bracket, get_active_bracket,
+    add_bot_admin, remove_bot_admin, get_bot_admins, is_bot_admin,
 )
 from bot_features import (
     process_rename,
@@ -84,11 +85,125 @@ _SETUP_TEXT = (
     "   `!setbracketpacing [round|daily]`\n"
     "   `!startbracket [year]` · `!testbracket`\n"
     "   `!forcebracketadvance` · `!bracketstatus` · `!cancelbracket`\n\n"
+    "**Admins** (Manage Server):\n"
+    "   `!addadmin @user` · `!removeadmin @user` · `!listadmins`\n\n"
     "**Other:** `!showconfig` · `!preview rename` · `!preview song`\n"
-    "   `!contributors [quote|icon|song]` · `!mystats`"
+    "   `!contributors [quote|icon|song]` · `!mystats`\n\n"
+    "**See every command:** `!help` (or `!commands`)"
 )
 
 _NO_PERM = "⚠️ You don't have permission to use this command."
+
+
+def build_help_embed(is_admin: bool = False, is_manager: bool = False) -> discord.Embed:
+    """
+    Command reference grouped by category.
+    Admin-only sections are included only when *is_admin* is True, so ordinary
+    members see just the commands they can actually run.  The bot-admin roster
+    section is shown only to *is_manager* (Manage Server) users.
+    """
+    if is_admin:
+        description = (
+            "All commands use the `!` prefix. The **(Admin)** sections below require the "
+            "*Manage Server* permission or bot-admin status. The bot ignores replies, so "
+            "quoting a message won't trigger anything."
+        )
+    else:
+        description = (
+            "All commands use the `!` prefix. The bot ignores replies, so quoting a message "
+            "won't trigger anything."
+        )
+
+    embed = discord.Embed(
+        title="📖 Command Reference",
+        description=description,
+        color=discord.Color.blurple(),
+    )
+
+    embed.add_field(
+        name="🌐 Everyone",
+        value=(
+            "`!rename` — trigger a rename now\n"
+            "`!song` — post the song of the day\n"
+            "`!mystats` — your submission counts & last picks\n"
+            "`!help` · `!commands` — show this list"
+        ),
+        inline=False,
+    )
+
+    if not is_admin:
+        return embed
+
+    embed.add_field(
+        name="📺 Channels (Admin) — run inside the target channel",
+        value=(
+            "`!setquotechannel` — quote submissions\n"
+            "`!seticonchannel` — icon images\n"
+            "`!setpostchannel` — official rename cards (tracked for voting)\n"
+            "`!setmusicchannel` — song links\n"
+            "`!setsongpostchannel` — daily song posts\n"
+            "`!setbracketchannel` — bracket matchups & results"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="🎚️ Features (Admin)",
+        value=(
+            "`!enablefeature <name>` · `!disablefeature <name>`\n"
+            "Names: `quote`, `song`, `cooldown`, `voting`"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="⏰ Scheduling (Admin)",
+        value=(
+            "`!settimezone <tz>` — IANA name, e.g. `US/Eastern`\n"
+            "`!setscheduletime quote 8:00`\n"
+            "`!setscheduletime song 12:00`"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="🏆 Bracket Setup (Admin)",
+        value=(
+            "`!setbracketsize <4|8|16|32>`\n"
+            "`!setbracketvotingtime <hours>` — 1 to 168\n"
+            "`!setbracketpacing <round|daily>` — all matchups at once, or one at a time"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="🏆 Bracket Actions (Admin)",
+        value=(
+            "`!startbracket [year]` — seed a real bracket from reactions\n"
+            "`!testbracket` — test bracket with random scores\n"
+            "`!forcebracketadvance` — tally current polls now & advance\n"
+            "`!bracketstatus` — current round, pacing & progress\n"
+            "`!cancelbracket` — delete the active bracket"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="ℹ️ Info & Preview (Admin)",
+        value=(
+            "`!showconfig` — current settings\n"
+            "`!contributors <quote|icon|song>` — submission leaderboard\n"
+            "`!preview rename` · `!preview song` — dry run, posts here only\n"
+            "`!setup` — quick setup guide"
+        ),
+        inline=False,
+    )
+    if is_manager:
+        embed.add_field(
+            name="👑 Bot Admins (Manage Server only)",
+            value=(
+                "`!addadmin @user` — grant bot-admin access\n"
+                "`!removeadmin @user` — revoke bot-admin access\n"
+                "`!listadmins` — list current bot-admins"
+            ),
+            inline=False,
+        )
+    return embed
 
 # ── Scheduler dedup ───────────────────────────────────────────────────────────
 
@@ -122,7 +237,24 @@ async def on_message(message: discord.Message):
     content       = message.content.strip()
     content_lower = content.lower()
     gid           = message.guild.id
-    is_admin      = message.author.guild_permissions.manage_guild
+    # Manage Server holders always count as admins; so do users granted bot-admin.
+    # Managing the bot-admin roster itself requires Manage Server (is_manager).
+    is_manager    = message.author.guild_permissions.manage_guild
+    is_admin      = is_manager or is_bot_admin(gid, message.author.id)
+
+    # ── Help / command list (anyone) ──────────────────────────────────────
+    if content_lower.startswith("!help") or content_lower.startswith("!commands"):
+        embed = build_help_embed(is_admin, is_manager)
+        try:
+            await message.channel.send(embed=embed)
+        except discord.HTTPException:
+            # Fall back to plain text if embeds aren't permitted here, keeping
+            # the same admin/non-admin gating as the embed.
+            lines = [f"**{embed.title}**", embed.description, ""]
+            for f in embed.fields:
+                lines += [f"__{f.name}__", f.value, ""]
+            await message.channel.send("\n".join(lines))
+        return
 
     # ── Channel setters ───────────────────────────────────────────────────
     for cmd, (field, reply) in _CHANNEL_SETTERS.items():
@@ -215,6 +347,67 @@ async def on_message(message: discord.Message):
             await message.channel.send(_NO_PERM)
             return
         await message.channel.send(_SETUP_TEXT)
+        return
+
+    # ── Bot admin roster (Manage Server only) ─────────────────────────────
+    if content_lower.startswith("!addadmin") or content_lower.startswith("!removeadmin"):
+        if not is_manager:
+            await message.channel.send(
+                "⚠️ Only members with the **Manage Server** permission can manage bot-admins."
+            )
+            return
+        adding = content_lower.startswith("!addadmin")
+        verb   = "addadmin" if adding else "removeadmin"
+
+        # Resolve the target: prefer a mention, otherwise a raw user ID.
+        target_id = target_name = None
+        if message.mentions:
+            target      = message.mentions[0]
+            target_id   = target.id
+            target_name = target.display_name
+        else:
+            parts = content.split()
+            if len(parts) >= 2 and parts[1].isdigit():
+                target_id = int(parts[1])
+                member    = message.guild.get_member(target_id)
+                target_name = member.display_name if member else str(target_id)
+
+        if not target_id:
+            await message.channel.send(f"⚠️ Usage: `!{verb} @user` (you can also pass a user ID).")
+            return
+
+        if adding:
+            created = add_bot_admin(gid, target_id, message.author.id)
+            if created:
+                await message.channel.send(f"✅ **{target_name}** is now a bot-admin and can use admin commands.")
+            else:
+                await message.channel.send(f"ℹ️ **{target_name}** is already a bot-admin.")
+        else:
+            removed = remove_bot_admin(gid, target_id)
+            if removed:
+                await message.channel.send(f"✅ **{target_name}** is no longer a bot-admin.")
+            else:
+                await message.channel.send(f"ℹ️ **{target_name}** wasn't a bot-admin.")
+        return
+
+    # ── List bot admins (Manage Server only) ──────────────────────────────
+    if content_lower.startswith("!listadmins"):
+        if not is_manager:
+            await message.channel.send(
+                "⚠️ Only members with the **Manage Server** permission can view the bot-admin list."
+            )
+            return
+        admin_ids = get_bot_admins(gid)
+        if not admin_ids:
+            await message.channel.send(
+                "No bot-admins configured. Anyone with the **Manage Server** permission already has admin access."
+            )
+            return
+        lines = ["**Bot Admins** *(in addition to Manage Server holders)*:"]
+        for uid in admin_ids:
+            member = message.guild.get_member(uid)
+            lines.append(f"• {member.display_name if member else f'User {uid}'} (`{uid}`)")
+        await message.channel.send("\n".join(lines))
         return
 
     # ── Preview ───────────────────────────────────────────────────────────
