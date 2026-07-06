@@ -82,7 +82,8 @@ _SETUP_TEXT = (
     "   `/config timezone <tz>` — e.g. `US/Eastern`, `Europe/London`\n"
     "   `/config scheduletime quote <H:MM>` — the daily rename time\n\n"
     "**Daily features** (make your own 'X of the day' — meme, critter, song…):\n"
-    "   `/daily add <name> <type> <source> <destination> <time> [emoji]`\n"
+    "   `/daily setup` — guided step-by-step (easiest)\n"
+    "   `/daily add <name> <type> <source> <destination> <time> [emoji]` — one-shot\n"
     "   `/daily list` · `/daily toggle` · `/daily preview` · `/daily run` · `/daily remove`\n\n"
     "**Bracket:**\n"
     "   `/bracket size` · `/bracket votingtime` · `/bracket pacing`\n"
@@ -157,7 +158,8 @@ def build_help_embed(is_admin: bool = False, is_manager: bool = False) -> discor
     embed.add_field(
         name="🗓️ Daily features (Admin) — your own 'X of the day'",
         value=(
-            "`/daily add <name> <type> <source> <destination> <time> [emoji]`\n"
+            "`/daily setup` — **guided** step-by-step (pick channels, type, name)\n"
+            "`/daily add <name> <type> <source> <destination> <time> [emoji]` — one-shot\n"
             "types: `media` (memes/gifs/images), `link`, `music`, `text`\n"
             "`/daily list` · `/daily toggle <name> <on/off>`\n"
             "`/daily preview <name>` · `/daily run <name>` · `/daily remove <name>`"
@@ -565,7 +567,108 @@ def _feature_summary(f) -> str:
     return f"{flag} {emo}**{f['name']}** · `{f['content_type']}` · {src} → {dst} · {f['post_time']}"
 
 
-@daily_group.command(name="add", description="Create a custom 'X of the day' (e.g. Meme of the Day)")
+def _create_daily_feature(guild_id: int, name: str, emoji: str | None, ctype: str,
+                          source_id: int, dest_id: int, time: str) -> str:
+    """
+    Validate inputs and create a custom feature. Returns a user-facing status
+    message. Shared by `/daily add` and the guided `/daily setup` flow so both
+    enforce the same rules.
+    """
+    name = (name or "").strip()
+    if not name:
+        return "⚠️ Name can't be empty."
+    if not _valid_hhmm(time):
+        return "⚠️ Time must be `H:MM` or `HH:MM` (24-hour), e.g. `12:00`."
+    if count_custom_features(guild_id) >= _MAX_CUSTOM_FEATURES:
+        return f"⚠️ You've reached the limit of {_MAX_CUSTOM_FEATURES} daily features. Remove one first."
+    if add_custom_feature(guild_id, name, (emoji or None), ctype, source_id, dest_id, time):
+        return (f"✅ **{name}** created ({_CUSTOM_TYPE_HELP[ctype]}): <#{source_id}> → <#{dest_id}> "
+                f"daily at `{time}`.\nTry it now with `/daily preview name:{name}`.")
+    return f'⚠️ A feature named "{name}" already exists. Remove it first with `/daily remove`.'
+
+
+# ── Guided /daily setup (channel pickers + type dropdown + a name/time form) ───
+
+_TYPE_SELECT_OPTIONS = [
+    discord.SelectOption(label="Media — memes, gifs, images, videos", value="media", emoji="🖼️"),
+    discord.SelectOption(label="Link — any web link", value="link", emoji="🔗"),
+    discord.SelectOption(label="Music — YouTube / Spotify / SoundCloud", value="music", emoji="🎵"),
+    discord.SelectOption(label="Text — a line of text", value="text", emoji="💬"),
+]
+
+
+class _DailyNameModal(discord.ui.Modal, title="Name your daily feature"):
+    """Final step of /daily setup — collects the name, time, and optional emoji."""
+    name_in  = discord.ui.TextInput(label="Name", placeholder="Meme of the Day", max_length=80)
+    time_in  = discord.ui.TextInput(label="Time (24-hour H:MM, server timezone)", placeholder="12:00", max_length=5)
+    emoji_in = discord.ui.TextInput(label="Emoji (optional)", required=False, max_length=8, placeholder="🖼️")
+
+    def __init__(self, view: "_DailySetupView"):
+        super().__init__()
+        self._view = view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        msg = _create_daily_feature(
+            interaction.guild_id, self.name_in.value, self.emoji_in.value,
+            self._view.ctype, self._view.source_id, self._view.dest_id, self.time_in.value,
+        )
+        await interaction.response.send_message(msg, ephemeral=True)
+
+
+class _DailySetupView(discord.ui.View):
+    """Ephemeral panel: source picker, destination picker, type dropdown, create button."""
+    def __init__(self, author_id: int):
+        super().__init__(timeout=300)
+        self.author_id = author_id
+        self.source_id: Optional[int] = None
+        self.dest_id:   Optional[int] = None
+        self.ctype:     Optional[str] = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                "This setup panel isn't yours — run `/daily setup` yourself.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.select(cls=discord.ui.ChannelSelect, channel_types=[discord.ChannelType.text],
+                       placeholder="1) Source — the channel to pick from", row=0)
+    async def source_select(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
+        self.source_id = select.values[0].id
+        await interaction.response.defer()
+
+    @discord.ui.select(cls=discord.ui.ChannelSelect, channel_types=[discord.ChannelType.text],
+                       placeholder="2) Destination — where to post it", row=1)
+    async def dest_select(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
+        self.dest_id = select.values[0].id
+        await interaction.response.defer()
+
+    @discord.ui.select(placeholder="3) Type — what to pick", options=_TYPE_SELECT_OPTIONS, row=2)
+    async def type_select(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.ctype = select.values[0]
+        await interaction.response.defer()
+
+    @discord.ui.button(label="Name it & create", style=discord.ButtonStyle.success, emoji="✅", row=3)
+    async def create_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        missing = [label for label, val in
+                   (("source", self.source_id), ("destination", self.dest_id), ("type", self.ctype)) if not val]
+        if missing:
+            await interaction.response.send_message(
+                f"⚠️ Pick **{', '.join(missing)}** above first, then hit create.", ephemeral=True)
+            return
+        await interaction.response.send_modal(_DailyNameModal(self))
+
+
+@daily_group.command(name="setup", description="Guided, step-by-step setup for a custom daily feature")
+@admin_only()
+async def daily_setup(interaction: discord.Interaction):
+    await interaction.response.send_message(
+        "🛠️ **New daily feature** — pick a **source** channel, a **destination**, and a **type** below, "
+        "then hit **Name it & create** to set the name, time, and emoji.",
+        view=_DailySetupView(interaction.user.id), ephemeral=True)
+
+
+@daily_group.command(name="add", description="Create a custom 'X of the day' in one command")
 @app_commands.describe(
     name="Display name, e.g. 'Meme of the Day'",
     type="What to pick — media (memes/gifs/images), link, music, or text",
@@ -579,27 +682,9 @@ async def daily_add(interaction: discord.Interaction, name: str,
                     type: Literal["media", "link", "music", "text"],
                     source: discord.TextChannel, destination: discord.TextChannel,
                     time: str, emoji: Optional[str] = None):
-    name = name.strip()
-    if not name:
-        await interaction.response.send_message("⚠️ Name can't be empty.", ephemeral=True)
-        return
-    if not _valid_hhmm(time):
-        await interaction.response.send_message(
-            "⚠️ Time must be `H:MM` or `HH:MM` (24-hour), e.g. `12:00`.", ephemeral=True)
-        return
-    if count_custom_features(interaction.guild_id) >= _MAX_CUSTOM_FEATURES:
-        await interaction.response.send_message(
-            f"⚠️ You've reached the limit of {_MAX_CUSTOM_FEATURES} daily features. Remove one first.",
-            ephemeral=True)
-        return
-    if add_custom_feature(interaction.guild_id, name, (emoji or None), type,
-                          source.id, destination.id, time):
-        await interaction.response.send_message(
-            f"✅ **{name}** created ({_CUSTOM_TYPE_HELP[type]}): {source.mention} → {destination.mention} "
-            f"daily at `{time}`.\nTry it now with `/daily preview name:{name}`.", ephemeral=True)
-    else:
-        await interaction.response.send_message(
-            f'⚠️ A feature named "{name}" already exists. Remove it first with `/daily remove`.', ephemeral=True)
+    msg = _create_daily_feature(interaction.guild_id, name, emoji, type,
+                                source.id, destination.id, time)
+    await interaction.response.send_message(msg, ephemeral=True)
 
 
 @daily_group.command(name="list", description="List this server's custom daily features")
