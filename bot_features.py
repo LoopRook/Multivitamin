@@ -527,28 +527,33 @@ async def process_daily_song(
 async def scheduler_loop(client: discord.Client) -> None:
     await client.wait_until_ready()
     log.info("⏰ Scheduler loop started (checking every 60 s)")
+    from bracket import check_bracket_advancement
     while not client.is_closed():
         await asyncio.sleep(60)
         now_utc = datetime.now(pytz.utc)
         for guild in client.guilds:
-            cfg  = get_config(guild.id)
-            tz   = _guild_tz(cfg)
-            now  = now_utc.astimezone(tz)
-            today    = now.strftime("%Y-%m-%d")
-            cur_time = now.strftime("%H:%M")
+            # Isolate each guild: one guild's failure must not abort the cycle
+            # for every other guild (critical for a multi-tenant public bot).
+            try:
+                cfg  = get_config(guild.id)
+                tz   = _guild_tz(cfg)
+                now  = now_utc.astimezone(tz)
+                today    = now.strftime("%Y-%m-%d")
+                cur_time = now.strftime("%H:%M")
 
-            if cfg["enable_daily_quote"]:
-                scheduled = _normalize_time(cfg["quote_time"] or "04:00")
-                if cur_time == scheduled and cfg["last_quote_date"] != today:
-                    set_config(guild.id, "last_quote_date", today)
-                    await process_rename(guild.id, client)
+                if cfg["enable_daily_quote"]:
+                    scheduled = _normalize_time(cfg["quote_time"] or "04:00")
+                    if cur_time == scheduled and cfg["last_quote_date"] != today:
+                        set_config(guild.id, "last_quote_date", today)
+                        await process_rename(guild.id, client)
 
-            if cfg["enable_daily_song"]:
-                scheduled = _normalize_time(cfg["song_time"] or "10:00")
-                if cur_time == scheduled and cfg["last_song_date"] != today:
-                    set_config(guild.id, "last_song_date", today)
-                    await process_daily_song(guild.id, client)
+                if cfg["enable_daily_song"]:
+                    scheduled = _normalize_time(cfg["song_time"] or "10:00")
+                    if cur_time == scheduled and cfg["last_song_date"] != today:
+                        set_config(guild.id, "last_song_date", today)
+                        await process_daily_song(guild.id, client)
 
-            # Check for bracket matchups that need tallying/advancing
-            from bracket import check_bracket_advancement
-            await check_bracket_advancement(guild.id, client)
+                # Check for bracket matchups that need tallying/advancing
+                await check_bracket_advancement(guild.id, client)
+            except Exception:
+                log.exception("[%s] Scheduler tick failed for guild — continuing.", guild.id)
