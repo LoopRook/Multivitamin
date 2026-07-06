@@ -32,9 +32,6 @@ log = logging.getLogger(__name__)
 _POLL_QUESTION_LIMIT = 300
 _POLL_ANSWER_LIMIT   = 55  # Discord hard limit for poll answer text
 
-# Discord allows max 10 embeds and 10 files per message; 4 matchups = 8 of each.
-_MATCHUPS_PER_CARD_MESSAGE = 4
-
 # Test-bracket card images, generated in memory by start_test_bracket.
 # Module-level so the bytes survive across rounds (round 2+ is posted from a
 # fresh get_config() in force_bracket_advance / check_bracket_advancement).
@@ -275,6 +272,66 @@ def _build_matchup_embeds(match_num: int, entry_a, entry_b, bytes_a, bytes_b):
     return embeds, files
 
 
+async def _post_matchup(
+    channel: discord.TextChannel,
+    bracket_id: int,
+    matchup_id: int,
+    entry_a, entry_b,
+    cfg,
+    round_label: str,
+    match_num: int,
+    total_matches: int,
+    ends_at_dt: datetime,
+    ends_at_utc: str,
+    client: discord.Client,
+    rename_posts: list,
+) -> discord.Message | None:
+    """
+    Post one matchup as the original two-message pair:
+      1. Both cards as embeds (with their images attached) under a header.
+      2. A Discord native poll.
+    (Discord polls can't share a message with embeds/attachments, so the cards
+    and the poll are separate messages.)  Records the poll message id + end time
+    and returns the poll message.
+    """
+    voting_hours = cfg["bracket_voting_hours"] or 24
+    ends_str     = ends_at_dt.strftime("%b %d at %I:%M %p %Z")
+
+    bytes_a, bytes_b = await asyncio.gather(
+        _get_card_bytes(entry_a, bracket_id, client, rename_posts),
+        _get_card_bytes(entry_b, bracket_id, client, rename_posts),
+    )
+    embeds, files = _build_matchup_embeds(match_num, entry_a, entry_b, bytes_a, bytes_b)
+
+    header = (
+        f"─────────────────────────\n"
+        f"🏆 **{round_label}** — Match {match_num + 1} of {total_matches}\n"
+        f"Voting closes **{ends_str}** — poll below!"
+    )
+    try:
+        await channel.send(content=header, embeds=embeds, files=files)
+    except discord.HTTPException as e:
+        log.error("Failed to post matchup cards for %s: %s", matchup_id, e)
+    await asyncio.sleep(1.0)
+
+    answer_a = f"A: {entry_a['quote']}"[:_POLL_ANSWER_LIMIT]
+    answer_b = f"B: {entry_b['quote']}"[:_POLL_ANSWER_LIMIT]
+    question = f"{round_label} — Match {match_num + 1} of {total_matches}: Which name wins?"[:_POLL_QUESTION_LIMIT]
+
+    poll = discord.Poll(question=question, duration=timedelta(hours=voting_hours), multiple=False)
+    poll.add_answer(text=answer_a)
+    poll.add_answer(text=answer_b)
+
+    try:
+        poll_msg = await channel.send(poll=poll)
+    except discord.HTTPException as e:
+        log.error("Failed to post poll for matchup %s: %s", matchup_id, e)
+        return None
+
+    update_matchup_posted(matchup_id, poll_msg.id, channel.id, ends_at_utc)
+    return poll_msg
+
+
 async def _post_daily_matchup(
     bracket_id: int,
     matchup_id: int,
@@ -290,68 +347,21 @@ async def _post_daily_matchup(
     round_label: str,
 ) -> None:
     """
-    Post a single matchup (its two cards, then its poll) for daily pacing and
-    record the poll message.  Computes a fresh voting window from now.
+    Post a single matchup (cards + poll) for daily pacing, computing a fresh
+    voting window from now.  Used for the first matchup of a round and for each
+    subsequent matchup the scheduler posts as polls close.
     """
     voting_hours = cfg["bracket_voting_hours"] or 24
     ends_at_dt   = datetime.now(tz) + timedelta(hours=voting_hours)
     ends_at_utc  = ends_at_dt.astimezone(pytz.utc).isoformat()
-    ends_str     = ends_at_dt.strftime("%b %d at %I:%M %p %Z")
 
     entry_a = get_bracket_entry(entry_a_id)
     entry_b = get_bracket_entry(entry_b_id)
-    bytes_a, bytes_b = await asyncio.gather(
-        _get_card_bytes(entry_a, bracket_id, client, rename_posts),
-        _get_card_bytes(entry_b, bracket_id, client, rename_posts),
+    await _post_matchup(
+        channel, bracket_id, matchup_id, entry_a, entry_b, cfg,
+        round_label, match_num, total_matches, ends_at_dt, ends_at_utc,
+        client, rename_posts,
     )
-    embeds, files = _build_matchup_embeds(match_num, entry_a, entry_b, bytes_a, bytes_b)
-
-    header = (
-        f"─────────────────────────\n"
-        f"🏆 **{round_label}** — Match {match_num + 1} of {total_matches}\n"
-        f"Voting closes **{ends_str}** — poll below!"
-    )
-    try:
-        await channel.send(content=header, embeds=embeds, files=files)
-    except discord.HTTPException as e:
-        log.error("Failed to post daily matchup cards: %s", e)
-    await asyncio.sleep(1.0)
-
-    poll_msg = await _post_matchup(
-        channel, matchup_id, entry_a, entry_b,
-        round_label, match_num, total_matches, voting_hours,
-    )
-    if poll_msg:
-        update_matchup_posted(matchup_id, poll_msg.id, channel.id, ends_at_utc)
-
-
-async def _post_matchup(
-    channel: discord.TextChannel,
-    matchup_id: int,
-    entry_a, entry_b,
-    round_label: str,
-    match_num: int,
-    total_matches: int,
-    voting_hours: int,
-) -> discord.Message | None:
-    """
-    Post the Discord native poll for one matchup.  The matchup cards are shown
-    in the round's combined card message (see _post_round), so this is poll-only.
-    Returns the poll message (its ID is recorded for vote tallying).
-    """
-    answer_a = f"A: {entry_a['quote']}"[:_POLL_ANSWER_LIMIT]
-    answer_b = f"B: {entry_b['quote']}"[:_POLL_ANSWER_LIMIT]
-    question = f"{round_label} — Match {match_num + 1} of {total_matches}: Which name wins?"[:_POLL_QUESTION_LIMIT]
-
-    poll = discord.Poll(question=question, duration=timedelta(hours=voting_hours), multiple=False)
-    poll.add_answer(text=answer_a)
-    poll.add_answer(text=answer_b)
-
-    try:
-        return await channel.send(poll=poll)
-    except discord.HTTPException as e:
-        log.error("Failed to post poll for matchup %s: %s", matchup_id, e)
-        return None
 
 
 async def _post_round(
@@ -365,15 +375,15 @@ async def _post_round(
     rename_posts: list,
 ) -> None:
     """
-    Post a round's matchups.
+    Post a round's matchups.  Each matchup is its own pair of messages — both
+    cards as embeds, then the poll (the original per-matchup format).
 
-    'round' pacing (default): one combined card message (all matchup cards as
-    embeds, batched to respect Discord's 10-embed/10-file limits) followed by
-    one poll message per matchup.
+    'round' pacing (default): every matchup is posted now, back to back, sharing
+    one voting window.
 
-    'daily' pacing: only the first matchup is posted now (cards + poll); the
-    remaining matchup rows already exist in the DB and are posted one at a time
-    by the advancement scheduler as each poll closes.
+    'daily' pacing: only the first matchup is posted now; the remaining matchup
+    rows already exist in the DB and are posted one at a time by the advancement
+    scheduler as each poll closes.
 
     Poll message IDs and end times are recorded for the advancement scheduler.
     """
@@ -396,56 +406,18 @@ async def _post_round(
             )
         return
 
-    # ── Round pacing: combined cards + all polls at once ──────────────────────
-    ends_at_dt   = datetime.now(tz) + timedelta(hours=voting_hours)
-    ends_at_utc  = ends_at_dt.astimezone(pytz.utc).isoformat()
-    ends_str     = ends_at_dt.strftime("%b %d at %I:%M %p %Z")
+    # ── Round pacing: post every matchup now, sharing one voting window ───────
+    ends_at_dt  = datetime.now(tz) + timedelta(hours=voting_hours)
+    ends_at_utc = ends_at_dt.astimezone(pytz.utc).isoformat()
 
-    # Collect entries and card bytes for every matchup before posting anything.
-    prepared = []  # (match_num, matchup_id, entry_a, entry_b, bytes_a, bytes_b)
     for match_num, (matchup_id, a_id, b_id) in enumerate(matchups):
         entry_a = get_bracket_entry(a_id)
         entry_b = get_bracket_entry(b_id)
-        bytes_a, bytes_b = await asyncio.gather(
-            _get_card_bytes(entry_a, bracket_id, client, rename_posts),
-            _get_card_bytes(entry_b, bracket_id, client, rename_posts),
+        await _post_matchup(
+            channel, bracket_id, matchup_id, entry_a, entry_b, cfg,
+            label, match_num, len(matchups), ends_at_dt, ends_at_utc,
+            client, rename_posts,
         )
-        prepared.append((match_num, matchup_id, entry_a, entry_b, bytes_a, bytes_b))
-
-    # Combined card message(s): every matchup's cards as labeled embeds, with
-    # the images attached to the same message via the attachment:// scheme.
-    for batch_start in range(0, len(prepared), _MATCHUPS_PER_CARD_MESSAGE):
-        batch  = prepared[batch_start:batch_start + _MATCHUPS_PER_CARD_MESSAGE]
-        embeds = []
-        files  = []
-        for match_num, _mid, entry_a, entry_b, bytes_a, bytes_b in batch:
-            m_embeds, m_files = _build_matchup_embeds(match_num, entry_a, entry_b, bytes_a, bytes_b)
-            embeds.extend(m_embeds)
-            files.extend(m_files)
-
-        if batch_start == 0:
-            header = (
-                f"─────────────────────────\n"
-                f"🏆 **{label}** — {len(matchups)} matchup(s)\n"
-                f"Voting closes **{ends_str}** — polls below!"
-            )
-        else:
-            header = f"🏆 **{label}** *(continued)*"
-
-        try:
-            await channel.send(content=header, embeds=embeds, files=files)
-        except discord.HTTPException as e:
-            log.error("Failed to post round card message: %s", e)
-        await asyncio.sleep(1.5)
-
-    # One poll per matchup, in match order.
-    for match_num, matchup_id, entry_a, entry_b, _ba, _bb in prepared:
-        poll_msg = await _post_matchup(
-            channel, matchup_id, entry_a, entry_b,
-            label, match_num, len(matchups), voting_hours,
-        )
-        if poll_msg:
-            update_matchup_posted(matchup_id, poll_msg.id, channel.id, ends_at_utc)
         await asyncio.sleep(1.5)
 
 
