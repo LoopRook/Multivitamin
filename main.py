@@ -12,10 +12,12 @@ from db_utils import (
     cancel_bracket, get_active_bracket,
     add_bot_admin, remove_bot_admin, get_bot_admins, is_bot_admin,
     add_season, get_seasons, remove_season,
+    add_custom_feature, get_custom_feature, get_custom_features,
+    remove_custom_feature, set_custom_feature_enabled, count_custom_features,
 )
 from bot_features import (
     process_rename,
-    process_daily_song,
+    process_custom_daily,
     scheduler_loop,
     build_mystats,
     build_contributors,
@@ -47,21 +49,41 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 
 _FEATURE_MAP: dict[str, tuple[str, str]] = {
     "quote":    ("enable_daily_quote", "Daily Quote"),
-    "song":     ("enable_daily_song",  "Daily Song"),
     "cooldown": ("enable_cooldown",    "Cooldown"),
 }
+
+# Cap on admin-defined "X of the day" features per guild (bounds scheduler cost).
+_MAX_CUSTOM_FEATURES = 10
+# Content types offered by /daily add.
+_CUSTOM_TYPE_HELP = {
+    "media": "any image/gif/video upload or media link",
+    "link":  "any web link",
+    "music": "YouTube / Spotify / SoundCloud links",
+    "text":  "a line of text",
+}
+
+
+def _valid_hhmm(t: str) -> bool:
+    """True if *t* is a valid 24-hour H:MM / HH:MM time."""
+    try:
+        h, m = t.split(":")
+        return 0 <= int(h) <= 23 and 0 <= int(m) <= 59
+    except Exception:
+        return False
 
 _SETUP_TEXT = (
     "**Bot Setup Guide** — all commands are slash (`/`) commands.\n\n"
     "**Channels** (each takes an optional channel; defaults to where you run it):\n"
     "   `/config postchannel` — official rename cards (tracked for brackets)\n"
-    "   `/config quotechannel` · `/config iconchannel` · `/config musicchannel`\n"
-    "   `/config songpostchannel` · `/config bracketchannel`\n\n"
-    "**Features:** `/config feature <quote|song|cooldown> <on/off>`\n"
+    "   `/config quotechannel` · `/config iconchannel` · `/config bracketchannel`\n\n"
+    "**Features:** `/config feature <quote|cooldown> <on/off>`\n"
     "   *(Bracket tracking is always on once a Post Channel is set.)*\n\n"
     "**Scheduling:**\n"
     "   `/config timezone <tz>` — e.g. `US/Eastern`, `Europe/London`\n"
-    "   `/config scheduletime <quote|song> <H:MM>`\n\n"
+    "   `/config scheduletime quote <H:MM>` — the daily rename time\n\n"
+    "**Daily features** (make your own 'X of the day' — meme, critter, song…):\n"
+    "   `/daily add <name> <type> <source> <destination> <time> [emoji]`\n"
+    "   `/daily list` · `/daily toggle` · `/daily preview` · `/daily run` · `/daily remove`\n\n"
     "**Bracket:**\n"
     "   `/bracket size` · `/bracket votingtime` · `/bracket pacing`\n"
     "   `/bracket start [year] [season]` · `/bracket test`\n"
@@ -74,8 +96,8 @@ _SETUP_TEXT = (
 
 _WELCOME_TEXT = (
     "👋 **Thanks for adding me!**\n"
-    "I rename your server daily from community-submitted quotes, post a daily song, and run "
-    "reaction-seeded bracket championships for your favourite names.\n\n"
+    "I rename your server daily from community-submitted quotes, run reaction-seeded bracket "
+    "championships, and can post any 'X of the day' you like — meme, critter, song, and more.\n\n"
     "**Get started:** run `/setup` for the full guide, or `/help` to see every command.\n"
     "Most servers begin with `/config postchannel` and `/config quotechannel`.\n"
     "*(Slash commands can take a few minutes to appear right after inviting.)*"
@@ -118,8 +140,6 @@ def build_help_embed(is_admin: bool = False, is_manager: bool = False) -> discor
             "`/config quotechannel` — quote submissions\n"
             "`/config iconchannel` — icon images\n"
             "`/config postchannel` — official rename cards (tracked for brackets)\n"
-            "`/config musicchannel` — song links\n"
-            "`/config songpostchannel` — daily song posts\n"
             "`/config bracketchannel` — bracket matchups & results"
         ),
         inline=False,
@@ -127,10 +147,20 @@ def build_help_embed(is_admin: bool = False, is_manager: bool = False) -> discor
     embed.add_field(
         name="🎚️ Features & Scheduling (Admin)",
         value=(
-            "`/config feature <quote|song|cooldown> <on/off>`\n"
+            "`/config feature <quote|cooldown> <on/off>`\n"
             "*(Bracket tracking is always on once a Post Channel is set.)*\n"
             "`/config timezone <tz>` — IANA name, e.g. `US/Eastern`\n"
-            "`/config scheduletime <quote|song> <H:MM>`"
+            "`/config scheduletime quote <H:MM>` — the daily rename time"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="🗓️ Daily features (Admin) — your own 'X of the day'",
+        value=(
+            "`/daily add <name> <type> <source> <destination> <time> [emoji]`\n"
+            "types: `media` (memes/gifs/images), `link`, `music`, `text`\n"
+            "`/daily list` · `/daily toggle <name> <on/off>`\n"
+            "`/daily preview <name>` · `/daily run <name>` · `/daily remove <name>`"
         ),
         inline=False,
     )
@@ -158,8 +188,8 @@ def build_help_embed(is_admin: bool = False, is_manager: bool = False) -> discor
         name="ℹ️ Info & Preview (Admin)",
         value=(
             "`/showconfig` — current settings\n"
-            "`/contributors <quote|icon|song>` — submission leaderboard\n"
-            "`/preview <rename|song>` — dry run, posts here only\n"
+            "`/contributors <quote|icon>` — submission leaderboard\n"
+            "`/preview` — dry-run a rename, posted here only\n"
             "`/setup` — quick setup guide"
         ),
         inline=False,
@@ -330,18 +360,6 @@ async def config_postchannel(interaction: discord.Interaction, channel: Optional
     await _set_channel(interaction, "post_channel", "Post channel", channel)
 
 
-@config_group.command(name="musicchannel", description="Set the channel where users post song links")
-@admin_only()
-async def config_musicchannel(interaction: discord.Interaction, channel: Optional[discord.TextChannel] = None):
-    await _set_channel(interaction, "music_channel", "Music channel", channel)
-
-
-@config_group.command(name="songpostchannel", description="Set the channel where the song of the day is posted")
-@admin_only()
-async def config_songpostchannel(interaction: discord.Interaction, channel: Optional[discord.TextChannel] = None):
-    await _set_channel(interaction, "song_post_channel", "Song post channel", channel)
-
-
 @config_group.command(name="bracketchannel", description="Set the channel where bracket matchups & results post")
 @admin_only()
 async def config_bracketchannel(interaction: discord.Interaction, channel: Optional[discord.TextChannel] = None):
@@ -352,7 +370,7 @@ async def config_bracketchannel(interaction: discord.Interaction, channel: Optio
 @app_commands.describe(feature="Which feature", enabled="Turn it on or off")
 @admin_only()
 async def config_feature(interaction: discord.Interaction,
-                         feature: Literal["quote", "song", "cooldown"], enabled: bool):
+                         feature: Literal["quote", "cooldown"], enabled: bool):
     field, label = _FEATURE_MAP[feature]
     set_config(interaction.guild_id, field, 1 if enabled else 0)
     verb = "enabled" if enabled else "disabled"
@@ -376,23 +394,20 @@ async def config_timezone(interaction: discord.Interaction, tz: str):
     await interaction.response.send_message(f"✅ Timezone set to `{tz}`.", ephemeral=True)
 
 
-@config_group.command(name="scheduletime", description="Set the daily quote or song time (24-hour)")
-@app_commands.describe(which="quote or song", time="H:MM or HH:MM, 24-hour, e.g. 8:00")
+@config_group.command(name="scheduletime", description="Set the daily rename (quote) time (24-hour)")
+@app_commands.describe(which="quote (the daily rename)", time="H:MM or HH:MM, 24-hour, e.g. 8:00")
 @admin_only()
 async def config_scheduletime(interaction: discord.Interaction,
-                              which: Literal["quote", "song"], time: str):
-    try:
-        h, m = time.split(":")
-        assert 0 <= int(h) <= 23 and 0 <= int(m) <= 59
-    except Exception:
+                              which: Literal["quote"], time: str):
+    if not _valid_hhmm(time):
         await interaction.response.send_message(
             "⚠️ Time must be in `H:MM` or `HH:MM` format (24-hour).", ephemeral=True)
         return
-    set_config(interaction.guild_id, "quote_time" if which == "quote" else "song_time", time)
+    set_config(interaction.guild_id, "quote_time", time)
     cfg = get_config(interaction.guild_id)
     tz_name = cfg["timezone"] or "US/Eastern"
     await interaction.response.send_message(
-        f"✅ {which.title()} time set to `{time}` ({tz_name}).", ephemeral=True)
+        f"✅ Quote (rename) time set to `{time}` ({tz_name}).", ephemeral=True)
 
 
 client.tree.add_command(config_group)
@@ -537,6 +552,123 @@ async def season_remove(interaction: discord.Interaction, name: str):
 client.tree.add_command(season_group)
 
 
+# ── /daily group — admin-defined "X of the day" features ──────────────────────
+
+daily_group = app_commands.Group(name="daily", description="Custom 'X of the day' features", guild_only=True)
+
+
+def _feature_summary(f) -> str:
+    src  = f"<#{f['source_channel']}>"
+    dst  = f"<#{f['post_channel']}>"
+    flag = "🟢" if f["enabled"] else "⚪"
+    emo  = (f["emoji"] + " ") if f["emoji"] else ""
+    return f"{flag} {emo}**{f['name']}** · `{f['content_type']}` · {src} → {dst} · {f['post_time']}"
+
+
+@daily_group.command(name="add", description="Create a custom 'X of the day' (e.g. Meme of the Day)")
+@app_commands.describe(
+    name="Display name, e.g. 'Meme of the Day'",
+    type="What to pick — media (memes/gifs/images), link, music, or text",
+    source="Channel to pick from",
+    destination="Channel to post into",
+    time="Daily post time, 24-hour H:MM (server timezone)",
+    emoji="Optional emoji shown before the name",
+)
+@admin_only()
+async def daily_add(interaction: discord.Interaction, name: str,
+                    type: Literal["media", "link", "music", "text"],
+                    source: discord.TextChannel, destination: discord.TextChannel,
+                    time: str, emoji: Optional[str] = None):
+    name = name.strip()
+    if not name:
+        await interaction.response.send_message("⚠️ Name can't be empty.", ephemeral=True)
+        return
+    if not _valid_hhmm(time):
+        await interaction.response.send_message(
+            "⚠️ Time must be `H:MM` or `HH:MM` (24-hour), e.g. `12:00`.", ephemeral=True)
+        return
+    if count_custom_features(interaction.guild_id) >= _MAX_CUSTOM_FEATURES:
+        await interaction.response.send_message(
+            f"⚠️ You've reached the limit of {_MAX_CUSTOM_FEATURES} daily features. Remove one first.",
+            ephemeral=True)
+        return
+    if add_custom_feature(interaction.guild_id, name, (emoji or None), type,
+                          source.id, destination.id, time):
+        await interaction.response.send_message(
+            f"✅ **{name}** created ({_CUSTOM_TYPE_HELP[type]}): {source.mention} → {destination.mention} "
+            f"daily at `{time}`.\nTry it now with `/daily preview name:{name}`.", ephemeral=True)
+    else:
+        await interaction.response.send_message(
+            f'⚠️ A feature named "{name}" already exists. Remove it first with `/daily remove`.', ephemeral=True)
+
+
+@daily_group.command(name="list", description="List this server's custom daily features")
+@admin_only()
+async def daily_list(interaction: discord.Interaction):
+    feats = get_custom_features(interaction.guild_id)
+    if not feats:
+        await interaction.response.send_message(
+            "No custom daily features yet. Create one with `/daily add`.", ephemeral=True)
+        return
+    lines = ["**Daily features:**"] + [_feature_summary(f) for f in feats]
+    await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
+
+@daily_group.command(name="remove", description="Delete a custom daily feature")
+@app_commands.describe(name="The feature's name")
+@admin_only()
+async def daily_remove(interaction: discord.Interaction, name: str):
+    if remove_custom_feature(interaction.guild_id, name.strip()):
+        await interaction.response.send_message(f"🗑️ **{name}** removed.", ephemeral=True)
+    else:
+        await interaction.response.send_message(
+            f'⚠️ No feature named "{name}". See `/daily list`.', ephemeral=True)
+
+
+@daily_group.command(name="toggle", description="Enable or disable a custom daily feature")
+@app_commands.describe(name="The feature's name", enabled="Turn it on or off")
+@admin_only()
+async def daily_toggle(interaction: discord.Interaction, name: str, enabled: bool):
+    if set_custom_feature_enabled(interaction.guild_id, name.strip(), enabled):
+        await interaction.response.send_message(
+            f"✅ **{name}** {'enabled' if enabled else 'disabled'}.", ephemeral=True)
+    else:
+        await interaction.response.send_message(
+            f'⚠️ No feature named "{name}". See `/daily list`.', ephemeral=True)
+
+
+@daily_group.command(name="preview", description="Dry-run a custom feature here (no logging)")
+@app_commands.describe(name="The feature's name")
+@admin_only()
+async def daily_preview(interaction: discord.Interaction, name: str):
+    feat = get_custom_feature(interaction.guild_id, name.strip())
+    if not feat:
+        await interaction.response.send_message(
+            f'⚠️ No feature named "{name}". See `/daily list`.', ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    await process_custom_daily(interaction.guild_id, client, feat,
+                               override_post_channel=interaction.channel, preview=True)
+    await interaction.followup.send("✅ Preview posted above.", ephemeral=True)
+
+
+@daily_group.command(name="run", description="Post a custom feature now (to its real channel)")
+@app_commands.describe(name="The feature's name")
+@admin_only()
+async def daily_run(interaction: discord.Interaction, name: str):
+    feat = get_custom_feature(interaction.guild_id, name.strip())
+    if not feat:
+        await interaction.response.send_message(
+            f'⚠️ No feature named "{name}". See `/daily list`.', ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    await process_custom_daily(interaction.guild_id, client, feat)
+    await interaction.followup.send(f"✅ **{feat['name']}** posted.", ephemeral=True)
+
+
+client.tree.add_command(daily_group)
+
+
 # ── /admin group (Manage Server only) ─────────────────────────────────────────
 
 admin_group = app_commands.Group(name="admin", description="Bot-admin roster (Manage Server only)", guild_only=True)
@@ -612,21 +744,18 @@ async def showconfig_cmd(interaction: discord.Interaction):
 @client.tree.command(name="contributors", description="Submission leaderboard for a channel")
 @app_commands.guild_only()
 @admin_only()
-async def contributors_cmd(interaction: discord.Interaction, category: Literal["quote", "icon", "song"]):
+async def contributors_cmd(interaction: discord.Interaction, category: Literal["quote", "icon"]):
     await interaction.response.defer(ephemeral=True)
     result = await build_contributors(interaction.guild_id, client, category)
     await interaction.followup.send(result, ephemeral=True)
 
 
-@client.tree.command(name="preview", description="Dry run a rename or song, posted here only")
+@client.tree.command(name="preview", description="Dry-run the daily rename, posted here only")
 @app_commands.guild_only()
 @admin_only()
-async def preview_cmd(interaction: discord.Interaction, what: Literal["rename", "song"]):
+async def preview_cmd(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
-    if what == "rename":
-        await process_rename(interaction.guild_id, client, override_post_channel=interaction.channel, preview=True)
-    else:
-        await process_daily_song(interaction.guild_id, client, override_post_channel=interaction.channel, preview=True)
+    await process_rename(interaction.guild_id, client, override_post_channel=interaction.channel, preview=True)
     await interaction.followup.send("✅ Preview posted above.", ephemeral=True)
 
 
@@ -660,14 +789,19 @@ async def rename_cmd(interaction: discord.Interaction):
 @client.tree.command(name="song", description="Post the song of the day now")
 @app_commands.guild_only()
 async def song_cmd(interaction: discord.Interaction):
-    gid = interaction.guild_id
-    cfg = get_config(gid)
-    if not cfg["enable_daily_song"]:
+    gid  = interaction.guild_id
+    feat = get_custom_feature(gid, "Song of the Day")
+    if not feat:
         await interaction.response.send_message(
-            "⚠️ Daily Song feature is disabled for this server.", ephemeral=True)
+            "⚠️ No **Song of the Day** feature is configured. Create one with "
+            "`/daily add name:Song of the Day type:music …`, or see `/daily list`.", ephemeral=True)
+        return
+    if not feat["enabled"]:
+        await interaction.response.send_message(
+            "⚠️ The **Song of the Day** feature is disabled. Enable it with `/daily toggle`.", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=True)
-    await process_daily_song(gid, client)
+    await process_custom_daily(gid, client, feat)
     await interaction.followup.send("✅ Song of the day posted.", ephemeral=True)
 
 

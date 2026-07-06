@@ -11,6 +11,7 @@ import pytz
 from db_utils import (
     get_config, set_config, log_pick, get_user_last_picks,
     get_today_pick_counts, store_rename_post, get_active_bracket,
+    get_custom_features, set_custom_feature_run_date,
 )
 from image_utils import generate_card, truncate_to_100_chars
 
@@ -22,6 +23,8 @@ _MUSIC_PATTERN = re.compile(
     r"https?://(?:www\.)?(?:youtube\.com|youtu\.be|soundcloud\.com|spotify\.com)/\S+",
     re.IGNORECASE,
 )
+
+_URL_PATTERN = re.compile(r"https?://\S+", re.IGNORECASE)
 
 
 def is_music_link(line: str) -> bool:
@@ -155,39 +158,82 @@ async def get_random_icon(
     return url, name, chosen_uid
 
 
-async def get_random_song(
+def _extract_candidate(msg, content_type: str) -> dict | None:
+    """
+    First qualifying candidate in a message for a custom-feature content type,
+    or None. Returns a dict describing what to repost:
+      {"kind": "attachment", "url", "filename", "size"}  (media uploads)
+      {"kind": "text", "content"}                        (media links / link / music / text)
+    Pure and side-effect free so it can be unit-tested on fake messages.
+    """
+    if content_type == "media":
+        # Prefer an uploaded file (image/gif/video); fall back to a media link.
+        for att in msg.attachments:
+            return {"kind": "attachment", "url": att.url,
+                    "filename": att.filename or "daily", "size": att.size or 0}
+        for line in msg.content.splitlines():
+            s = line.strip()
+            if _URL_PATTERN.search(s):
+                return {"kind": "text", "content": s}
+        return None
+    if content_type == "link":
+        for line in msg.content.splitlines():
+            s = line.strip()
+            if _URL_PATTERN.search(s):
+                return {"kind": "text", "content": s}
+        return None
+    if content_type == "music":
+        for line in msg.content.splitlines():
+            s = line.strip()
+            if s and is_music_link(s):
+                return {"kind": "text", "content": s}
+        return None
+    # text
+    for line in msg.content.splitlines():
+        s = line.strip()
+        if s and not s.startswith("!"):
+            return {"kind": "text", "content": s}
+    return None
+
+
+async def get_random_content(
     channel,
+    content_type: str,
     cooldown_counts: dict[int, int] | None = None,
-) -> tuple[str | None, str | None, int | None]:
+) -> tuple[dict | None, str | None, int | None]:
+    """
+    Fair pick (one candidate per contributor, cooldown-weighted) for a custom
+    daily feature. Returns (candidate_dict, display_name, user_id) — see
+    _extract_candidate for the candidate shape. Scans all-time history.
+    """
     if channel is None:
         return None, None, None
-    pool: dict[int, tuple[str, str, int]] = {}
+    pool: dict[int, tuple[dict, str, int]] = {}
     scanned = 0
     async for msg in channel.history(limit=None, oldest_first=False):
         scanned += 1
         if msg.author.bot:
             continue
+        cand = _extract_candidate(msg, content_type)
+        if cand is None:
+            continue
         uid = msg.author.id
-        for line in msg.content.strip().splitlines():
-            stripped = line.strip()
-            if not stripped or not is_music_link(stripped):
-                continue
-            cur, name, count = pool.get(uid, (None, msg.author.display_name, 0))
-            count += 1
-            if random.randint(1, count) == 1:
-                pool[uid] = (stripped, msg.author.display_name, count)
-            else:
-                pool[uid] = (cur, name, count)
+        cur, name, count = pool.get(uid, (None, msg.author.display_name, 0))
+        count += 1
+        if random.randint(1, count) == 1:
+            pool[uid] = (cand, msg.author.display_name, count)
+        else:
+            pool[uid] = (cur, name, count)
     if not pool:
-        log.info("[song] scanned %d messages → 0 contributors", scanned)
+        log.info("[custom:%s] scanned %d messages → 0 contributors", content_type, scanned)
         return None, None, None
     chosen_uid = _weighted_choice(pool, cooldown_counts or {})
-    link, name, count = pool[chosen_uid]
+    cand, name, count = pool[chosen_uid]
     log.info(
-        "[song] scanned %d messages → %d contributors → picked %r from %s (%d submissions)",
-        scanned, len(pool), link, name, count,
+        "[custom:%s] scanned %d messages → %d contributors → picked from %s (%d submissions)",
+        content_type, scanned, len(pool), name, count,
     )
-    return link, name, chosen_uid
+    return cand, name, chosen_uid
 
 
 
@@ -464,62 +510,94 @@ async def process_rename(
                 set_config(guild_id, "voting_enabled_at", datetime.now(pytz.utc).isoformat())
 
 
-_is_song_searching: dict[int, bool] = {}
+# In-progress guard, keyed by (guild_id, feature_id), so a slow scan can't
+# overlap with itself. (Song-of-the-day is now just a custom feature.)
+_custom_running: set[tuple[int, int]] = set()
 
 
-async def process_daily_song(
+async def process_custom_daily(
     guild_id: int,
     client: discord.Client,
+    feature,
     override_post_channel=None,
     preview: bool = False,
 ) -> None:
-    if not preview and _is_song_searching.get(guild_id):
-        log.warning("[%s] Song search already in progress — skipping.", guild_id)
-        cfg = get_config(guild_id)
-        ch  = override_post_channel or client.get_channel(cfg["song_post_channel"])
-        if ch:
-            await ch.send("⚠️ Song search is already running. Please wait for it to finish.")
+    """
+    Run one admin-defined "X of the day" feature: fairly pick a matching item
+    from its source channel and repost it to its post channel. Generalizes the
+    old song-of-the-day flow. *feature* is a custom_features Row.
+    """
+    key = (guild_id, feature["id"])
+    if not preview and key in _custom_running:
+        log.warning("[%s] Custom feature '%s' already running — skipping.", guild_id, feature["name"])
         return
-
     if not preview:
-        _is_song_searching[guild_id] = True
+        _custom_running.add(key)
     try:
-        cfg = get_config(guild_id)
+        cfg      = get_config(guild_id)
+        name     = feature["name"]
+        ctype    = feature["content_type"]
+        category = f"custom:{name.lower()}"
 
         if cfg["enable_cooldown"] and not preview:
             tz    = _guild_tz(cfg)
             since = _today_since_utc(tz)
-            s_cd  = get_today_pick_counts(guild_id, "song", since)
+            cd    = get_today_pick_counts(guild_id, category, since)
         else:
-            s_cd = {}
+            cd = {}
 
-        music_channel = client.get_channel(cfg["music_channel"])
-        post_channel  = override_post_channel or client.get_channel(cfg["song_post_channel"])
-
-        if not music_channel:
-            log.error("[%s] Music channel not configured or not found.", guild_id)
+        source       = client.get_channel(feature["source_channel"])
+        post_channel = override_post_channel or client.get_channel(feature["post_channel"])
+        if not source:
+            log.error("[%s] Custom feature '%s': source channel not found.", guild_id, name)
             return
         if not post_channel:
-            log.error("[%s] Song post channel not configured or not found.", guild_id)
+            log.error("[%s] Custom feature '%s': post channel not found.", guild_id, name)
             return
 
-        song, user, user_id = await get_random_song(music_channel, cooldown_counts=s_cd)
-        if not song:
-            log.warning("[%s] No valid music link found in music channel.", guild_id)
-            await post_channel.send("⚠️ No valid music link found in music channel.")
+        cand, user, uid = await get_random_content(source, ctype, cooldown_counts=cd)
+        if not cand:
+            await post_channel.send(
+                f"⚠️ No eligible **{ctype}** content found in {source.mention} for **{name}**."
+            )
             return
 
-        prefix = "🔍 **Preview** — " if preview else ""
-        await post_channel.send(f"{prefix}🎵 **Song of the Day** (from {user}):\n{song}")
+        prefix  = "🔍 **Preview** — " if preview else ""
+        emoji   = (feature["emoji"] + " ") if feature["emoji"] else ""
+        caption = f"{prefix}{emoji}**{name}** (from {user}):"
 
-        if not preview and user_id:
-            log_pick(guild_id, user_id, user or "Unknown", "song", song)
-            log.info("[%s] Posted song of the day: %s", guild_id, song)
+        if cand["kind"] == "attachment":
+            logged_item = cand["url"]
+            guild = client.get_guild(guild_id)
+            limit = getattr(guild, "filesize_limit", 8 * 1024 * 1024) if guild else 8 * 1024 * 1024
+            posted = False
+            if cand["size"] and cand["size"] <= limit:
+                # Reupload the file so it embeds reliably and doesn't rely on the
+                # source message's (expiring) CDN URL.
+                try:
+                    async with aiohttp.ClientSession(timeout=_AIOHTTP_TIMEOUT) as session:
+                        async with session.get(cand["url"]) as resp:
+                            resp.raise_for_status()
+                            data = await resp.read()
+                    from io import BytesIO
+                    await post_channel.send(content=caption, file=discord.File(BytesIO(data), filename=cand["filename"]))
+                    posted = True
+                except Exception as e:
+                    log.warning("[%s] Custom feature '%s': reupload failed (%s) — posting URL.", guild_id, name, e)
+            if not posted:
+                await post_channel.send(f"{caption}\n{cand['url']}")
+        else:
+            logged_item = cand["content"]
+            await post_channel.send(f"{caption}\n{cand['content']}")
+
+        if not preview and uid:
+            log_pick(guild_id, uid, user or "Unknown", category, logged_item)
+            log.info("[%s] Posted custom feature '%s'.", guild_id, name)
     except Exception as e:
-        log.error("[%s] Song post failed: %s", guild_id, e)
+        log.error("[%s] Custom feature '%s' failed: %s", guild_id, feature["name"], e)
     finally:
         if not preview:
-            _is_song_searching[guild_id] = False
+            _custom_running.discard(key)
 
 
 # ── Scheduling (per-guild times and timezones) ───────────────────────────────
@@ -547,11 +625,17 @@ async def scheduler_loop(client: discord.Client) -> None:
                         set_config(guild.id, "last_quote_date", today)
                         await process_rename(guild.id, client)
 
-                if cfg["enable_daily_song"]:
-                    scheduled = _normalize_time(cfg["song_time"] or "10:00")
-                    if cur_time == scheduled and cfg["last_song_date"] != today:
-                        set_config(guild.id, "last_song_date", today)
-                        await process_daily_song(guild.id, client)
+                # Admin-defined "X of the day" features (song-of-the-day is one).
+                for feat in get_custom_features(guild.id):
+                    if not feat["enabled"]:
+                        continue
+                    try:
+                        scheduled = _normalize_time(feat["post_time"])
+                    except Exception:
+                        continue
+                    if cur_time == scheduled and feat["last_run_date"] != today:
+                        set_custom_feature_run_date(feat["id"], today)
+                        await process_custom_daily(guild.id, client, feat)
 
                 # Check for bracket matchups that need tallying/advancing
                 await check_bracket_advancement(guild.id, client)
