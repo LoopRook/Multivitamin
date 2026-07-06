@@ -1,6 +1,6 @@
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime
 
 import discord
 import pytz
@@ -8,6 +8,8 @@ import pytz
 from db_utils import (
     init_db, set_config, get_config,
     cancel_bracket, get_active_bracket,
+    add_bot_admin, remove_bot_admin, get_bot_admins, is_bot_admin,
+    add_season, get_seasons, remove_season,
 )
 from bot_features import (
     process_rename,
@@ -19,6 +21,7 @@ from bot_features import (
 )
 from bracket import (
     start_bracket,
+    start_season_bracket,
     start_test_bracket,
     check_bracket_advancement,
     get_bracket_status_text,
@@ -64,7 +67,6 @@ _FEATURE_MAP: dict[str, tuple[str, str]] = {
     "quote":    ("enable_daily_quote", "Daily Quote"),
     "song":     ("enable_daily_song",  "Daily Song"),
     "cooldown": ("enable_cooldown",    "Cooldown"),
-    "voting":   ("enable_voting",      "Voting"),
 }
 
 _SETUP_TEXT = (
@@ -72,8 +74,9 @@ _SETUP_TEXT = (
     "**Channels** (run each in the target channel):\n"
     "   `!setquotechannel` · `!seticonchannel` · `!setpostchannel`\n"
     "   `!setmusicchannel` · `!setsongpostchannel` · `!setbracketchannel`\n\n"
-    "**Features:** `!enablefeature [quote|song|cooldown|voting]`\n"
-    "             `!disablefeature [quote|song|cooldown|voting]`\n\n"
+    "**Features:** `!enablefeature [quote|song|cooldown]`\n"
+    "             `!disablefeature [quote|song|cooldown]`\n"
+    "   *(Bracket tracking is always on once a Post Channel is set.)*\n\n"
     "**Scheduling:**\n"
     "   `!settimezone <tz>` — e.g. `US/Eastern`, `Europe/London`\n"
     "   `!setscheduletime quote 8:00`\n"
@@ -81,13 +84,158 @@ _SETUP_TEXT = (
     "**Bracket:**\n"
     "   `!setbracketsize <4|8|16|32>`\n"
     "   `!setbracketvotingtime <hours>`\n"
-    "   `!startbracket [year]` · `!testbracket`\n"
+    "   `!setbracketpacing [round|daily]`\n"
+    "   `!startbracket [year]` · `!startbracket season <name>` · `!testbracket`\n"
     "   `!forcebracketadvance` · `!bracketstatus` · `!cancelbracket`\n\n"
+    "**Seasons:**\n"
+    "   `!addseason <start> <end> <name>` — dates as `YYYY-MM-DD`\n"
+    "   `!listseasons` · `!removeseason <name>`\n\n"
+    "**Admins** (Manage Server):\n"
+    "   `!addadmin @user` · `!removeadmin @user` · `!listadmins`\n\n"
     "**Other:** `!showconfig` · `!preview rename` · `!preview song`\n"
-    "   `!contributors [quote|icon|song]` · `!mystats`"
+    "   `!contributors [quote|icon|song]` · `!mystats`\n\n"
+    "**See every command:** `!help` (or `!commands`)"
 )
 
 _NO_PERM = "⚠️ You don't have permission to use this command."
+
+
+def build_help_embed(is_admin: bool = False, is_manager: bool = False) -> discord.Embed:
+    """
+    Command reference grouped by category.
+    Admin-only sections are included only when *is_admin* is True, so ordinary
+    members see just the commands they can actually run.  The bot-admin roster
+    section is shown only to *is_manager* (Manage Server) users.
+    """
+    if is_admin:
+        description = (
+            "All commands use the `!` prefix. The **(Admin)** sections below require the "
+            "*Manage Server* permission or bot-admin status. The bot ignores replies, so "
+            "quoting a message won't trigger anything."
+        )
+    else:
+        description = (
+            "All commands use the `!` prefix. The bot ignores replies, so quoting a message "
+            "won't trigger anything."
+        )
+
+    embed = discord.Embed(
+        title="📖 Command Reference",
+        description=description,
+        color=discord.Color.blurple(),
+    )
+
+    embed.add_field(
+        name="🌐 Everyone",
+        value=(
+            "`!rename` — trigger a rename now\n"
+            "`!song` — post the song of the day\n"
+            "`!mystats` — your submission counts & last picks\n"
+            "`!help` · `!commands` — show this list"
+        ),
+        inline=False,
+    )
+
+    if not is_admin:
+        return embed
+
+    embed.add_field(
+        name="📺 Channels (Admin) — run inside the target channel",
+        value=(
+            "`!setquotechannel` — quote submissions\n"
+            "`!seticonchannel` — icon images\n"
+            "`!setpostchannel` — official rename cards (tracked for brackets)\n"
+            "`!setmusicchannel` — song links\n"
+            "`!setsongpostchannel` — daily song posts\n"
+            "`!setbracketchannel` — bracket matchups & results"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="🎚️ Features (Admin)",
+        value=(
+            "`!enablefeature <name>` · `!disablefeature <name>`\n"
+            "Names: `quote`, `song`, `cooldown`\n"
+            "*(Bracket tracking is always on once a Post Channel is set.)*"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="⏰ Scheduling (Admin)",
+        value=(
+            "`!settimezone <tz>` — IANA name, e.g. `US/Eastern`\n"
+            "`!setscheduletime quote 8:00`\n"
+            "`!setscheduletime song 12:00`"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="🏆 Bracket Setup (Admin)",
+        value=(
+            "`!setbracketsize <4|8|16|32>`\n"
+            "`!setbracketvotingtime <hours>` — 1 to 168\n"
+            "`!setbracketpacing <round|daily>` — all matchups at once, or one at a time"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="🏆 Bracket Actions (Admin)",
+        value=(
+            "`!startbracket [year]` — seed a bracket for a calendar year\n"
+            "`!startbracket season <name>` — seed from a season's window\n"
+            "`!testbracket` — test bracket with random scores\n"
+            "`!forcebracketadvance` — tally current polls now & advance\n"
+            "`!bracketstatus` — current round, pacing & progress\n"
+            "`!cancelbracket` — delete the active bracket"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="📅 Seasons (Admin)",
+        value=(
+            "`!addseason <start> <end> <name>` — dates as `YYYY-MM-DD`\n"
+            "`!listseasons` — list defined seasons\n"
+            "`!removeseason <name>` — delete a season"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="ℹ️ Info & Preview (Admin)",
+        value=(
+            "`!showconfig` — current settings\n"
+            "`!contributors <quote|icon|song>` — submission leaderboard\n"
+            "`!preview rename` · `!preview song` — dry run, posts here only\n"
+            "`!setup` — quick setup guide"
+        ),
+        inline=False,
+    )
+    if is_manager:
+        embed.add_field(
+            name="👑 Bot Admins (Manage Server only)",
+            value=(
+                "`!addadmin @user` — grant bot-admin access\n"
+                "`!removeadmin @user` — revoke bot-admin access\n"
+                "`!listadmins` — list current bot-admins"
+            ),
+            inline=False,
+        )
+    return embed
+
+
+def _parse_season_dates(start_str: str, end_str: str, tz) -> tuple[str, str]:
+    """
+    Parse two YYYY-MM-DD dates (interpreted in *tz*) into ISO UTC bounds:
+    the start's 00:00:00 and the end's 23:59:59. Raises ValueError on a bad
+    format or if the end date precedes the start date.
+    """
+    start_d = datetime.strptime(start_str, "%Y-%m-%d")
+    end_d   = datetime.strptime(end_str,   "%Y-%m-%d")
+    start_utc = tz.localize(start_d.replace(hour=0,  minute=0,  second=0)).astimezone(pytz.utc)
+    end_utc   = tz.localize(end_d.replace(hour=23, minute=59, second=59)).astimezone(pytz.utc)
+    if end_utc < start_utc:
+        raise ValueError("end date precedes start date")
+    return start_utc.isoformat(), end_utc.isoformat()
+
 
 # ── Scheduler dedup ───────────────────────────────────────────────────────────
 
@@ -121,7 +269,24 @@ async def on_message(message: discord.Message):
     content       = message.content.strip()
     content_lower = content.lower()
     gid           = message.guild.id
-    is_admin      = message.author.guild_permissions.manage_guild
+    # Manage Server holders always count as admins; so do users granted bot-admin.
+    # Managing the bot-admin roster itself requires Manage Server (is_manager).
+    is_manager    = message.author.guild_permissions.manage_guild
+    is_admin      = is_manager or is_bot_admin(gid, message.author.id)
+
+    # ── Help / command list (anyone) ──────────────────────────────────────
+    if content_lower.startswith("!help") or content_lower.startswith("!commands"):
+        embed = build_help_embed(is_admin, is_manager)
+        try:
+            await message.channel.send(embed=embed)
+        except discord.HTTPException:
+            # Fall back to plain text if embeds aren't permitted here, keeping
+            # the same admin/non-admin gating as the embed.
+            lines = [f"**{embed.title}**", embed.description, ""]
+            for f in embed.fields:
+                lines += [f"__{f.name}__", f.value, ""]
+            await message.channel.send("\n".join(lines))
+        return
 
     # ── Channel setters ───────────────────────────────────────────────────
     for cmd, (field, reply) in _CHANNEL_SETTERS.items():
@@ -143,14 +308,15 @@ async def on_message(message: discord.Message):
         if arg in _FEATURE_MAP:
             db_field, label = _FEATURE_MAP[arg]
             set_config(gid, db_field, 1 if enabling else 0)
-            if arg == "voting" and enabling:
-                cfg_now = get_config(gid)
-                if not cfg_now["voting_enabled_at"]:
-                    set_config(gid, "voting_enabled_at", datetime.now(timezone.utc).isoformat())
             verb = "enabled" if enabling else "disabled"
             await message.channel.send(f"✅ {label} feature {verb}.")
+        elif arg == "voting":
+            await message.channel.send(
+                "ℹ️ Voting is no longer a toggle — bracket tracking is always on once a "
+                "**Post Channel** is set (`!setpostchannel`). See `!help` for bracket & season commands."
+            )
         else:
-            await message.channel.send(f'⚠️ Unknown feature "{arg}". Use `quote`, `song`, `cooldown`, or `voting`.')
+            await message.channel.send(f'⚠️ Unknown feature "{arg}". Use `quote`, `song`, or `cooldown`.')
         return
 
     # ── Set timezone ──────────────────────────────────────────────────────
@@ -214,6 +380,67 @@ async def on_message(message: discord.Message):
             await message.channel.send(_NO_PERM)
             return
         await message.channel.send(_SETUP_TEXT)
+        return
+
+    # ── Bot admin roster (Manage Server only) ─────────────────────────────
+    if content_lower.startswith("!addadmin") or content_lower.startswith("!removeadmin"):
+        if not is_manager:
+            await message.channel.send(
+                "⚠️ Only members with the **Manage Server** permission can manage bot-admins."
+            )
+            return
+        adding = content_lower.startswith("!addadmin")
+        verb   = "addadmin" if adding else "removeadmin"
+
+        # Resolve the target: prefer a mention, otherwise a raw user ID.
+        target_id = target_name = None
+        if message.mentions:
+            target      = message.mentions[0]
+            target_id   = target.id
+            target_name = target.display_name
+        else:
+            parts = content.split()
+            if len(parts) >= 2 and parts[1].isdigit():
+                target_id = int(parts[1])
+                member    = message.guild.get_member(target_id)
+                target_name = member.display_name if member else str(target_id)
+
+        if not target_id:
+            await message.channel.send(f"⚠️ Usage: `!{verb} @user` (you can also pass a user ID).")
+            return
+
+        if adding:
+            created = add_bot_admin(gid, target_id, message.author.id)
+            if created:
+                await message.channel.send(f"✅ **{target_name}** is now a bot-admin and can use admin commands.")
+            else:
+                await message.channel.send(f"ℹ️ **{target_name}** is already a bot-admin.")
+        else:
+            removed = remove_bot_admin(gid, target_id)
+            if removed:
+                await message.channel.send(f"✅ **{target_name}** is no longer a bot-admin.")
+            else:
+                await message.channel.send(f"ℹ️ **{target_name}** wasn't a bot-admin.")
+        return
+
+    # ── List bot admins (Manage Server only) ──────────────────────────────
+    if content_lower.startswith("!listadmins"):
+        if not is_manager:
+            await message.channel.send(
+                "⚠️ Only members with the **Manage Server** permission can view the bot-admin list."
+            )
+            return
+        admin_ids = get_bot_admins(gid)
+        if not admin_ids:
+            await message.channel.send(
+                "No bot-admins configured. Anyone with the **Manage Server** permission already has admin access."
+            )
+            return
+        lines = ["**Bot Admins** *(in addition to Manage Server holders)*:"]
+        for uid in admin_ids:
+            member = message.guild.get_member(uid)
+            lines.append(f"• {member.display_name if member else f'User {uid}'} (`{uid}`)")
+        await message.channel.send("\n".join(lines))
         return
 
     # ── Preview ───────────────────────────────────────────────────────────
@@ -285,13 +512,104 @@ async def on_message(message: discord.Message):
         await message.channel.send(f"✅ Bracket voting window set to **{hours} hour(s)** per matchup.")
         return
 
-    # ── Start real bracket ────────────────────────────────────────────────
+    # ── Set bracket pacing ────────────────────────────────────────────────
+    if content_lower.startswith("!setbracketpacing"):
+        if not is_admin:
+            await message.channel.send(_NO_PERM)
+            return
+        parts = content_lower.split()
+        if len(parts) < 2 or parts[1] not in ("round", "daily"):
+            await message.channel.send("⚠️ Usage: `!setbracketpacing [round|daily]`")
+            return
+        pacing = parts[1]
+        set_config(gid, "bracket_pacing", pacing)
+        detail = "matchups will post all at once" if pacing == "round" else "one matchup per day"
+        await message.channel.send(f"✅ Bracket pacing set to **{pacing}** — {detail}.")
+        return
+
+    # ── Seasons ───────────────────────────────────────────────────────────
+    if content_lower.startswith("!addseason"):
+        if not is_admin:
+            await message.channel.send(_NO_PERM)
+            return
+        parts = content.split(None, 3)   # !addseason, <start>, <end>, <name...>
+        if len(parts) < 4:
+            await message.channel.send(
+                "⚠️ Usage: `!addseason <start> <end> <name>`\n"
+                "Dates are `YYYY-MM-DD` in your server's timezone. "
+                "Example: `!addseason 2026-10-01 2026-10-31 Halloween 2026`"
+            )
+            return
+        _, start_str, end_str, name = parts
+        name = name.strip()
+        cfg  = get_config(gid)
+        try:
+            tz = pytz.timezone(cfg["timezone"] or "US/Eastern")
+        except pytz.exceptions.UnknownTimeZoneError:
+            tz = pytz.timezone("US/Eastern")
+        try:
+            start_utc, end_utc = _parse_season_dates(start_str, end_str, tz)
+        except ValueError:
+            await message.channel.send(
+                "⚠️ Invalid dates. Use `YYYY-MM-DD` for both, and make sure the end is on/after the start."
+            )
+            return
+        if add_season(gid, name, start_utc, end_utc):
+            await message.channel.send(
+                f"✅ Season **{name}** created: {start_str} → {end_str}.\n"
+                f"Start it any time with `!startbracket season {name}`."
+            )
+        else:
+            await message.channel.send(f'⚠️ A season named "{name}" already exists. Remove it first with `!removeseason`.')
+        return
+
+    if content_lower.startswith("!listseasons"):
+        if not is_admin:
+            await message.channel.send(_NO_PERM)
+            return
+        seasons = get_seasons(gid)
+        if not seasons:
+            await message.channel.send("No seasons defined. Create one with `!addseason <start> <end> <name>`.")
+            return
+        lines = ["**Seasons:**"]
+        for s in seasons:
+            lines.append(f'• **{s["name"]}** — {s["start_at"][:10]} → {s["end_at"][:10]}')
+        lines.append("\nStart one with `!startbracket season <name>`.")
+        await message.channel.send("\n".join(lines))
+        return
+
+    if content_lower.startswith("!removeseason"):
+        if not is_admin:
+            await message.channel.send(_NO_PERM)
+            return
+        arg = content.split(None, 1)
+        name = arg[1].strip() if len(arg) > 1 else ""
+        if not name:
+            await message.channel.send("⚠️ Usage: `!removeseason <name>`")
+            return
+        if remove_season(gid, name):
+            await message.channel.send(f"🗑️ Season **{name}** removed.")
+        else:
+            await message.channel.send(f'⚠️ No season named "{name}". See `!listseasons`.')
+        return
+
+    # ── Start real bracket (by year or by season) ─────────────────────────
     if content_lower.startswith("!startbracket"):
         if not is_admin:
             await message.channel.send(_NO_PERM)
             return
         parts = content.split()
-        year  = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else datetime.now().year
+        if len(parts) > 1 and parts[1].lower() == "season":
+            # Everything after "season" is the season name (may contain spaces).
+            season_name = content.split(None, 2)[2].strip() if len(parts) > 2 else ""
+            if not season_name:
+                await message.channel.send("⚠️ Usage: `!startbracket season <name>` — see `!listseasons`.")
+                return
+            await message.channel.send(f'⏳ Seeding "{season_name}" season bracket...')
+            success, msg = await start_season_bracket(gid, client, season_name)
+            await message.channel.send(msg)
+            return
+        year = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else datetime.now().year
         await message.channel.send(f"⏳ Seeding {year} bracket...")
         success, msg = await start_bracket(gid, client, year)
         await message.channel.send(msg)
@@ -347,6 +665,12 @@ async def on_message(message: discord.Message):
     # ── Manual rename ─────────────────────────────────────────────────────
     if content_lower.startswith("!rename"):
         cfg = get_config(gid)
+        if get_active_bracket(gid):
+            await message.channel.send(
+                "⚠️ A bracket is currently running — renames are paused until it finishes. "
+                "The winning name will become the server name."
+            )
+            return
         if cfg["enable_daily_quote"]:
             await process_rename(gid, client, override_post_channel=message.channel)
         else:

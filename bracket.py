@@ -18,21 +18,19 @@ import pytz
 
 from db_utils import (
     get_config, set_config, cancel_bracket,
-    get_rename_posts_for_year,
+    get_rename_posts_in_range,
     create_bracket, get_active_bracket,
     create_bracket_entry, get_bracket_entry,
     create_bracket_matchup, update_matchup_posted,
     get_active_round_matchups, set_matchup_winner,
     get_round_winners_ordered, advance_bracket_round, complete_bracket,
+    get_season,
 )
 
 log = logging.getLogger(__name__)
 
 _POLL_QUESTION_LIMIT = 300
 _POLL_ANSWER_LIMIT   = 55  # Discord hard limit for poll answer text
-
-# Discord allows max 10 embeds and 10 files per message; 4 matchups = 8 of each.
-_MATCHUPS_PER_CARD_MESSAGE = 4
 
 # Test-bracket card images, generated in memory by start_test_bracket.
 # Module-level so the bytes survive across rounds (round 2+ is posted from a
@@ -41,11 +39,55 @@ _MATCHUPS_PER_CARD_MESSAGE = 4
 _test_card_cache: dict[int, dict[int, bytes]] = {}
 
 
+def _bracket_pacing(cfg) -> str:
+    """Return 'daily' or 'round' (the default) for a config row/dict."""
+    try:
+        val = cfg["bracket_pacing"]
+    except (IndexError, KeyError):
+        val = None
+    return "daily" if val == "daily" else "round"
+
+
 def _guild_tz(cfg) -> pytz.BaseTzInfo:
     try:
         return pytz.timezone(cfg["timezone"] or "US/Eastern")
     except pytz.exceptions.UnknownTimeZoneError:
         return pytz.timezone("US/Eastern")
+
+
+def _rename_posts_for_bracket(guild_id: int, bracket, cfg, tz: pytz.BaseTzInfo) -> list:
+    """
+    Rename posts within a bracket's seeding window, used to re-fetch card images
+    in later rounds.  Uses the range persisted on the bracket (range_start/end);
+    falls back to the calendar year for legacy brackets that predate those
+    columns.  Empty for test brackets (year==0, no range).
+    """
+    start = _bracket_col(bracket, "range_start")
+    end   = _bracket_col(bracket, "range_end")
+    if start and end:
+        return list(get_rename_posts_in_range(guild_id, start, end, cfg["voting_enabled_at"]))
+    year = bracket["year"]
+    if year <= 0:
+        return []
+    year_start, year_end = _year_utc_range(year, tz)
+    return list(get_rename_posts_in_range(guild_id, year_start, year_end, cfg["voting_enabled_at"]))
+
+
+def _bracket_col(bracket, col: str):
+    """Safely read a possibly-absent bracket column (legacy rows / old Row objects)."""
+    try:
+        return bracket[col]
+    except (IndexError, KeyError):
+        return None
+
+
+def _bracket_label(bracket) -> str:
+    """Display label for a bracket: explicit label, else the year, else 'Bracket'."""
+    label = _bracket_col(bracket, "label")
+    if label:
+        return label
+    year = bracket["year"]
+    return "TEST" if year == 0 else str(year)
 
 
 def _year_utc_range(year: int, tz: pytz.BaseTzInfo) -> tuple[str, str]:
@@ -135,6 +177,36 @@ async def _dramatic_coin_flip(channel: discord.TextChannel, name_a: str, name_b:
     return winner
 
 
+async def _crown_champion(
+    client: discord.Client, guild_id: int,
+    bracket_channel: discord.TextChannel, bracket, champion,
+) -> None:
+    """
+    Announce the bracket champion and set the server name to the winning quote.
+    Real brackets rename the server; test brackets (year==0) never touch it.
+    """
+    from image_utils import truncate_to_100_chars
+
+    renamed = False
+    guild   = client.get_guild(guild_id)
+    if guild and bracket["year"] != 0:
+        try:
+            await guild.edit(name=truncate_to_100_chars(champion["quote"]))
+            renamed = True
+            log.info('[%s] Server renamed to bracket champion: "%s"', guild_id, champion["quote"])
+        except discord.HTTPException as e:
+            log.error("[%s] Failed to rename server to champion: %s", guild_id, e)
+
+    tail = "\n\n👑 *The server name is now the winning entry!*" if renamed else ""
+    await bracket_channel.send(
+        f"\n🎊🏆🎊 **{_bracket_label(bracket)} SERVER NAME CHAMPION** 🎊🏆🎊\n\n"
+        f'**"{champion["quote"]}"**\n'
+        f'*submitted by {champion["quote_user"] or "Unknown"} · '
+        f'{champion["season_reactions"]} reactions this season*\n\n'
+        f"Congratulations! 🎉{tail}"
+    )
+
+
 async def _get_card_bytes(
     entry,
     bracket_id: int,
@@ -170,20 +242,78 @@ async def _get_card_bytes(
     return None
 
 
+def _build_matchup_embeds(match_num: int, entry_a, entry_b, bytes_a, bytes_b):
+    """
+    Build the (embeds, files) for one matchup's two cards, labeled
+    "Match N — Option A/B".  Images are attached via the attachment:// scheme
+    with per-matchup filenames so several matchups can share one message.
+    """
+    from io import BytesIO
+
+    embeds, files = [], []
+    for side, entry, card, color in (
+        ("A", entry_a, bytes_a, discord.Color.blue()),
+        ("B", entry_b, bytes_b, discord.Color.red()),
+    ):
+        embed = discord.Embed(
+            title=f"Match {match_num + 1} — Option {side}  ·  #{entry['seed']} seed",
+            description=(
+                f'**"{entry["quote"]}"**\n'
+                f'*submitted by {entry["quote_user"] or "Unknown"}*\n'
+                f'{entry["season_reactions"]} reactions this season'
+            ),
+            color=color,
+        )
+        if card:
+            filename = f"card_m{match_num + 1}{side.lower()}.png"
+            files.append(discord.File(BytesIO(card), filename=filename))
+            embed.set_image(url=f"attachment://{filename}")
+        embeds.append(embed)
+    return embeds, files
+
+
 async def _post_matchup(
     channel: discord.TextChannel,
+    bracket_id: int,
     matchup_id: int,
     entry_a, entry_b,
+    cfg,
     round_label: str,
     match_num: int,
     total_matches: int,
-    voting_hours: int,
+    ends_at_dt: datetime,
+    ends_at_utc: str,
+    client: discord.Client,
+    rename_posts: list,
 ) -> discord.Message | None:
     """
-    Post the Discord native poll for one matchup.  The matchup cards are shown
-    in the round's combined card message (see _post_round), so this is poll-only.
-    Returns the poll message (its ID is recorded for vote tallying).
+    Post one matchup as the original two-message pair:
+      1. Both cards as embeds (with their images attached) under a header.
+      2. A Discord native poll.
+    (Discord polls can't share a message with embeds/attachments, so the cards
+    and the poll are separate messages.)  Records the poll message id + end time
+    and returns the poll message.
     """
+    voting_hours = cfg["bracket_voting_hours"] or 24
+    ends_str     = ends_at_dt.strftime("%b %d at %I:%M %p %Z")
+
+    bytes_a, bytes_b = await asyncio.gather(
+        _get_card_bytes(entry_a, bracket_id, client, rename_posts),
+        _get_card_bytes(entry_b, bracket_id, client, rename_posts),
+    )
+    embeds, files = _build_matchup_embeds(match_num, entry_a, entry_b, bytes_a, bytes_b)
+
+    header = (
+        f"─────────────────────────\n"
+        f"🏆 **{round_label}** — Match {match_num + 1} of {total_matches}\n"
+        f"Voting closes **{ends_str}** — poll below!"
+    )
+    try:
+        await channel.send(content=header, embeds=embeds, files=files)
+    except discord.HTTPException as e:
+        log.error("Failed to post matchup cards for %s: %s", matchup_id, e)
+    await asyncio.sleep(1.0)
+
     answer_a = f"A: {entry_a['quote']}"[:_POLL_ANSWER_LIMIT]
     answer_b = f"B: {entry_b['quote']}"[:_POLL_ANSWER_LIMIT]
     question = f"{round_label} — Match {match_num + 1} of {total_matches}: Which name wins?"[:_POLL_QUESTION_LIMIT]
@@ -193,10 +323,45 @@ async def _post_matchup(
     poll.add_answer(text=answer_b)
 
     try:
-        return await channel.send(poll=poll)
+        poll_msg = await channel.send(poll=poll)
     except discord.HTTPException as e:
         log.error("Failed to post poll for matchup %s: %s", matchup_id, e)
         return None
+
+    update_matchup_posted(matchup_id, poll_msg.id, channel.id, ends_at_utc)
+    return poll_msg
+
+
+async def _post_daily_matchup(
+    bracket_id: int,
+    matchup_id: int,
+    entry_a_id: int,
+    entry_b_id: int,
+    match_num: int,
+    total_matches: int,
+    channel: discord.TextChannel,
+    cfg,
+    tz: pytz.BaseTzInfo,
+    client: discord.Client,
+    rename_posts: list,
+    round_label: str,
+) -> None:
+    """
+    Post a single matchup (cards + poll) for daily pacing, computing a fresh
+    voting window from now.  Used for the first matchup of a round and for each
+    subsequent matchup the scheduler posts as polls close.
+    """
+    voting_hours = cfg["bracket_voting_hours"] or 24
+    ends_at_dt   = datetime.now(tz) + timedelta(hours=voting_hours)
+    ends_at_utc  = ends_at_dt.astimezone(pytz.utc).isoformat()
+
+    entry_a = get_bracket_entry(entry_a_id)
+    entry_b = get_bracket_entry(entry_b_id)
+    await _post_matchup(
+        channel, bracket_id, matchup_id, entry_a, entry_b, cfg,
+        round_label, match_num, total_matches, ends_at_dt, ends_at_utc,
+        client, rename_posts,
+    )
 
 
 async def _post_round(
@@ -210,81 +375,49 @@ async def _post_round(
     rename_posts: list,
 ) -> None:
     """
-    Post a round as one combined card message (all matchup cards as embeds,
-    batched to respect Discord's 10-embed/10-file limits) followed by one
-    poll message per matchup.  Poll message IDs and end times are recorded
-    for the advancement scheduler.
-    """
-    from io import BytesIO
+    Post a round's matchups.  Each matchup is its own pair of messages — both
+    cards as embeds, then the poll (the original per-matchup format).
 
+    'round' pacing (default): every matchup is posted now, back to back, sharing
+    one voting window.
+
+    'daily' pacing: only the first matchup is posted now; the remaining matchup
+    rows already exist in the DB and are posted one at a time by the advancement
+    scheduler as each poll closes.
+
+    Poll message IDs and end times are recorded for the advancement scheduler.
+    """
     voting_hours = cfg["bracket_voting_hours"] or 24
     actual_size  = 2 ** math.ceil(math.log2(max(len(matchups) * 2, 2)))
     total_rounds = int(math.log2(actual_size))
     label        = _round_label(round_num, total_rounds)
-    ends_at_dt   = datetime.now(tz) + timedelta(hours=voting_hours)
-    ends_at_utc  = ends_at_dt.astimezone(pytz.utc).isoformat()
-    ends_str     = ends_at_dt.strftime("%b %d at %I:%M %p %Z")
 
-    # Collect entries and card bytes for every matchup before posting anything.
-    prepared = []  # (match_num, matchup_id, entry_a, entry_b, bytes_a, bytes_b)
+    # ── Daily pacing: post only the first matchup ─────────────────────────────
+    if _bracket_pacing(cfg) == "daily":
+        first_mid, first_a, first_b = matchups[0]
+        await _post_daily_matchup(
+            bracket_id, first_mid, first_a, first_b, 0, len(matchups),
+            channel, cfg, tz, client, rename_posts, label,
+        )
+        if len(matchups) > 1:
+            await channel.send(
+                f"🗓️ **Daily pacing** — Match 1 of {len(matchups)} is up now. "
+                f"The next matchup posts automatically when this poll closes."
+            )
+        return
+
+    # ── Round pacing: post every matchup now, sharing one voting window ───────
+    ends_at_dt  = datetime.now(tz) + timedelta(hours=voting_hours)
+    ends_at_utc = ends_at_dt.astimezone(pytz.utc).isoformat()
+
     for match_num, (matchup_id, a_id, b_id) in enumerate(matchups):
         entry_a = get_bracket_entry(a_id)
         entry_b = get_bracket_entry(b_id)
-        bytes_a, bytes_b = await asyncio.gather(
-            _get_card_bytes(entry_a, bracket_id, client, rename_posts),
-            _get_card_bytes(entry_b, bracket_id, client, rename_posts),
+        await _post_matchup(
+            channel, bracket_id, matchup_id, entry_a, entry_b, cfg,
+            label, match_num, len(matchups), ends_at_dt, ends_at_utc,
+            client, rename_posts,
         )
-        prepared.append((match_num, matchup_id, entry_a, entry_b, bytes_a, bytes_b))
-
-    # Combined card message(s): every matchup's cards as labeled embeds, with
-    # the images attached to the same message via the attachment:// scheme.
-    for batch_start in range(0, len(prepared), _MATCHUPS_PER_CARD_MESSAGE):
-        batch  = prepared[batch_start:batch_start + _MATCHUPS_PER_CARD_MESSAGE]
-        embeds = []
-        files  = []
-        for match_num, _mid, entry_a, entry_b, bytes_a, bytes_b in batch:
-            for side, entry, card, color in (
-                ("A", entry_a, bytes_a, discord.Color.blue()),
-                ("B", entry_b, bytes_b, discord.Color.red()),
-            ):
-                embed = discord.Embed(
-                    title=f"Match {match_num + 1} — Option {side}  ·  #{entry['seed']} seed",
-                    description=(
-                        f'**"{entry["quote"]}"**\n'
-                        f'*submitted by {entry["quote_user"] or "Unknown"}*\n'
-                        f'{entry["season_reactions"]} reactions this season'
-                    ),
-                    color=color,
-                )
-                if card:
-                    filename = f"card_m{match_num + 1}{side.lower()}.png"
-                    files.append(discord.File(BytesIO(card), filename=filename))
-                    embed.set_image(url=f"attachment://{filename}")
-                embeds.append(embed)
-
-        if batch_start == 0:
-            header = (
-                f"─────────────────────────\n"
-                f"🏆 **{label}** — {len(matchups)} matchup(s)\n"
-                f"Voting closes **{ends_str}** — polls below!"
-            )
-        else:
-            header = f"🏆 **{label}** *(continued)*"
-
-        try:
-            await channel.send(content=header, embeds=embeds, files=files)
-        except discord.HTTPException as e:
-            log.error("Failed to post round card message: %s", e)
-        await asyncio.sleep(1.5)
-
-    # One poll per matchup, in match order.
-    for match_num, matchup_id, entry_a, entry_b, _ba, _bb in prepared:
-        poll_msg = await _post_matchup(
-            channel, matchup_id, entry_a, entry_b,
-            label, match_num, len(matchups), voting_hours,
-        )
-        if poll_msg:
-            update_matchup_posted(matchup_id, poll_msg.id, channel.id, ends_at_utc)
         await asyncio.sleep(1.5)
 
 
@@ -352,7 +485,7 @@ async def start_test_bracket(guild_id: int, client: discord.Client) -> tuple[boo
     nominees = scored[:actual_size]
     total_rounds = int(math.log2(actual_size))
 
-    bracket_id = create_bracket(guild_id, 0, actual_size, voting_hours)
+    bracket_id = create_bracket(guild_id, 0, actual_size, voting_hours, label="TEST")
     entry_ids  = []
     for seed, (score, quote, user) in enumerate(nominees, start=1):
         eid = create_bracket_entry(bracket_id, seed, quote, user, score)
@@ -434,8 +567,16 @@ async def force_bracket_advance(guild_id: int, client: discord.Client) -> tuple[
         return False, "⚠️ Bracket channel not found."
 
     round_num = bracket["current_round"]
+    pacing    = _bracket_pacing(cfg)
     matchups  = get_active_round_matchups(bracket["id"], round_num)
-    pending   = [m for m in matchups if m["status"] == "active"]
+
+    # Daily pacing posts one matchup at a time, so only the matchup currently
+    # showing a poll (message_id set) can be resolved from votes.  Round pacing
+    # resolves every active matchup.
+    if pacing == "daily":
+        pending = [m for m in matchups if m["status"] == "active" and m["message_id"]]
+    else:
+        pending = [m for m in matchups if m["status"] == "active"]
 
     if not pending:
         return False, "⚠️ No active matchups in the current round."
@@ -485,19 +626,32 @@ async def force_bracket_advance(guild_id: int, client: discord.Client) -> tuple[
 
         set_matchup_winner(m["id"], winner_id)
 
+    tz = _guild_tz(cfg)
+
+    # Daily pacing: if matchups in this round remain unposted, post the next one
+    # instead of advancing — force-advance just skips the current poll's wait.
+    if pacing == "daily":
+        fresh    = get_active_round_matchups(bracket["id"], round_num)
+        unposted = [m for m in fresh if not m["message_id"]]
+        if unposted:
+            rename_posts = _rename_posts_for_bracket(guild_id, bracket, cfg, tz)
+            total_rounds = int(math.log2(bracket["size"]))
+            label        = _round_label(round_num, total_rounds)
+            nxt          = unposted[0]
+            await _post_daily_matchup(
+                bracket["id"], nxt["id"], nxt["entry_a_id"], nxt["entry_b_id"],
+                nxt["match_num"], len(fresh),
+                bracket_channel, cfg, tz, client, rename_posts, label,
+            )
+            return True, f"✅ Resolved matchup — posted Match {nxt['match_num'] + 1} of {len(fresh)}."
+
     winners = get_round_winners_ordered(bracket["id"], round_num)
 
     if len(winners) == 1:
         champion = get_bracket_entry(winners[0])
         complete_bracket(bracket["id"])
         _test_card_cache.pop(bracket["id"], None)
-        await bracket_channel.send(
-            f"\n🎊🏆🎊 **CHAMPION** 🎊🏆🎊\n\n"
-            f'**"{champion["quote"]}"**\n'
-            f'*submitted by {champion["quote_user"] or "Unknown"} · '
-            f'{champion["season_reactions"]} reactions this season*\n\n'
-            f"Congratulations! 🎉"
-        )
+        await _crown_champion(client, guild_id, bracket_channel, bracket, champion)
         return True, "🏆 Bracket complete!"
 
     new_round    = advance_bracket_round(bracket["id"])
@@ -512,22 +666,24 @@ async def force_bracket_advance(guild_id: int, client: discord.Client) -> tuple[
     label        = _round_label(new_round, total_rounds)
     await bracket_channel.send(f"\n⚔️ **{label} begins!**")
 
-    tz = _guild_tz(cfg)
-    year = bracket["year"]
-    if year > 0:
-        year_start, year_end = _year_utc_range(year, tz)
-        rename_posts = list(get_rename_posts_for_year(guild_id, year_start, year_end, cfg["voting_enabled_at"]))
-    else:
-        rename_posts = []
-
+    rename_posts = _rename_posts_for_bracket(guild_id, bracket, cfg, tz)
     await _post_round(bracket["id"], new_round, matchup_rows, bracket_channel, cfg, tz, client, rename_posts)
     return True, f"✅ Advanced to round {new_round}."
 
 
 # ── Core public functions ─────────────────────────────────────────────────────
 
-async def start_bracket(guild_id: int, client: discord.Client, year: int) -> tuple[bool, str]:
-    """Seed and launch a real bracket for *year*, seeded by reaction counts."""
+async def _start_range_bracket(
+    guild_id: int, client: discord.Client,
+    range_start_utc: str, range_end_utc: str,
+    label: str, year_value: int, scope_desc: str,
+) -> tuple[bool, str]:
+    """
+    Shared seeding + launch for real brackets over an arbitrary date window.
+    *label* is the display name ('2026', 'Halloween 2026'); *year_value* is stored
+    in the bracket's year column (must be > 0 so it isn't treated as a test bracket);
+    *scope_desc* appears in the "no posts found" and tally messages.
+    """
     cfg = get_config(guild_id)
 
     if get_active_bracket(guild_id):
@@ -543,17 +699,16 @@ async def start_bracket(guild_id: int, client: discord.Client, year: int) -> tup
     if not math.log2(bracket_size).is_integer():
         return False, f"⚠️ Bracket size must be a power of 2 (4, 8, 16, 32). Currently: {bracket_size}."
 
-    tz = _guild_tz(cfg)
-    year_start, year_end = _year_utc_range(year, tz)
-    posts = get_rename_posts_for_year(guild_id, year_start, year_end, cfg["voting_enabled_at"])
+    tz    = _guild_tz(cfg)
+    posts = get_rename_posts_in_range(guild_id, range_start_utc, range_end_utc, cfg["voting_enabled_at"])
 
     if not posts:
         return False, (
-            f"⚠️ No rename posts found for {year}. "
-            f"Make sure voting is enabled (`!enablefeature voting`) and renames have occurred."
+            f"⚠️ No rename posts found for {scope_desc}. "
+            f"Renames are tracked automatically once a post channel is set (`!setpostchannel`)."
         )
 
-    await bracket_channel.send(f"⏳ Tallying reactions from {len(posts)} rename posts for {year}...")
+    await bracket_channel.send(f"⏳ Tallying reactions from {len(posts)} rename posts for {scope_desc}...")
 
     scored: list[tuple[int, str, str | None]] = []
     for post in posts:
@@ -569,7 +724,7 @@ async def start_bracket(guild_id: int, client: discord.Client, year: int) -> tup
     ranked = sorted(best.items(), key=lambda x: x[1][0], reverse=True)
 
     if len(ranked) < 2:
-        return False, f"⚠️ Only {len(ranked)} unique rename(s) found — need at least 2."
+        return False, f"⚠️ Only {len(ranked)} unique rename(s) found for {scope_desc} — need at least 2."
 
     actual_size = bracket_size
     while actual_size > len(ranked) and actual_size > 2:
@@ -582,7 +737,10 @@ async def start_bracket(guild_id: int, client: discord.Client, year: int) -> tup
 
     nominees = ranked[:actual_size]
 
-    bracket_id = create_bracket(guild_id, year, actual_size, voting_hours)
+    bracket_id = create_bracket(
+        guild_id, year_value, actual_size, voting_hours,
+        label=label, range_start=range_start_utc, range_end=range_end_utc,
+    )
     entry_ids  = []
     for seed, (quote, (score, user)) in enumerate(nominees, start=1):
         eid = create_bracket_entry(bracket_id, seed, quote, user, score)
@@ -590,7 +748,7 @@ async def start_bracket(guild_id: int, client: discord.Client, year: int) -> tup
 
     total_rounds = int(math.log2(actual_size))
     lines = [
-        f"🏆 **{year} Server Name Championship — {actual_size}-name bracket!**",
+        f"🏆 **{label} Server Name Championship — {actual_size}-name bracket!**",
         f"Seeded by total reactions · {total_rounds} round(s) · {voting_hours}h per matchup\n",
     ]
     for seed, (quote, (score, user)) in enumerate(nominees, start=1):
@@ -605,7 +763,39 @@ async def start_bracket(guild_id: int, client: discord.Client, year: int) -> tup
 
     await _post_round(bracket_id, 1, matchup_rows, bracket_channel, cfg, tz, client, list(posts))
 
-    return True, f"✅ Bracket started! {actual_size} nominees, {len(pairs)} first-round matchup(s)."
+    return True, f"✅ {label} bracket started! {actual_size} nominees, {len(pairs)} first-round matchup(s)."
+
+
+async def start_bracket(guild_id: int, client: discord.Client, year: int) -> tuple[bool, str]:
+    """Seed and launch a real bracket for a calendar *year*, seeded by reaction counts."""
+    cfg = get_config(guild_id)
+    tz  = _guild_tz(cfg)
+    year_start, year_end = _year_utc_range(year, tz)
+    return await _start_range_bracket(
+        guild_id, client, year_start, year_end,
+        label=str(year), year_value=year, scope_desc=str(year),
+    )
+
+
+async def start_season_bracket(guild_id: int, client: discord.Client, season_name: str) -> tuple[bool, str]:
+    """Seed and launch a bracket from a named season's date window."""
+    season = get_season(guild_id, season_name)
+    if not season:
+        return False, (
+            f'⚠️ No season named "{season_name}". '
+            f"Create one with `!addseason <start> <end> <name>` or see `!listseasons`."
+        )
+    # Display the season's real name (preserves original casing) and derive the
+    # stored year from the window start so it's never mistaken for a test bracket.
+    name = season["name"]
+    try:
+        year_value = datetime.fromisoformat(season["start_at"]).year
+    except ValueError:
+        year_value = datetime.now(pytz.utc).year
+    return await _start_range_bracket(
+        guild_id, client, season["start_at"], season["end_at"],
+        label=name, year_value=max(year_value, 1), scope_desc=f'season "{name}"',
+    )
 
 
 async def check_bracket_advancement(guild_id: int, client: discord.Client) -> None:
@@ -672,6 +862,27 @@ async def check_bracket_advancement(guild_id: int, client: discord.Client) -> No
 
         set_matchup_winner(m["id"], winner_id)
 
+    tz = _guild_tz(cfg)
+
+    # Daily pacing: post the next unposted matchup now that this poll has
+    # closed, rather than waiting for the whole round.  Only fall through to
+    # advancing once every matchup in the round has been posted and completed.
+    if _bracket_pacing(cfg) == "daily":
+        fresh    = get_active_round_matchups(bracket["id"], round_num)
+        unposted = [m for m in fresh if not m["message_id"]]
+        if unposted:
+            rename_posts = _rename_posts_for_bracket(guild_id, bracket, cfg, tz)
+            total_rounds = int(math.log2(bracket["size"]))
+            label        = _round_label(round_num, total_rounds)
+            nxt          = unposted[0]
+            await _post_daily_matchup(
+                bracket["id"], nxt["id"], nxt["entry_a_id"], nxt["entry_b_id"],
+                nxt["match_num"], len(fresh),
+                bracket_channel, cfg, tz, client, rename_posts, label,
+            )
+            log.info("[%s] Daily pacing: posted Match %d.", guild_id, nxt["match_num"] + 1)
+            return
+
     if not all_complete:
         return
 
@@ -681,13 +892,7 @@ async def check_bracket_advancement(guild_id: int, client: discord.Client) -> No
         champion = get_bracket_entry(winners[0])
         complete_bracket(bracket["id"])
         _test_card_cache.pop(bracket["id"], None)
-        await bracket_channel.send(
-            f"\n🎊🏆🎊 **{bracket['year']} SERVER NAME CHAMPION** 🎊🏆🎊\n\n"
-            f'**"{champion["quote"]}"**\n'
-            f'*submitted by {champion["quote_user"] or "Unknown"} · '
-            f'{champion["season_reactions"]} reactions this season*\n\n'
-            f"Congratulations! 🎉"
-        )
+        await _crown_champion(client, guild_id, bracket_channel, bracket, champion)
         log.info("[%s] Bracket complete. Champion: %s", guild_id, champion["quote"])
         return
 
@@ -703,10 +908,7 @@ async def check_bracket_advancement(guild_id: int, client: discord.Client) -> No
     label        = _round_label(new_round, total_rounds)
     await bracket_channel.send(f"\n⚔️ **{label} begins!**")
 
-    tz = _guild_tz(cfg)
-    year = bracket["year"]
-    year_start, year_end = _year_utc_range(year, tz)
-    rename_posts = list(get_rename_posts_for_year(guild_id, year_start, year_end, cfg["voting_enabled_at"]))
+    rename_posts = _rename_posts_for_bracket(guild_id, bracket, cfg, tz)
     await _post_round(bracket["id"], new_round, matchup_rows, bracket_channel, cfg, tz, client, rename_posts)
     log.info("[%s] Advanced to round %d.", guild_id, new_round)
 
@@ -716,13 +918,21 @@ def get_bracket_status_text(guild_id: int) -> str:
     if not bracket:
         return "No active bracket."
     cfg          = get_config(guild_id)
+    pacing       = _bracket_pacing(cfg)
     total_rounds = int(math.log2(bracket["size"]))
     label        = _round_label(bracket["current_round"], total_rounds)
     matchups     = get_active_round_matchups(bracket["id"], bracket["current_round"])
     done         = sum(1 for m in matchups if m["status"] == "complete")
-    year_label   = "TEST" if bracket["year"] == 0 else str(bracket["year"])
-    return (
-        f"**{year_label} Bracket** — {label}\n"
+    lines = [
+        f"**{_bracket_label(bracket)} Bracket** — {label}",
         f"Size: {bracket['size']} · Round {bracket['current_round']}/{total_rounds} · "
-        f"{done}/{len(matchups)} matchups complete"
-    )
+        f"{done}/{len(matchups)} matchups complete",
+        f"Pacing: **{pacing}**" + (" (all matchups at once)" if pacing == "round" else " (one matchup per day)"),
+    ]
+    if pacing == "daily":
+        active = next((m for m in matchups if m["status"] == "active" and m["message_id"]), None)
+        if active:
+            lines.append(f"Currently voting: Match {active['match_num'] + 1} of {len(matchups)}")
+        else:
+            lines.append("No matchup currently open for voting.")
+    return "\n".join(lines)
