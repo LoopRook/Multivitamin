@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 from datetime import datetime
 from typing import Literal, Optional
 
@@ -14,6 +15,7 @@ from db_utils import (
     add_season, get_seasons, remove_season,
     add_custom_feature, get_custom_feature, get_custom_features,
     remove_custom_feature, set_custom_feature_enabled, count_custom_features,
+    get_custom_feature_by_command, set_custom_feature_command, set_custom_feature_access,
 )
 from bot_features import (
     process_rename,
@@ -84,7 +86,9 @@ _SETUP_TEXT = (
     "**Daily features** (make your own 'X of the day' — meme, critter, song…):\n"
     "   `/daily setup` — guided step-by-step (easiest)\n"
     "   `/daily add <name> <type> <source> <destination> <time> [emoji]` — one-shot\n"
-    "   `/daily list` · `/daily toggle` · `/daily preview` · `/daily run` · `/daily remove`\n\n"
+    "   `/daily list` · `/daily toggle` · `/daily preview` · `/daily run` · `/daily remove`\n"
+    "   `/daily command <name> [meme]` — give it its own `/meme` command (this server only)\n"
+    "   `/daily access <name> <admin|everyone|role> [role]` — who can run that command\n\n"
     "**Bracket:**\n"
     "   `/bracket size` · `/bracket votingtime` · `/bracket pacing`\n"
     "   `/bracket start [year] [season]` · `/bracket test`\n"
@@ -162,7 +166,9 @@ def build_help_embed(is_admin: bool = False, is_manager: bool = False) -> discor
             "`/daily add <name> <type> <source> <destination> <time> [emoji]` — one-shot\n"
             "types: `media` (memes/gifs/images), `link`, `music`, `text`\n"
             "`/daily list` · `/daily toggle <name> <on/off>`\n"
-            "`/daily preview <name>` · `/daily run <name>` · `/daily remove <name>`"
+            "`/daily preview <name>` · `/daily run <name>` · `/daily remove <name>`\n"
+            "**Own command:** `/daily command <name> [meme]` → gives this server a `/meme`\n"
+            "`/daily access <name> <admin|everyone|role> [role]` — who can run it"
         ),
         inline=False,
     )
@@ -234,6 +240,7 @@ class QotdClient(discord.Client):
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
         self._scheduler_task = None
+        self._feature_cmds_loaded = False
 
     async def setup_hook(self) -> None:
         # Runs once after login, before the gateway connects — good place to
@@ -250,6 +257,19 @@ class QotdClient(discord.Client):
             log.info("🔄 Cancelled stale scheduler task.")
         self._scheduler_task = self.loop.create_task(scheduler_loop(self), name="scheduler_loop")
         log.info("⏰ Scheduler started.")
+
+        # Re-wire each guild's per-feature commands (e.g. /meme) into the tree so
+        # their callbacks work after a restart. Discord already has them registered
+        # from when they were created, so this is in-memory only (no sync). Guarded
+        # so reconnects don't repeat it.
+        if not self._feature_cmds_loaded:
+            for g in self.guilds:
+                try:
+                    _register_guild_feature_commands(g.id)
+                except Exception:
+                    log.exception("[%s] Failed to load feature commands.", g.id)
+            self._feature_cmds_loaded = True
+            log.info("🔀 Per-guild feature commands loaded.")
 
     async def on_guild_join(self, guild: discord.Guild) -> None:
         log.info("➕ Joined guild %s (%s)", guild.id, guild.name)
@@ -301,6 +321,81 @@ def _perms(interaction: discord.Interaction) -> tuple[bool, bool]:
     is_manager = interaction.user.guild_permissions.manage_guild
     is_admin   = is_manager or is_bot_admin(interaction.guild_id, interaction.user.id)
     return is_admin, is_manager
+
+
+# ── Per-guild feature commands (e.g. /meme) ───────────────────────────────────
+# Feature commands are registered per guild (guild-scoped), so they exist only in
+# the server that defined them and update instantly. Names can't collide with the
+# bot's global commands/groups.
+
+_SLUG_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
+_RESERVED_COMMAND_NAMES = {
+    "help", "setup", "showconfig", "contributors", "preview", "mystats", "rename",
+    "song", "daily", "bracket", "season", "admin", "config",
+}
+
+
+def _normalize_command_slug(raw: str) -> Optional[str]:
+    """Lowercase/trim a command slug and validate it. Returns None if invalid or reserved."""
+    s = (raw or "").strip().lower().lstrip("/")
+    if not _SLUG_RE.match(s) or s in _RESERVED_COMMAND_NAMES:
+        return None
+    return s
+
+
+def _can_run_feature(interaction: discord.Interaction, feat) -> bool:
+    """Whether *interaction.user* may run this feature's command."""
+    is_admin, _ = _perms(interaction)
+    if is_admin:
+        return True
+    access = feat["run_access"] or "admin"
+    if access == "everyone":
+        return True
+    if access == "roles":
+        role_ids = {int(r) for r in (feat["run_roles"] or "").split(",") if r.strip().isdigit()}
+        return any(role.id in role_ids for role in getattr(interaction.user, "roles", []))
+    return False
+
+
+def _make_feature_command(command: str, display_name: str) -> app_commands.Command:
+    """Build a guild-scoped slash command that posts the named feature on demand."""
+    async def _callback(interaction: discord.Interaction):
+        feat = get_custom_feature_by_command(interaction.guild_id, command)
+        if not feat:
+            await interaction.response.send_message(
+                "⚠️ That command is no longer configured.", ephemeral=True)
+            return
+        if not _can_run_feature(interaction, feat):
+            await interaction.response.send_message(
+                "⚠️ You don't have permission to use this command here.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        ok, detail = await process_custom_daily(
+            interaction.guild_id, client, feat,
+            override_post_channel=interaction.channel, on_demand=True)
+        await interaction.followup.send("✅ Posted." if ok else f"⚠️ {detail}", ephemeral=True)
+
+    desc = f"Post a random '{display_name}' now"[:100]
+    return app_commands.Command(name=command, description=desc, callback=_callback)
+
+
+def _register_guild_feature_commands(guild_id: int) -> None:
+    """Rebuild a guild's feature commands in the in-memory tree (no network sync)."""
+    gobj = discord.Object(id=guild_id)
+    for existing in list(client.tree.get_commands(guild=gobj)):
+        client.tree.remove_command(existing.name, guild=gobj)
+    for feat in get_custom_features(guild_id):
+        if feat["command"]:
+            client.tree.add_command(_make_feature_command(feat["command"], feat["name"]), guild=gobj)
+
+
+async def sync_guild_feature_commands(guild_id: int) -> None:
+    """Rebuild + push a guild's feature commands to Discord. Call after any change."""
+    _register_guild_feature_commands(guild_id)
+    try:
+        await client.tree.sync(guild=discord.Object(id=guild_id))
+    except discord.HTTPException as e:
+        log.warning("[%s] Failed to sync guild feature commands: %s", guild_id, e)
 
 
 def admin_only():
@@ -559,32 +654,69 @@ client.tree.add_command(season_group)
 daily_group = app_commands.Group(name="daily", description="Custom 'X of the day' features", guild_only=True)
 
 
+_ACCESS_LABELS = {"admin": "admin", "everyone": "all", "roles": "roles"}
+
+
 def _feature_summary(f) -> str:
     src  = f"<#{f['source_channel']}>"
     dst  = f"<#{f['post_channel']}>"
     flag = "🟢" if f["enabled"] else "⚪"
     emo  = (f["emoji"] + " ") if f["emoji"] else ""
-    return f"{flag} {emo}**{f['name']}** · `{f['content_type']}` · {src} → {dst} · {f['post_time']}"
+    cmd  = f" · `/{f['command']}`" if f["command"] else ""
+    acc  = f" ({_ACCESS_LABELS.get(f['run_access'] or 'admin', 'admin')})" if f["command"] else ""
+    return f"{flag} {emo}**{f['name']}** · `{f['content_type']}` · {src} → {dst} · {f['post_time']}{cmd}{acc}"
+
+
+def _resolve_command_slug(guild_id: int, raw: Optional[str], current_name: Optional[str] = None):
+    """
+    Validate a requested command slug. Returns (slug|None, error|None).
+    Empty/None raw → (None, None) meaning "no command" (not an error).
+    """
+    if not raw or not raw.strip():
+        return None, None
+    slug = _normalize_command_slug(raw)
+    if slug is None:
+        return None, ("Command name must be 1–32 chars of lowercase letters/numbers/`-`/`_`, "
+                      "and can't be a reserved name (help, song, daily, …).")
+    existing = get_custom_feature_by_command(guild_id, slug)
+    if existing and (current_name is None or existing["name"].lower() != current_name.lower()):
+        return None, f"`/{slug}` is already used by **{existing['name']}**. Pick another."
+    return slug, None
+
+
+def _access_from_choice(access: str, role):
+    """Map a /daily access|add choice to (run_access, run_roles, error)."""
+    if access == "role":
+        if role is None:
+            return None, None, "Pick a **role** when access is `role`."
+        return "roles", str(role.id), None
+    if access == "everyone":
+        return "everyone", None, None
+    return "admin", None, None
 
 
 def _create_daily_feature(guild_id: int, name: str, emoji: str | None, ctype: str,
-                          source_id: int, dest_id: int, time: str) -> str:
+                          source_id: int, dest_id: int, time: str,
+                          command: str | None = None, run_access: str = "admin",
+                          run_roles: str | None = None) -> tuple[bool, str]:
     """
-    Validate inputs and create a custom feature. Returns a user-facing status
-    message. Shared by `/daily add` and the guided `/daily setup` flow so both
-    enforce the same rules.
+    Validate inputs and create a custom feature. Returns (ok, message). Shared by
+    `/daily add` and the guided `/daily setup` flow so both enforce the same rules.
+    The caller syncs guild commands when *command* is set.
     """
     name = (name or "").strip()
     if not name:
-        return "⚠️ Name can't be empty."
+        return False, "⚠️ Name can't be empty."
     if not _valid_hhmm(time):
-        return "⚠️ Time must be `H:MM` or `HH:MM` (24-hour), e.g. `12:00`."
+        return False, "⚠️ Time must be `H:MM` or `HH:MM` (24-hour), e.g. `12:00`."
     if count_custom_features(guild_id) >= _MAX_CUSTOM_FEATURES:
-        return f"⚠️ You've reached the limit of {_MAX_CUSTOM_FEATURES} daily features. Remove one first."
-    if add_custom_feature(guild_id, name, (emoji or None), ctype, source_id, dest_id, time):
-        return (f"✅ **{name}** created ({_CUSTOM_TYPE_HELP[ctype]}): <#{source_id}> → <#{dest_id}> "
-                f"daily at `{time}`.\nTry it now with `/daily preview name:{name}`.")
-    return f'⚠️ A feature named "{name}" already exists. Remove it first with `/daily remove`.'
+        return False, f"⚠️ You've reached the limit of {_MAX_CUSTOM_FEATURES} daily features. Remove one first."
+    if add_custom_feature(guild_id, name, (emoji or None), ctype, source_id, dest_id, time,
+                          command=command, run_access=run_access, run_roles=run_roles):
+        extra = f"\nMembers can run it with `/{command}`." if command else ""
+        return True, (f"✅ **{name}** created ({_CUSTOM_TYPE_HELP[ctype]}): <#{source_id}> → <#{dest_id}> "
+                      f"daily at `{time}`.{extra}\nTry it now with `/daily preview name:{name}`.")
+    return False, f'⚠️ A feature named "{name}" already exists. Remove it first with `/daily remove`.'
 
 
 # ── Guided /daily setup (channel pickers + type dropdown + a name/time form) ───
@@ -598,20 +730,29 @@ _TYPE_SELECT_OPTIONS = [
 
 
 class _DailyNameModal(discord.ui.Modal, title="Name your daily feature"):
-    """Final step of /daily setup — collects the name, time, and optional emoji."""
-    name_in  = discord.ui.TextInput(label="Name", placeholder="Meme of the Day", max_length=80)
-    time_in  = discord.ui.TextInput(label="Time (24-hour H:MM, server timezone)", placeholder="12:00", max_length=5)
-    emoji_in = discord.ui.TextInput(label="Emoji (optional)", required=False, max_length=8, placeholder="🖼️")
+    """Final step of /daily setup — name, time, optional emoji, optional command."""
+    name_in    = discord.ui.TextInput(label="Name", placeholder="Meme of the Day", max_length=80)
+    time_in    = discord.ui.TextInput(label="Time (24-hour H:MM, server timezone)", placeholder="12:00", max_length=5)
+    emoji_in   = discord.ui.TextInput(label="Emoji (optional)", required=False, max_length=8, placeholder="🖼️")
+    command_in = discord.ui.TextInput(label="Slash command (optional, e.g. meme)", required=False,
+                                      max_length=32, placeholder="meme")
 
     def __init__(self, view: "_DailySetupView"):
         super().__init__()
         self._view = view
 
     async def on_submit(self, interaction: discord.Interaction):
-        msg = _create_daily_feature(
+        slug, err = _resolve_command_slug(interaction.guild_id, self.command_in.value)
+        if err:
+            await interaction.response.send_message(f"⚠️ {err}", ephemeral=True)
+            return
+        ok, msg = _create_daily_feature(
             interaction.guild_id, self.name_in.value, self.emoji_in.value,
             self._view.ctype, self._view.source_id, self._view.dest_id, self.time_in.value,
+            command=slug,
         )
+        if ok and slug:
+            await sync_guild_feature_commands(interaction.guild_id)
         await interaction.response.send_message(msg, ephemeral=True)
 
 
@@ -664,7 +805,8 @@ class _DailySetupView(discord.ui.View):
 async def daily_setup(interaction: discord.Interaction):
     await interaction.response.send_message(
         "🛠️ **New daily feature** — pick a **source** channel, a **destination**, and a **type** below, "
-        "then hit **Name it & create** to set the name, time, and emoji.",
+        "then hit **Name it & create** to set the name, time, emoji, and (optionally) a slash command "
+        "like `/meme`. Set who can use that command afterward with `/daily access`.",
         view=_DailySetupView(interaction.user.id), ephemeral=True)
 
 
@@ -676,14 +818,31 @@ async def daily_setup(interaction: discord.Interaction):
     destination="Channel to post into",
     time="Daily post time, 24-hour H:MM (server timezone)",
     emoji="Optional emoji shown before the name",
+    command="Optional slash command, e.g. 'meme' (gives you /meme in this server)",
+    access="Who may run the command (default admin)",
+    role="Role allowed to run it (when access is 'role')",
 )
 @admin_only()
 async def daily_add(interaction: discord.Interaction, name: str,
                     type: Literal["media", "link", "music", "text"],
                     source: discord.TextChannel, destination: discord.TextChannel,
-                    time: str, emoji: Optional[str] = None):
-    msg = _create_daily_feature(interaction.guild_id, name, emoji, type,
-                                source.id, destination.id, time)
+                    time: str, emoji: Optional[str] = None,
+                    command: Optional[str] = None,
+                    access: Literal["admin", "everyone", "role"] = "admin",
+                    role: Optional[discord.Role] = None):
+    slug, cerr = _resolve_command_slug(interaction.guild_id, command)
+    if cerr:
+        await interaction.response.send_message(f"⚠️ {cerr}", ephemeral=True)
+        return
+    run_access, run_roles, aerr = _access_from_choice(access, role)
+    if aerr:
+        await interaction.response.send_message(f"⚠️ {aerr}", ephemeral=True)
+        return
+    ok, msg = _create_daily_feature(interaction.guild_id, name, emoji, type,
+                                    source.id, destination.id, time,
+                                    command=slug, run_access=run_access, run_roles=run_roles)
+    if ok and slug:
+        await sync_guild_feature_commands(interaction.guild_id)
     await interaction.response.send_message(msg, ephemeral=True)
 
 
@@ -703,11 +862,65 @@ async def daily_list(interaction: discord.Interaction):
 @app_commands.describe(name="The feature's name")
 @admin_only()
 async def daily_remove(interaction: discord.Interaction, name: str):
+    feat = get_custom_feature(interaction.guild_id, name.strip())
+    had_command = bool(feat and feat["command"])
     if remove_custom_feature(interaction.guild_id, name.strip()):
+        if had_command:
+            await sync_guild_feature_commands(interaction.guild_id)
         await interaction.response.send_message(f"🗑️ **{name}** removed.", ephemeral=True)
     else:
         await interaction.response.send_message(
             f'⚠️ No feature named "{name}". See `/daily list`.', ephemeral=True)
+
+
+@daily_group.command(name="command", description="Give a feature its own slash command (e.g. /meme), or clear it")
+@app_commands.describe(name="The feature's name",
+                       command="Command name like 'meme' — leave blank to remove the command")
+@admin_only()
+async def daily_command(interaction: discord.Interaction, name: str, command: Optional[str] = None):
+    feat = get_custom_feature(interaction.guild_id, name.strip())
+    if not feat:
+        await interaction.response.send_message(
+            f'⚠️ No feature named "{name}". See `/daily list`.', ephemeral=True)
+        return
+    if command is None or not command.strip():
+        set_custom_feature_command(interaction.guild_id, feat["name"], None)
+        await sync_guild_feature_commands(interaction.guild_id)
+        await interaction.response.send_message(
+            f"✅ Removed the slash command for **{feat['name']}**.", ephemeral=True)
+        return
+    slug, err = _resolve_command_slug(interaction.guild_id, command, current_name=feat["name"])
+    if err:
+        await interaction.response.send_message(f"⚠️ {err}", ephemeral=True)
+        return
+    set_custom_feature_command(interaction.guild_id, feat["name"], slug)
+    await sync_guild_feature_commands(interaction.guild_id)
+    await interaction.response.send_message(
+        f"✅ **{feat['name']}** is now available as `/{slug}` in this server. "
+        f"(Set who can use it with `/daily access`.)", ephemeral=True)
+
+
+@daily_group.command(name="access", description="Set who can run a feature's slash command")
+@app_commands.describe(name="The feature's name", access="Who may run it", role="Role (when access is 'role')")
+@admin_only()
+async def daily_access(interaction: discord.Interaction, name: str,
+                       access: Literal["admin", "everyone", "role"],
+                       role: Optional[discord.Role] = None):
+    feat = get_custom_feature(interaction.guild_id, name.strip())
+    if not feat:
+        await interaction.response.send_message(
+            f'⚠️ No feature named "{name}". See `/daily list`.', ephemeral=True)
+        return
+    run_access, run_roles, aerr = _access_from_choice(access, role)
+    if aerr:
+        await interaction.response.send_message(f"⚠️ {aerr}", ephemeral=True)
+        return
+    set_custom_feature_access(interaction.guild_id, feat["name"], run_access, run_roles)
+    who = {"admin": "admins only", "everyone": "anyone",
+           "roles": f"{role.mention} and admins"}[run_access]
+    note = "" if feat["command"] else "\n*(Set a command first with `/daily command` so there's something to run.)*"
+    await interaction.response.send_message(
+        f"✅ **{feat['name']}** can now be run by {who}.{note}", ephemeral=True)
 
 
 @daily_group.command(name="toggle", description="Enable or disable a custom daily feature")

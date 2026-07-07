@@ -116,7 +116,10 @@ CREATE TABLE IF NOT EXISTS custom_features (
     post_time      TEXT    NOT NULL,   -- 'HH:MM' in the guild timezone
     enabled        INTEGER DEFAULT 1,
     last_run_date  TEXT,               -- 'YYYY-MM-DD' in guild tz (double-fire guard)
-    created_at     TEXT    NOT NULL
+    created_at     TEXT    NOT NULL,
+    command        TEXT,               -- optional per-guild slash-command slug (null = none)
+    run_access     TEXT DEFAULT 'admin',  -- who may run /<command>: 'admin' | 'everyone' | 'roles'
+    run_roles      TEXT                -- comma-separated role IDs (when run_access='roles')
 )
 """
 
@@ -178,6 +181,13 @@ _BRACKET_MIGRATIONS = [
     ("range_end",   "TEXT"),
 ]
 
+# custom_features already ships in live DBs, so new columns must be ALTER-added.
+_CUSTOM_FEATURES_MIGRATIONS = [
+    ("command",    "TEXT"),
+    ("run_access", "TEXT DEFAULT 'admin'"),
+    ("run_roles",  "TEXT"),
+]
+
 
 def db_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
@@ -214,6 +224,11 @@ def init_db() -> None:
         for col, definition in _BRACKET_MIGRATIONS:
             try:
                 conn.execute(f"ALTER TABLE brackets ADD COLUMN {col} {definition}")
+            except sqlite3.OperationalError:
+                pass
+        for col, definition in _CUSTOM_FEATURES_MIGRATIONS:
+            try:
+                conn.execute(f"ALTER TABLE custom_features ADD COLUMN {col} {definition}")
             except sqlite3.OperationalError:
                 pass
         _migrate_song_to_custom_feature(conn)
@@ -553,21 +568,54 @@ def remove_season(guild_id: int, name: str) -> bool:
 def add_custom_feature(
     guild_id: int, name: str, emoji: str | None, content_type: str,
     source_channel: int, post_channel: int, post_time: str,
+    command: str | None = None, run_access: str = "admin", run_roles: str | None = None,
 ) -> bool:
     """Create a custom feature. Returns False if the guild already has one by that name (case-insensitive)."""
     with db_conn() as conn:
         try:
             conn.execute(
                 "INSERT INTO custom_features "
-                "(guild_id, name, emoji, content_type, source_channel, post_channel, post_time, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (guild_id, name, emoji, content_type, source_channel, post_channel,
-                 post_time, datetime.now(timezone.utc).isoformat()),
+                "(guild_id, name, emoji, content_type, source_channel, post_channel, post_time, "
+                " created_at, command, run_access, run_roles) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (guild_id, name, emoji, content_type, source_channel, post_channel, post_time,
+                 datetime.now(timezone.utc).isoformat(), command, run_access, run_roles),
             )
             conn.commit()
             return True
         except sqlite3.IntegrityError:
             return False
+
+
+def get_custom_feature_by_command(guild_id: int, command: str) -> sqlite3.Row | None:
+    """Look up a feature by its slash-command slug (case-insensitive)."""
+    with db_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM custom_features WHERE guild_id=? AND command=? COLLATE NOCASE",
+            (guild_id, command),
+        ).fetchone()
+
+
+def set_custom_feature_command(guild_id: int, name: str, command: str | None) -> bool:
+    """Set (or clear, with None) a feature's slash-command slug. Returns False if no such feature."""
+    with db_conn() as conn:
+        cur = conn.execute(
+            "UPDATE custom_features SET command=? WHERE guild_id=? AND name=? COLLATE NOCASE",
+            (command, guild_id, name),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def set_custom_feature_access(guild_id: int, name: str, run_access: str, run_roles: str | None) -> bool:
+    """Set who may run a feature's command ('admin'|'everyone'|'roles'). Returns False if no such feature."""
+    with db_conn() as conn:
+        cur = conn.execute(
+            "UPDATE custom_features SET run_access=?, run_roles=? WHERE guild_id=? AND name=? COLLATE NOCASE",
+            (run_access, run_roles, guild_id, name),
+        )
+        conn.commit()
+        return cur.rowcount > 0
 
 
 def get_custom_feature(guild_id: int, name: str) -> sqlite3.Row | None:
