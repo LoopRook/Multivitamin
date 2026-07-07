@@ -526,28 +526,35 @@ async def process_custom_daily(
     feature,
     override_post_channel=None,
     preview: bool = False,
+    on_demand: bool = False,
 ) -> tuple[bool, str]:
     """
     Run one admin-defined "X of the day" feature: fairly pick a matching item
     from its source channel and repost it to its post channel. Generalizes the
     old song-of-the-day flow. *feature* is a custom_features Row.
 
+    Modes:
+      scheduled (default) — post to the feature's channel, log the pick.
+      preview=True        — post to override channel with a "🔍 Preview" tag, no log.
+      on_demand=True      — post to override channel (no tag), no log; for /<command>.
+
     Returns (ok, detail): ok=True on a successful post; otherwise detail is a
     short, user-facing reason (permissions, no content, etc.) so callers can
     show the truth instead of a blanket "posted" message.
     """
-    name = feature["name"]
-    key  = (guild_id, feature["id"])
-    if not preview and key in _custom_running:
+    name    = feature["name"]
+    key     = (guild_id, feature["id"])
+    counts  = not preview and not on_demand   # only a scheduled/real run logs + guards
+    if counts and key in _custom_running:
         return False, f"**{name}** is already running — try again in a moment."
-    if not preview:
+    if counts:
         _custom_running.add(key)
     try:
         cfg      = get_config(guild_id)
         ctype    = feature["content_type"]
         category = f"custom:{name.lower()}"
 
-        if cfg["enable_cooldown"] and not preview:
+        if cfg["enable_cooldown"] and counts:
             tz    = _guild_tz(cfg)
             since = _today_since_utc(tz)
             cd    = get_today_pick_counts(guild_id, category, since)
@@ -613,15 +620,16 @@ async def process_custom_daily(
                 f"I can't post in {post_channel.mention} — give me **View Channel**, "
                 f"**Send Messages**{extra} there.")
 
-        if not preview and uid:
+        if counts and uid:
             log_pick(guild_id, uid, user or "Unknown", category, logged_item)
-        log.info("[%s] Posted custom feature '%s'%s.", guild_id, name, " (preview)" if preview else "")
+        mode = " (preview)" if preview else (" (on-demand)" if on_demand else "")
+        log.info("[%s] Posted custom feature '%s'%s.", guild_id, name, mode)
         return True, ""
     except Exception as e:
         log.error("[%s] Custom feature '%s' failed: %s", guild_id, name, e)
         return False, "Something went wrong running that feature — check the bot logs."
     finally:
-        if not preview:
+        if counts:
             _custom_running.discard(key)
 
 
