@@ -515,27 +515,35 @@ async def process_rename(
 _custom_running: set[tuple[int, int]] = set()
 
 
+def _feature_fail(guild_id: int, name: str, msg: str) -> tuple[bool, str]:
+    log.warning("[%s] Custom feature '%s': %s", guild_id, name, msg)
+    return False, msg
+
+
 async def process_custom_daily(
     guild_id: int,
     client: discord.Client,
     feature,
     override_post_channel=None,
     preview: bool = False,
-) -> None:
+) -> tuple[bool, str]:
     """
     Run one admin-defined "X of the day" feature: fairly pick a matching item
     from its source channel and repost it to its post channel. Generalizes the
     old song-of-the-day flow. *feature* is a custom_features Row.
+
+    Returns (ok, detail): ok=True on a successful post; otherwise detail is a
+    short, user-facing reason (permissions, no content, etc.) so callers can
+    show the truth instead of a blanket "posted" message.
     """
-    key = (guild_id, feature["id"])
+    name = feature["name"]
+    key  = (guild_id, feature["id"])
     if not preview and key in _custom_running:
-        log.warning("[%s] Custom feature '%s' already running — skipping.", guild_id, feature["name"])
-        return
+        return False, f"**{name}** is already running — try again in a moment."
     if not preview:
         _custom_running.add(key)
     try:
         cfg      = get_config(guild_id)
-        name     = feature["name"]
         ctype    = feature["content_type"]
         category = f"custom:{name.lower()}"
 
@@ -549,52 +557,69 @@ async def process_custom_daily(
         source       = client.get_channel(feature["source_channel"])
         post_channel = override_post_channel or client.get_channel(feature["post_channel"])
         if not source:
-            log.error("[%s] Custom feature '%s': source channel not found.", guild_id, name)
-            return
+            return _feature_fail(guild_id, name,
+                f"I can't see the **source** channel for **{name}** — was it deleted, "
+                f"or am I missing **View Channel** there?")
         if not post_channel:
-            log.error("[%s] Custom feature '%s': post channel not found.", guild_id, name)
-            return
+            return _feature_fail(guild_id, name,
+                f"I can't see the **destination** channel for **{name}** — was it deleted, "
+                f"or am I missing **View Channel** there?")
 
-        cand, user, uid = await get_random_content(source, ctype, cooldown_counts=cd)
+        # Scan the source channel (needs View Channel + Read Message History).
+        try:
+            cand, user, uid = await get_random_content(source, ctype, cooldown_counts=cd)
+        except discord.Forbidden:
+            return _feature_fail(guild_id, name,
+                f"I can't read {source.mention} — give me **View Channel** and "
+                f"**Read Message History** there.")
         if not cand:
-            await post_channel.send(
-                f"⚠️ No eligible **{ctype}** content found in {source.mention} for **{name}**."
-            )
-            return
+            return _feature_fail(guild_id, name,
+                f"No eligible **{ctype}** content found in {source.mention} yet.")
 
         prefix  = "🔍 **Preview** — " if preview else ""
         emoji   = (feature["emoji"] + " ") if feature["emoji"] else ""
         caption = f"{prefix}{emoji}**{name}** (from {user}):"
 
-        if cand["kind"] == "attachment":
-            logged_item = cand["url"]
-            guild = client.get_guild(guild_id)
-            limit = getattr(guild, "filesize_limit", 8 * 1024 * 1024) if guild else 8 * 1024 * 1024
-            posted = False
-            if cand["size"] and cand["size"] <= limit:
-                # Reupload the file so it embeds reliably and doesn't rely on the
-                # source message's (expiring) CDN URL.
-                try:
-                    async with aiohttp.ClientSession(timeout=_AIOHTTP_TIMEOUT) as session:
-                        async with session.get(cand["url"]) as resp:
-                            resp.raise_for_status()
-                            data = await resp.read()
-                    from io import BytesIO
-                    await post_channel.send(content=caption, file=discord.File(BytesIO(data), filename=cand["filename"]))
-                    posted = True
-                except Exception as e:
-                    log.warning("[%s] Custom feature '%s': reupload failed (%s) — posting URL.", guild_id, name, e)
-            if not posted:
-                await post_channel.send(f"{caption}\n{cand['url']}")
-        else:
-            logged_item = cand["content"]
-            await post_channel.send(f"{caption}\n{cand['content']}")
+        try:
+            if cand["kind"] == "attachment":
+                logged_item = cand["url"]
+                guild = client.get_guild(guild_id)
+                limit = getattr(guild, "filesize_limit", 8 * 1024 * 1024) if guild else 8 * 1024 * 1024
+                posted = False
+                if cand["size"] and cand["size"] <= limit:
+                    # Reupload the file so it embeds reliably and doesn't rely on the
+                    # source message's (expiring) CDN URL. On any non-permission error,
+                    # fall back to posting the URL (e.g. missing only Attach Files).
+                    try:
+                        async with aiohttp.ClientSession(timeout=_AIOHTTP_TIMEOUT) as session:
+                            async with session.get(cand["url"]) as resp:
+                                resp.raise_for_status()
+                                data = await resp.read()
+                        from io import BytesIO
+                        await post_channel.send(content=caption, file=discord.File(BytesIO(data), filename=cand["filename"]))
+                        posted = True
+                    except discord.Forbidden:
+                        raise
+                    except Exception as e:
+                        log.warning("[%s] Custom feature '%s': reupload failed (%s) — posting URL.", guild_id, name, e)
+                if not posted:
+                    await post_channel.send(f"{caption}\n{cand['url']}")
+            else:
+                logged_item = cand["content"]
+                await post_channel.send(f"{caption}\n{cand['content']}")
+        except discord.Forbidden:
+            extra = " and **Attach Files**" if ctype == "media" else ""
+            return _feature_fail(guild_id, name,
+                f"I can't post in {post_channel.mention} — give me **View Channel**, "
+                f"**Send Messages**{extra} there.")
 
         if not preview and uid:
             log_pick(guild_id, uid, user or "Unknown", category, logged_item)
-            log.info("[%s] Posted custom feature '%s'.", guild_id, name)
+        log.info("[%s] Posted custom feature '%s'%s.", guild_id, name, " (preview)" if preview else "")
+        return True, ""
     except Exception as e:
-        log.error("[%s] Custom feature '%s' failed: %s", guild_id, feature["name"], e)
+        log.error("[%s] Custom feature '%s' failed: %s", guild_id, name, e)
+        return False, "Something went wrong running that feature — check the bot logs."
     finally:
         if not preview:
             _custom_running.discard(key)
