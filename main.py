@@ -732,9 +732,9 @@ async def daily_preview(interaction: discord.Interaction, name: str):
             f'⚠️ No feature named "{name}". See `/daily list`.', ephemeral=True)
         return
     await interaction.response.defer(ephemeral=True)
-    await process_custom_daily(interaction.guild_id, client, feat,
-                               override_post_channel=interaction.channel, preview=True)
-    await interaction.followup.send("✅ Preview posted above.", ephemeral=True)
+    ok, detail = await process_custom_daily(interaction.guild_id, client, feat,
+                                            override_post_channel=interaction.channel, preview=True)
+    await interaction.followup.send("✅ Preview posted above." if ok else f"⚠️ {detail}", ephemeral=True)
 
 
 @daily_group.command(name="run", description="Post a custom feature now (to its real channel)")
@@ -747,8 +747,9 @@ async def daily_run(interaction: discord.Interaction, name: str):
             f'⚠️ No feature named "{name}". See `/daily list`.', ephemeral=True)
         return
     await interaction.response.defer(ephemeral=True)
-    await process_custom_daily(interaction.guild_id, client, feat)
-    await interaction.followup.send(f"✅ **{feat['name']}** posted.", ephemeral=True)
+    ok, detail = await process_custom_daily(interaction.guild_id, client, feat)
+    await interaction.followup.send(
+        f"✅ **{feat['name']}** posted to <#{feat['post_channel']}>." if ok else f"⚠️ {detail}", ephemeral=True)
 
 
 client.tree.add_command(daily_group)
@@ -886,8 +887,8 @@ async def song_cmd(interaction: discord.Interaction):
             "⚠️ The **Song of the Day** feature is disabled. Enable it with `/daily toggle`.", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=True)
-    await process_custom_daily(gid, client, feat)
-    await interaction.followup.send("✅ Song of the day posted.", ephemeral=True)
+    ok, detail = await process_custom_daily(gid, client, feat)
+    await interaction.followup.send("✅ Song of the day posted." if ok else f"⚠️ {detail}", ephemeral=True)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
