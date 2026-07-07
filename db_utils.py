@@ -648,6 +648,31 @@ def get_custom_feature(guild_id: int, name: str) -> sqlite3.Row | None:
         ).fetchone()
 
 
+_CUSTOM_FEATURE_EDITABLE = frozenset({
+    "name", "emoji", "content_type", "source_channel", "post_channel", "post_time",
+})
+
+
+def update_custom_feature(feature_id: int, **fields) -> bool:
+    """
+    Update only the given (allowlisted) columns of a feature by id. Returns
+    False if a new name collides with another feature in the same guild.
+    Fields whose value is None are ignored (i.e. left unchanged).
+    """
+    cols = {k: v for k, v in fields.items() if k in _CUSTOM_FEATURE_EDITABLE and v is not None}
+    if not cols:
+        return True
+    assignments = ", ".join(f"{k}=?" for k in cols)
+    with db_conn() as conn:
+        try:
+            conn.execute(f"UPDATE custom_features SET {assignments} WHERE id=?",
+                         (*cols.values(), feature_id))
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+
 def get_custom_features(guild_id: int) -> list[sqlite3.Row]:
     with db_conn() as conn:
         return conn.execute(
