@@ -231,37 +231,59 @@ def init_db() -> None:
                 conn.execute(f"ALTER TABLE custom_features ADD COLUMN {col} {definition}")
             except sqlite3.OperationalError:
                 pass
-        _migrate_song_to_custom_feature(conn)
+        synced = _migrate_song_to_slug_model(conn)
     log.info("Database ready at %s", DB_FILE)
+    return synced
 
 
-def _migrate_song_to_custom_feature(conn: sqlite3.Connection) -> None:
+def _migrate_song_to_slug_model(conn: sqlite3.Connection) -> list[int]:
     """
-    One-time: turn each guild's built-in song-of-the-day config into a
-    'Song of the Day' custom feature (content_type 'music'), preserving its
-    channels/time/enabled/last-run. Idempotent via the song_migrated flag —
-    it runs once per guild and never resurrects a feature the admin deleted.
+    Transition each guild to the slug-command model, once (gated by
+    song_migrated < 2). Per guild:
+      • First time (song_migrated=0): create a 'Song of the Day' music feature
+        from the guild's legacy song config, if any.
+      • Wipe every OTHER custom feature (they predate required slugs — the admin
+        recreates them cleanly with the slugs they want).
+      • Give the surviving 'Song of the Day' feature the reserved-free slug 'song'
+        (the old built-in /song command is gone, freeing the name).
+      • Mark song_migrated=2.
+    Returns the guild IDs that changed, so the caller can re-sync their commands.
     """
     rows = conn.execute(
         "SELECT guild_id, music_channel, song_post_channel, song_time, "
-        "enable_daily_song, last_song_date FROM server_config "
-        "WHERE COALESCE(song_migrated, 0) = 0"
+        "enable_daily_song, last_song_date, COALESCE(song_migrated,0) AS sm "
+        "FROM server_config WHERE COALESCE(song_migrated,0) < 2"
     ).fetchall()
     now = datetime.now(timezone.utc).isoformat()
+    changed: list[int] = []
     for r in rows:
-        if r["music_channel"] and r["song_post_channel"]:
+        gid = r["guild_id"]
+        if r["sm"] == 0 and r["music_channel"] and r["song_post_channel"]:
             conn.execute(
                 "INSERT OR IGNORE INTO custom_features "
                 "(guild_id, name, emoji, content_type, source_channel, post_channel, "
-                " post_time, enabled, last_run_date, created_at) "
-                "VALUES (?, 'Song of the Day', '🎵', 'music', ?, ?, ?, ?, ?, ?)",
-                (r["guild_id"], r["music_channel"], r["song_post_channel"],
-                 r["song_time"] or "10:00",
+                " post_time, enabled, last_run_date, created_at, command) "
+                "VALUES (?, 'Song of the Day', '🎵', 'music', ?, ?, ?, ?, ?, ?, 'song')",
+                (gid, r["music_channel"], r["song_post_channel"], r["song_time"] or "10:00",
                  1 if (r["enable_daily_song"] is None or r["enable_daily_song"]) else 0,
                  r["last_song_date"], now),
             )
-        conn.execute("UPDATE server_config SET song_migrated=1 WHERE guild_id=?", (r["guild_id"],))
+        # Wipe pre-slug features (everything except the song feature).
+        conn.execute(
+            "DELETE FROM custom_features WHERE guild_id=? AND name<>'Song of the Day' COLLATE NOCASE",
+            (gid,),
+        )
+        # Ensure the song feature owns the 'song' slug.
+        conn.execute(
+            "UPDATE custom_features SET command='song' "
+            "WHERE guild_id=? AND name='Song of the Day' COLLATE NOCASE "
+            "AND (command IS NULL OR command='')",
+            (gid,),
+        )
+        conn.execute("UPDATE server_config SET song_migrated=2 WHERE guild_id=?", (gid,))
+        changed.append(gid)
     conn.commit()
+    return changed
 
 
 def get_config(guild_id: int) -> sqlite3.Row:
