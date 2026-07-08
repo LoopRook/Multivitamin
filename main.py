@@ -92,7 +92,7 @@ _SETUP_TEXT = (
     "   `/daily access <command> <admin|everyone|role> [role]` — who can run it\n"
     "   `/preview <command>` — dry-run it here (like `/preview rename`)\n\n"
     "**Bracket:**\n"
-    "   `/bracket size` · `/bracket votingtime` · `/bracket pacing`\n"
+    "   `/bracket size` · `/bracket votingtime` · `/bracket pacing` · `/bracket source`\n"
     "   `/bracket start [year] [season]` · `/bracket test`\n"
     "   `/bracket forceadvance` · `/bracket status` · `/bracket cancel`\n\n"
     "**Seasons:** `/season add <start> <end> <name>` · `/season list` · `/season remove`\n\n"
@@ -180,6 +180,7 @@ def build_help_embed(is_admin: bool = False, is_manager: bool = False) -> discor
         value=(
             "`/bracket size <4|8|16|32>` · `/bracket votingtime <hours>`\n"
             "`/bracket pacing <round|daily>` — all at once, or one per day\n"
+            "`/bracket source [channel]` — seed from a 'best of' channel members forward into\n"
             "`/bracket start [year] [season]` — seed from a year or a season\n"
             "`/bracket test` — test bracket with random scores\n"
             "`/bracket forceadvance` · `/bracket status` · `/bracket cancel`"
@@ -550,6 +551,35 @@ async def bracket_pacing(interaction: discord.Interaction, mode: Literal["round"
     set_config(interaction.guild_id, "bracket_pacing", mode)
     detail = "matchups will post all at once" if mode == "round" else "one matchup per day"
     await interaction.response.send_message(f"✅ Bracket pacing set to **{mode}** — {detail}.", ephemeral=True)
+
+
+@bracket_group.command(name="source", description="Seed brackets from a curated 'best of' channel members forward renames into")
+@app_commands.describe(
+    channel="The 'best of' channel (defaults to where you run this)",
+    clear="Turn this off — seed from every tracked rename instead",
+)
+@admin_only()
+async def bracket_source(
+    interaction: discord.Interaction,
+    channel: Optional[discord.TextChannel] = None,
+    clear: bool = False,
+):
+    if clear:
+        set_config(interaction.guild_id, "bracket_source_channel", None)
+        await interaction.response.send_message(
+            "✅ Bracket source cleared — brackets now seed from **every tracked rename** "
+            "in the window.",
+            ephemeral=True,
+        )
+        return
+    target = channel or interaction.channel
+    set_config(interaction.guild_id, "bracket_source_channel", target.id)
+    await interaction.response.send_message(
+        f"✅ Bracket source set to {target.mention}. Brackets now seed from renames "
+        f"members **forward** (Discord's Forward button) into that channel, scored by "
+        f"reactions on the forwards. Screenshots and re-uploads won't count.",
+        ephemeral=True,
+    )
 
 
 @bracket_group.command(name="start", description="Start a bracket for a calendar year or a season")

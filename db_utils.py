@@ -13,7 +13,7 @@ _VALID_CONFIG_FIELDS = frozenset({
     "enable_cooldown", "enable_voting",
     "timezone", "quote_time", "song_time", "last_quote_date", "last_song_date",
     "bracket_channel", "bracket_size", "bracket_voting_hours", "voting_enabled_at",
-    "bracket_pacing",
+    "bracket_pacing", "bracket_source_channel",
 })
 
 _CREATE_CONFIG = """
@@ -37,7 +37,8 @@ CREATE TABLE IF NOT EXISTS server_config (
     bracket_size          INTEGER DEFAULT 8,
     bracket_voting_hours  INTEGER DEFAULT 24,
     voting_enabled_at     TEXT,
-    bracket_pacing        TEXT    DEFAULT 'round'
+    bracket_pacing        TEXT    DEFAULT 'round',
+    bracket_source_channel INTEGER
 )
 """
 
@@ -169,6 +170,7 @@ _CONFIG_MIGRATIONS = [
     ("voting_enabled_at",    "TEXT"),
     ("bracket_pacing",       "TEXT DEFAULT 'round'"),
     ("song_migrated",        "INTEGER DEFAULT 0"),
+    ("bracket_source_channel", "INTEGER"),
 ]
 
 _RENAME_POSTS_MIGRATIONS = [
