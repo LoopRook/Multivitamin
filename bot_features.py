@@ -378,6 +378,7 @@ async def build_config(guild_id: int, client: discord.Client) -> str:
         f"Music Channel:       {ch(c['music_channel'])}",
         f"Song Post Channel:   {ch(c['song_post_channel'])}",
         f"Bracket Channel:     {ch(c['bracket_channel'])}",
+        f"Bracket Source:      {ch(c.get('bracket_source_channel')) if c.get('bracket_source_channel') else 'All tracked renames'}",
         f"Quote Feature:       {'Enabled' if c['enable_daily_quote'] else 'Disabled'}",
         f"Song Feature:        {'Enabled' if c['enable_daily_song']  else 'Disabled'}",
         f"Cooldown:            {'Enabled' if c['enable_cooldown']    else 'Disabled'}",
@@ -495,13 +496,14 @@ async def process_rename(
             log.error("[%s] Failed to post card to channel %s: %s", guild_id, channel.id, e)
             continue
 
-        # Bracket tracking: record the official daily post so its reactions can
-        # seed a bracket later. Tracking is always on once a post channel is set;
-        # we only track the configured post_channel message (never !rename run in
-        # an arbitrary channel). voting_enabled_at is stamped once as a
-        # "tracking since" floor so brackets never count pre-tracking history.
-        is_official = post_chan_id and channel.id == post_chan_id
-        if is_official:
+        # Bracket tracking: record EVERY copy of the card we post so its reactions
+        # can seed a bracket later — and so a native Forward of any copy (e.g. the
+        # channel a user ran /rename in, not just the post channel) can be matched
+        # back to this rename via message_id. Tracking is on once a post channel is
+        # configured; dedup-by-quote at bracket time keeps duplicate copies from
+        # double-counting. voting_enabled_at is stamped once as a "tracking since"
+        # floor so brackets never count pre-tracking history.
+        if post_chan_id:
             # Grab the attachment URL as a cached snapshot.
             # (We always re-fetch fresh at bracket time since CDN URLs expire.)
             img_url = sent.attachments[0].url if sent.attachments else None

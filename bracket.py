@@ -124,6 +124,50 @@ async def _get_total_reactions(client: discord.Client, channel_id: int, message_
         return 0
 
 
+async def _scored_from_forwards(
+    client: discord.Client, source_channel_id: int, posts_in_window: list,
+) -> list[tuple[int, str, str | None]]:
+    """
+    Seed candidates from a curated "best of" channel that members populate with
+    Discord **native forwards** of rename cards.
+
+    A native forward carries a `message.reference` whose `type` is
+    `MessageReferenceType.forward` and whose `message_id` points at the ORIGINAL
+    posted card. We only count forwards whose original matches a rename post
+    inside the bracket's seeding window (`posts_in_window`), so the year/season
+    window and the tracking floor still apply. Screenshots or re-uploads have no
+    such reference and are silently ignored — members must use the Forward button.
+
+    Returns (reaction_count, quote, quote_user) tuples scored by the reactions on
+    the *forwarded* message. Dedup-by-quote happens in the caller.
+    """
+    by_msg = {
+        p["message_id"]: (p["quote"], p["quote_user"]) for p in posts_in_window
+    }
+    if not by_msg:
+        return []
+
+    channel = client.get_channel(source_channel_id)
+    if not channel:
+        return []
+
+    scored: list[tuple[int, str, str | None]] = []
+    try:
+        async for msg in channel.history(limit=None):
+            ref = msg.reference
+            if not ref or getattr(ref, "type", None) != discord.MessageReferenceType.forward:
+                continue
+            original = by_msg.get(ref.message_id)
+            if original is None:
+                continue
+            quote, user = original
+            count = sum(r.count for r in msg.reactions)
+            scored.append((count, quote, user))
+    except discord.HTTPException as e:
+        log.warning("Could not scan bracket source channel %s: %s", source_channel_id, e)
+    return scored
+
+
 async def _get_fresh_image_url(client: discord.Client, channel_id: int, message_id: int) -> str | None:
     """
     Fetch the current attachment URL from a stored rename post message.
@@ -705,15 +749,37 @@ async def _start_range_bracket(
     if not posts:
         return False, (
             f"⚠️ No rename posts found for {scope_desc}. "
-            f"Renames are tracked automatically once a post channel is set (`!setpostchannel`)."
+            f"Renames are tracked automatically once a post channel is set (`/config postchannel`)."
         )
 
-    await bracket_channel.send(f"⏳ Tallying reactions from {len(posts)} rename posts for {scope_desc}...")
-
-    scored: list[tuple[int, str, str | None]] = []
-    for post in posts:
-        count = await _get_total_reactions(client, post["channel_id"], post["message_id"])
-        scored.append((count, post["quote"], post["quote_user"]))
+    # If a curated "best of" source channel is configured, seed from the renames
+    # members forwarded there (scored by reactions on the forwards). Otherwise,
+    # seed from every tracked rename in the window (scored by reactions in place).
+    source_channel_id = cfg["bracket_source_channel"]
+    if source_channel_id:
+        if not client.get_channel(source_channel_id):
+            return False, (
+                "⚠️ The configured bracket source channel isn't accessible. "
+                "Re-set it with `/bracket source` or clear it to use all tracked renames."
+            )
+        scored = await _scored_from_forwards(client, source_channel_id, posts)
+        if not scored:
+            return False, (
+                f"⚠️ No forwarded renames found for {scope_desc}. Members nominate "
+                f"names by **forwarding** rename cards (Discord's Forward button) into the "
+                f"source channel — screenshots and re-uploads don't count."
+            )
+        await bracket_channel.send(
+            f"⏳ Tallying reactions from {len(scored)} forwarded rename(s) for {scope_desc}..."
+        )
+    else:
+        await bracket_channel.send(
+            f"⏳ Tallying reactions from {len(posts)} rename posts for {scope_desc}..."
+        )
+        scored = []
+        for post in posts:
+            count = await _get_total_reactions(client, post["channel_id"], post["message_id"])
+            scored.append((count, post["quote"], post["quote_user"]))
 
     # Deduplicate — keep highest score per unique quote
     best: dict[str, tuple[int, str | None]] = {}
