@@ -77,7 +77,8 @@ _SETUP_TEXT = (
     "**Bot Setup Guide** — all commands are slash (`/`) commands.\n\n"
     "**Channels** (each takes an optional channel; defaults to where you run it):\n"
     "   `/config postchannel` — official rename cards (tracked for brackets)\n"
-    "   `/config quotechannel` · `/config iconchannel` · `/config bracketchannel`\n\n"
+    "   `/config quotechannel` · `/config iconchannel`\n"
+    "   *(The bracket channel + best-of source live in `/bracket config`.)*\n\n"
     "**Features:** `/config feature <quote|cooldown> <on/off>`\n"
     "   *(Bracket tracking is always on once a Post Channel is set.)*\n\n"
     "**Scheduling:**\n"
@@ -92,10 +93,10 @@ _SETUP_TEXT = (
     "   `/daily access <command> <admin|everyone|role> [role]` — who can run it\n"
     "   `/preview <command>` — dry-run it here (like `/preview rename`)\n\n"
     "**Bracket:**\n"
-    "   `/bracket size` · `/bracket votingtime` · `/bracket pacing` · `/bracket source`\n"
-    "   `/bracket start [year] [season]` · `/bracket test`\n"
-    "   `/bracket forceadvance` · `/bracket status` · `/bracket cancel`\n\n"
-    "**Seasons:** `/season add <start> <end> <name>` · `/season list` · `/season remove`\n\n"
+    "   `/bracket config` — guided: bracket channel + optional best-of source channel\n"
+    "   `/bracket start` — guided: pick scope · size · voting · pacing, then launch\n"
+    "   `/bracket test` · `/bracket forceadvance` · `/bracket status` · `/bracket cancel`\n\n"
+    "**Seasons:** `/season` — guided panel to add/list/remove named date windows\n\n"
     "**Admins** (Manage Server): `/admin add` · `/admin remove` · `/admin list`\n\n"
     "**Other:** `/showconfig` · `/preview` · `/contributors` · `/mystats`\n\n"
     "**See every command:** `/help`"
@@ -106,7 +107,9 @@ _WELCOME_TEXT = (
     "I rename your server daily from community-submitted quotes, run reaction-seeded bracket "
     "championships, and can post any 'X of the day' you like — meme, critter, song, and more.\n\n"
     "**Get started:** run `/setup` for the full guide, or `/help` to see every command.\n"
-    "Most servers begin with `/config postchannel` and `/config quotechannel`.\n"
+    "Most servers begin with `/config postchannel` and `/config quotechannel`, then "
+    "`/bracket config` to set the bracket channel and (optionally) a best-of channel members "
+    "forward their favorite renames into.\n"
     "*(Slash commands can take a few minutes to appear right after inviting.)*"
 )
 
@@ -147,7 +150,7 @@ def build_help_embed(is_admin: bool = False, is_manager: bool = False) -> discor
             "`/config quotechannel` — quote submissions\n"
             "`/config iconchannel` — icon images\n"
             "`/config postchannel` — official rename cards (tracked for brackets)\n"
-            "`/config bracketchannel` — bracket matchups & results"
+            "*(Bracket channel + best-of source are set in `/bracket config`.)*"
         ),
         inline=False,
     )
@@ -178,10 +181,8 @@ def build_help_embed(is_admin: bool = False, is_manager: bool = False) -> discor
     embed.add_field(
         name="🏆 Bracket (Admin)",
         value=(
-            "`/bracket size <4|8|16|32>` · `/bracket votingtime <hours>`\n"
-            "`/bracket pacing <round|daily>` — all at once, or one per day\n"
-            "`/bracket source [channel]` — seed from a 'best of' channel members forward into\n"
-            "`/bracket start [year] [season]` — seed from a year or a season\n"
+            "`/bracket config` — **guided**: bracket channel + optional best-of source\n"
+            "`/bracket start` — **guided**: pick scope · size · voting · pacing → launch\n"
             "`/bracket test` — test bracket with random scores\n"
             "`/bracket forceadvance` · `/bracket status` · `/bracket cancel`"
         ),
@@ -190,9 +191,8 @@ def build_help_embed(is_admin: bool = False, is_manager: bool = False) -> discor
     embed.add_field(
         name="📅 Seasons (Admin)",
         value=(
-            "`/season add <start> <end> <name>` — dates as `YYYY-MM-DD`\n"
-            "`/season list` — list defined seasons\n"
-            "`/season remove <name>` — delete a season"
+            "`/season` — **guided** panel: add (form), list, and remove named date windows\n"
+            "Pick a season as the scope in `/bracket start`."
         ),
         inline=False,
     )
@@ -472,12 +472,6 @@ async def config_postchannel(interaction: discord.Interaction, channel: Optional
     await _set_channel(interaction, "post_channel", "Post channel", channel)
 
 
-@config_group.command(name="bracketchannel", description="Set the channel where bracket matchups & results post")
-@admin_only()
-async def config_bracketchannel(interaction: discord.Interaction, channel: Optional[discord.TextChannel] = None):
-    await _set_channel(interaction, "bracket_channel", "Bracket channel", channel)
-
-
 @config_group.command(name="feature", description="Enable or disable a feature")
 @app_commands.describe(feature="Which feature", enabled="Turn it on or off")
 @admin_only()
@@ -530,71 +524,172 @@ client.tree.add_command(config_group)
 bracket_group = app_commands.Group(name="bracket", description="Bracket championship", guild_only=True)
 
 
-@bracket_group.command(name="size", description="Set the bracket size (power of 2)")
-@admin_only()
-async def bracket_size(interaction: discord.Interaction, size: Literal[4, 8, 16, 32]):
-    set_config(interaction.guild_id, "bracket_size", size)
-    await interaction.response.send_message(f"✅ Bracket size set to **{size}**.", ephemeral=True)
+class _BracketConfigView(discord.ui.View):
+    """Persistent bracket setup: where matchups post + the optional best-of source channel."""
+    def __init__(self, author_id: int, guild_id: int):
+        super().__init__(timeout=300)
+        self.author_id = author_id
+        self.guild_id  = guild_id
 
-
-@bracket_group.command(name="votingtime", description="Set the voting window per matchup, in hours (1–168)")
-@admin_only()
-async def bracket_votingtime(interaction: discord.Interaction, hours: app_commands.Range[int, 1, 168]):
-    set_config(interaction.guild_id, "bracket_voting_hours", hours)
-    await interaction.response.send_message(
-        f"✅ Bracket voting window set to **{hours} hour(s)** per matchup.", ephemeral=True)
-
-
-@bracket_group.command(name="pacing", description="Post all matchups at once, or one per day")
-@admin_only()
-async def bracket_pacing(interaction: discord.Interaction, mode: Literal["round", "daily"]):
-    set_config(interaction.guild_id, "bracket_pacing", mode)
-    detail = "matchups will post all at once" if mode == "round" else "one matchup per day"
-    await interaction.response.send_message(f"✅ Bracket pacing set to **{mode}** — {detail}.", ephemeral=True)
-
-
-@bracket_group.command(name="source", description="Seed brackets from a curated 'best of' channel members forward renames into")
-@app_commands.describe(
-    channel="The 'best of' channel (defaults to where you run this)",
-    clear="Turn this off — seed from every tracked rename instead",
-)
-@admin_only()
-async def bracket_source(
-    interaction: discord.Interaction,
-    channel: Optional[discord.TextChannel] = None,
-    clear: bool = False,
-):
-    if clear:
-        set_config(interaction.guild_id, "bracket_source_channel", None)
-        await interaction.response.send_message(
-            "✅ Bracket source cleared — brackets now seed from **every tracked rename** "
-            "in the window.",
-            ephemeral=True,
+    def _render(self) -> str:
+        cfg = get_config(self.guild_id)
+        bc  = f"<#{cfg['bracket_channel']}>" if cfg["bracket_channel"] else "*not set*"
+        src = f"<#{cfg['bracket_source_channel']}>" if cfg["bracket_source_channel"] else "*all tracked renames*"
+        return (
+            "🏆 **Bracket setup**\n"
+            f"• Matchups post to: {bc}\n"
+            f"• Seeded from: {src}\n\n"
+            "Pick the channels below. The **best-of source** is optional — members "
+            "**forward** rename cards there to nominate them (Discord's Forward button). "
+            "Use **🚫 No best-of** to seed from every tracked rename instead. Hit **✅ Done** when finished."
         )
-        return
-    target = channel or interaction.channel
-    set_config(interaction.guild_id, "bracket_source_channel", target.id)
-    await interaction.response.send_message(
-        f"✅ Bracket source set to {target.mention}. Brackets now seed from renames "
-        f"members **forward** (Discord's Forward button) into that channel, scored by "
-        f"reactions on the forwards. Screenshots and re-uploads won't count.",
-        ephemeral=True,
-    )
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                "This panel isn't yours — run `/bracket config` yourself.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.select(cls=discord.ui.ChannelSelect, channel_types=[discord.ChannelType.text],
+                       placeholder="Bracket channel — where matchups & results post", row=0)
+    async def bracket_channel_select(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
+        set_config(self.guild_id, "bracket_channel", select.values[0].id)
+        await interaction.response.edit_message(content=self._render(), view=self)
+
+    @discord.ui.select(cls=discord.ui.ChannelSelect, channel_types=[discord.ChannelType.text],
+                       placeholder="Best-of source — members forward renames here (optional)", row=1)
+    async def source_channel_select(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
+        set_config(self.guild_id, "bracket_source_channel", select.values[0].id)
+        await interaction.response.edit_message(content=self._render(), view=self)
+
+    @discord.ui.button(label="No best-of", style=discord.ButtonStyle.secondary, emoji="🚫", row=2)
+    async def clear_source_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        set_config(self.guild_id, "bracket_source_channel", None)
+        await interaction.response.edit_message(content=self._render(), view=self)
+
+    @discord.ui.button(label="Done", style=discord.ButtonStyle.success, emoji="✅", row=2)
+    async def done_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for c in self.children:
+            c.disabled = True
+        cfg = get_config(self.guild_id)
+        bc  = f"<#{cfg['bracket_channel']}>" if cfg["bracket_channel"] else "*not set*"
+        src = f"<#{cfg['bracket_source_channel']}>" if cfg["bracket_source_channel"] else "*all tracked renames*"
+        await interaction.response.edit_message(
+            content=(f"🏁 **Bracket setup saved.**\n• Matchups → {bc}\n• Seeded from → {src}\n\n"
+                     "Start a bracket any time with `/bracket start`."),
+            view=self)
+        self.stop()
 
 
-@bracket_group.command(name="start", description="Start a bracket for a calendar year or a season")
-@app_commands.describe(year="Calendar year (defaults to current year)",
-                       season="Season name (overrides year if given)")
+_VOTING_CHOICES = [(6, "6 hours"), (12, "12 hours"), (24, "24 hours (1 day)"),
+                   (48, "48 hours (2 days)"), (72, "72 hours (3 days)"), (168, "168 hours (1 week)")]
+
+
+class _BracketStartView(discord.ui.View):
+    """Per-run bracket launcher — scope, size, voting window & pacing, pre-filled to last-used."""
+    def __init__(self, author_id: int, guild_id: int):
+        super().__init__(timeout=300)
+        self.author_id = author_id
+        self.guild_id  = guild_id
+        cfg = get_config(guild_id)
+        self.scope  = "year"
+        self.size   = int(cfg["bracket_size"] or 8)
+        self.voting = int(cfg["bracket_voting_hours"] or 24)
+        self.pacing = cfg["bracket_pacing"] or "round"
+
+        scope_opts = [discord.SelectOption(
+            label=f"This year ({datetime.now().year})", value="year", default=True)]
+        for s in get_seasons(guild_id)[:24]:
+            scope_opts.append(discord.SelectOption(label=f'Season: {s["name"]}'[:100],
+                                                   value=f'season:{s["name"]}'[:100]))
+        self.scope_select.options = scope_opts
+
+        self.size_select.options = [
+            discord.SelectOption(label=f"{n} names", value=str(n), default=(n == self.size))
+            for n in (4, 8, 16, 32)
+        ]
+        self.voting_select.options = [
+            discord.SelectOption(label=lbl, value=str(v), default=(v == self.voting))
+            for v, lbl in _VOTING_CHOICES
+        ]
+        self.pacing_select.options = [
+            discord.SelectOption(label="Round — all matchups at once", value="round",
+                                 default=(self.pacing == "round")),
+            discord.SelectOption(label="Daily — one matchup per day", value="daily",
+                                 default=(self.pacing == "daily")),
+        ]
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                "This panel isn't yours — run `/bracket start` yourself.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.select(placeholder="Scope — this year or a season",
+                       options=[discord.SelectOption(label="This year", value="year")], row=0)
+    async def scope_select(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.scope = select.values[0]
+        await interaction.response.defer()
+
+    @discord.ui.select(placeholder="Size — how many names",
+                       options=[discord.SelectOption(label="8 names", value="8")], row=1)
+    async def size_select(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.size = int(select.values[0])
+        await interaction.response.defer()
+
+    @discord.ui.select(placeholder="Voting window per matchup",
+                       options=[discord.SelectOption(label="24 hours", value="24")], row=2)
+    async def voting_select(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.voting = int(select.values[0])
+        await interaction.response.defer()
+
+    @discord.ui.select(placeholder="Pacing — all at once or one per day",
+                       options=[discord.SelectOption(label="Round", value="round")], row=3)
+    async def pacing_select(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.pacing = select.values[0]
+        await interaction.response.defer()
+
+    @discord.ui.button(label="Launch bracket", style=discord.ButtonStyle.success, emoji="🚀", row=4)
+    async def launch_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for c in self.children:
+            c.disabled = True
+        scope_label = "this year" if self.scope == "year" else self.scope.split(":", 1)[1]
+        await interaction.response.edit_message(
+            content=(f"🚀 **Launching** — {scope_label} · {self.size} names · {self.voting}h · {self.pacing}. "
+                     "Watch the bracket channel."),
+            view=self)
+        self.stop()
+        # Remember these as the new defaults (pre-fill for next time).
+        set_config(self.guild_id, "bracket_size", self.size)
+        set_config(self.guild_id, "bracket_voting_hours", self.voting)
+        set_config(self.guild_id, "bracket_pacing", self.pacing)
+        if self.scope.startswith("season:"):
+            _, msg = await start_season_bracket(
+                self.guild_id, client, self.scope.split(":", 1)[1],
+                size=self.size, voting_hours=self.voting, pacing=self.pacing)
+        else:
+            _, msg = await start_bracket(
+                self.guild_id, client, datetime.now().year,
+                size=self.size, voting_hours=self.voting, pacing=self.pacing)
+        await interaction.followup.send(msg, ephemeral=True)
+
+
+@bracket_group.command(name="config", description="Set the bracket channel + optional best-of source channel")
 @admin_only()
-async def bracket_start(interaction: discord.Interaction,
-                        year: Optional[int] = None, season: Optional[str] = None):
-    await interaction.response.defer(ephemeral=True)
-    if season:
-        _, msg = await start_season_bracket(interaction.guild_id, client, season)
-    else:
-        y = year or datetime.now().year
-        _, msg = await start_bracket(interaction.guild_id, client, y)
-    await interaction.followup.send(msg, ephemeral=True)
+async def bracket_config(interaction: discord.Interaction):
+    view = _BracketConfigView(interaction.user.id, interaction.guild_id)
+    await interaction.response.send_message(view._render(), view=view, ephemeral=True)
+
+
+@bracket_group.command(name="start", description="Start a bracket — pick scope, size, voting & pacing")
+@admin_only()
+async def bracket_start(interaction: discord.Interaction):
+    view = _BracketStartView(interaction.user.id, interaction.guild_id)
+    await interaction.response.send_message(
+        "🏆 **Start a bracket** — settings are pre-filled to your last run; adjust any, then hit **🚀 Launch**.",
+        view=view, ephemeral=True)
 
 
 @bracket_group.command(name="test", description="Start a test bracket from the quote channel (random scores)")
@@ -633,64 +728,102 @@ async def bracket_cancel(interaction: discord.Interaction):
 client.tree.add_command(bracket_group)
 
 
-# ── /season group ─────────────────────────────────────────────────────────────
+# ── /season — named date ranges for brackets (guided panel) ───────────────────
 
-season_group = app_commands.Group(name="season", description="Named date ranges for brackets", guild_only=True)
-
-
-@season_group.command(name="add", description="Define a season (date range) for scoped brackets")
-@app_commands.describe(start="Start date YYYY-MM-DD", end="End date YYYY-MM-DD", name="Season name")
-@admin_only()
-async def season_add(interaction: discord.Interaction, start: str, end: str, name: str):
-    name = name.strip()
-    cfg = get_config(interaction.guild_id)
-    try:
-        tz = pytz.timezone(cfg["timezone"] or "US/Eastern")
-    except pytz.exceptions.UnknownTimeZoneError:
-        tz = pytz.timezone("US/Eastern")
-    try:
-        start_utc, end_utc = _parse_season_dates(start, end, tz)
-    except ValueError:
-        await interaction.response.send_message(
-            "⚠️ Invalid dates. Use `YYYY-MM-DD` for both, and make sure the end is on/after the start.",
-            ephemeral=True)
-        return
-    if add_season(interaction.guild_id, name, start_utc, end_utc):
-        await interaction.response.send_message(
-            f"✅ Season **{name}** created: {start} → {end}.\n"
-            f"Start it any time with `/bracket start season:{name}`.", ephemeral=True)
+def _season_panel_text(guild_id: int) -> str:
+    seasons = get_seasons(guild_id)
+    if seasons:
+        body = "\n".join(f'• **{s["name"]}** — {s["start_at"][:10]} → {s["end_at"][:10]}' for s in seasons)
     else:
-        await interaction.response.send_message(
-            f'⚠️ A season named "{name}" already exists. Remove it first with `/season remove`.', ephemeral=True)
+        body = "*No seasons defined yet.*"
+    return (
+        "📅 **Seasons** — named date windows you can seed a bracket from (a month, a holiday, etc.).\n\n"
+        f"{body}\n\n"
+        "Use **➕ Add season** to define one, or the dropdown to remove one. "
+        "Then pick it as the scope in `/bracket start`."
+    )
 
 
-@season_group.command(name="list", description="List defined seasons")
+class _SeasonModal(discord.ui.Modal, title="Add a season"):
+    start_in = discord.ui.TextInput(label="Start date (YYYY-MM-DD)", placeholder="2026-10-01", max_length=10)
+    end_in   = discord.ui.TextInput(label="End date (YYYY-MM-DD)", placeholder="2026-10-31", max_length=10)
+    name_in  = discord.ui.TextInput(label="Season name", placeholder="Halloween 2026", max_length=80)
+
+    def __init__(self, view: "_SeasonView"):
+        super().__init__()
+        self._view = view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        gid  = interaction.guild_id
+        name = self.name_in.value.strip()
+        cfg  = get_config(gid)
+        try:
+            tz = pytz.timezone(cfg["timezone"] or "US/Eastern")
+        except pytz.exceptions.UnknownTimeZoneError:
+            tz = pytz.timezone("US/Eastern")
+        try:
+            start_utc, end_utc = _parse_season_dates(self.start_in.value, self.end_in.value, tz)
+        except ValueError:
+            await interaction.response.send_message(
+                "⚠️ Invalid dates. Use `YYYY-MM-DD` for both, and make sure the end is on/after the start.",
+                ephemeral=True)
+            return
+        if add_season(gid, name, start_utc, end_utc):
+            await interaction.response.edit_message(
+                content=_season_panel_text(gid), view=_SeasonView(self._view.author_id, gid))
+        else:
+            await interaction.response.send_message(
+                f'⚠️ A season named "{name}" already exists.', ephemeral=True)
+
+
+class _SeasonView(discord.ui.View):
+    """Manage seasons: list, remove via dropdown, add via a modal form."""
+    def __init__(self, author_id: int, guild_id: int):
+        super().__init__(timeout=300)
+        self.author_id = author_id
+        self.guild_id  = guild_id
+        seasons = get_seasons(guild_id)
+        if seasons:
+            self.remove_select.options = [
+                discord.SelectOption(label=s["name"][:100], value=s["name"][:100],
+                                     description=f'{s["start_at"][:10]} → {s["end_at"][:10]}')
+                for s in seasons[:25]
+            ]
+        else:
+            self.remove_select.disabled = True
+            self.remove_select.placeholder = "No seasons to remove yet"
+            self.remove_select.options = [discord.SelectOption(label="(none)", value="__none__")]
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                "This panel isn't yours — run `/season` yourself.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.select(placeholder="Remove a season…",
+                       options=[discord.SelectOption(label="(none)", value="__none__")], row=0)
+    async def remove_select(self, interaction: discord.Interaction, select: discord.ui.Select):
+        val = select.values[0]
+        if val == "__none__":
+            await interaction.response.defer()
+            return
+        remove_season(self.guild_id, val)
+        await interaction.response.edit_message(
+            content=_season_panel_text(self.guild_id), view=_SeasonView(self.author_id, self.guild_id))
+
+    @discord.ui.button(label="Add season", style=discord.ButtonStyle.success, emoji="➕", row=1)
+    async def add_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(_SeasonModal(self))
+
+
+@client.tree.command(name="season", description="Manage bracket seasons (named date windows)")
+@app_commands.guild_only()
 @admin_only()
-async def season_list(interaction: discord.Interaction):
-    seasons = get_seasons(interaction.guild_id)
-    if not seasons:
-        await interaction.response.send_message(
-            "No seasons defined. Create one with `/season add`.", ephemeral=True)
-        return
-    lines = ["**Seasons:**"]
-    for s in seasons:
-        lines.append(f'• **{s["name"]}** — {s["start_at"][:10]} → {s["end_at"][:10]}')
-    lines.append("\nStart one with `/bracket start season:<name>`.")
-    await interaction.response.send_message("\n".join(lines), ephemeral=True)
-
-
-@season_group.command(name="remove", description="Delete a season")
-@app_commands.describe(name="Season name to delete")
-@admin_only()
-async def season_remove(interaction: discord.Interaction, name: str):
-    if remove_season(interaction.guild_id, name.strip()):
-        await interaction.response.send_message(f"🗑️ Season **{name}** removed.", ephemeral=True)
-    else:
-        await interaction.response.send_message(
-            f'⚠️ No season named "{name}". See `/season list`.', ephemeral=True)
-
-
-client.tree.add_command(season_group)
+async def season_cmd(interaction: discord.Interaction):
+    view = _SeasonView(interaction.user.id, interaction.guild_id)
+    await interaction.response.send_message(
+        _season_panel_text(interaction.guild_id), view=view, ephemeral=True)
 
 
 # ── /daily group — admin-defined "X of the day" features ──────────────────────
