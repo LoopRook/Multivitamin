@@ -791,7 +791,7 @@ class _BracketStartView(discord.ui.View):
         self.author_id = author_id
         self.guild_id  = guild_id
         cfg = get_config(guild_id)
-        self.scope  = "year"
+        self.scope  = f"year:{datetime.now().year}"
         self.size   = int(cfg["bracket_size"] or 8)
         self.voting = int(cfg["bracket_voting_hours"] or 24)
         self.pacing = cfg["bracket_pacing"] or "round"
@@ -805,11 +805,24 @@ class _BracketStartView(discord.ui.View):
     def _source_label(self) -> str:
         return "Source: all renames" if self.use_firehose else "Source: best-of"
 
+    def _scope_label(self) -> str:
+        if self.scope.startswith("season:"):
+            return self.scope.split(":", 1)[1]
+        year   = int(self.scope.split(":", 1)[1])
+        now_y  = datetime.now().year
+        tag    = " (this year)" if year == now_y else (" (last year)" if year == now_y - 1 else "")
+        return f"{year}{tag}"
+
     def _refresh_options(self) -> None:
         """Rebuild the dropdowns' options with the current selection as default (so picks stick on re-render)."""
-        scope_opts = [discord.SelectOption(label=f"This year ({datetime.now().year})", value="year",
-                                           default=(self.scope == "year"))]
-        for s in get_seasons(self.guild_id)[:24]:
+        now_y = datetime.now().year
+        scope_opts = [
+            discord.SelectOption(label=f"This year ({now_y})", value=f"year:{now_y}",
+                                 default=(self.scope == f"year:{now_y}")),
+            discord.SelectOption(label=f"Last year ({now_y - 1})", value=f"year:{now_y - 1}",
+                                 default=(self.scope == f"year:{now_y - 1}")),
+        ]
+        for s in get_seasons(self.guild_id)[:23]:
             val = f'season:{s["name"]}'[:100]
             scope_opts.append(discord.SelectOption(label=f'Season: {s["name"]}'[:100], value=val,
                                                    default=(self.scope == val)))
@@ -824,7 +837,7 @@ class _BracketStartView(discord.ui.View):
         rounds   = self.size.bit_length() - 1           # log2(size) for powers of 2
         matchups = self.size - 1                         # single-elimination
         total_h  = (matchups if self.pacing == "daily" else rounds) * self.voting
-        scope_label = f"this year ({datetime.now().year})" if self.scope == "year" else self.scope.split(":", 1)[1]
+        scope_label = self._scope_label()
         src  = "best-of channel (forwarded nominations)" if not self.use_firehose else "all tracked renames"
         chan = f"<#{cfg['bracket_channel']}>" if cfg["bracket_channel"] else "⚠️ *pick or create one below*"
         return (
@@ -901,11 +914,10 @@ class _BracketStartView(discord.ui.View):
             return
         for c in self.children:
             c.disabled = True
-        scope_label = "this year" if self.scope == "year" else self.scope.split(":", 1)[1]
         source_label = "all renames" if self.use_firehose else "best-of channel"
         await interaction.response.edit_message(
-            content=(f"🚀 **Launching** — {scope_label} · {self.size} names · {self.voting}h · {self.pacing} · "
-                     f"from {source_label}. Watch the bracket channel."),
+            content=(f"🚀 **Launching** — {self._scope_label()} · {self.size} names · {self.voting}h · "
+                     f"{self.pacing} · from {source_label}. Watch the bracket channel."),
             view=self)
         self.stop()
         # Remember these as the new defaults (pre-fill for next time).
@@ -919,7 +931,7 @@ class _BracketStartView(discord.ui.View):
                 force_firehose=self.use_firehose)
         else:
             _, msg = await start_bracket(
-                self.guild_id, client, datetime.now().year,
+                self.guild_id, client, int(self.scope.split(":", 1)[1]),
                 size=self.size, voting_hours=self.voting, pacing=self.pacing,
                 force_firehose=self.use_firehose)
         await interaction.followup.send(msg, ephemeral=True)
