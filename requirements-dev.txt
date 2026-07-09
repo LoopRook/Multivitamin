@@ -1,0 +1,4 @@
+# Test dependencies (runtime deps are in requirements.txt).
+# Run the suite with:  python -m pytest tests/ -q
+pytest>=8.0
+-r requirements.txt
