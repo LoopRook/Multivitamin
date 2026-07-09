@@ -22,12 +22,12 @@ Scopes: `bot` + `applications.commands`. The permission integer `562949953539312
 
 ## Quick start (in your server)
 
-1. `/setup` — full setup guide, any time.
-2. `/config postchannel` — the channel where official rename cards post (this turns on bracket tracking).
-3. `/config quotechannel`, `/config iconchannel`, `/config bracketchannel`.
-4. `/config timezone` and `/config scheduletime quote 8:00` etc.
-5. Optional: `/daily add` your own daily posts (e.g. a Meme of the Day, or a Song of the Day with type `music`).
-6. `/help` lists every command (it only shows admin sections to admins).
+1. `/setup` — a guided wizard that walks you through channels, timezone, and schedule. It can create the channels for you.
+2. `/help` lists every command (it only shows admin sections to admins).
+3. Optional: `/feature add` your own recurring posts (e.g. a Meme of the Day, or a Song of the Day with type `music`).
+4. When you want a bracket, run `/bracket start` — you pick the bracket channel, size, voting window, and pacing there.
+
+Individual settings can also be changed one at a time under `/config` (see `/help`).
 
 Admin commands require the **Manage Server** permission, or bot-admin access granted via `/admin add`.
 

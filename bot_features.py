@@ -14,6 +14,7 @@ from db_utils import (
     get_custom_features, set_custom_feature_run_date,
 )
 from image_utils import generate_card, truncate_to_100_chars
+import credits
 
 log = logging.getLogger(__name__)
 
@@ -404,14 +405,14 @@ async def build_config(guild_id: int, client: discord.Client) -> str:
         f"Quote Time:          {c['quote_time'] or '4:00'}",
         f"Rename Cadence:      {_cadence_desc(c)}",
         f"Song Time:           {c['song_time'] or '10:00'}",
+        f"Credit Names:        {'Server nickname' if credits.style_of(c) == 'nickname' else '@username'}",
+        f"Credit Tagging:      {'On (mentions)' if credits.mentions_on(c) else 'Off (plain text)'}",
     ]
 
     # Health check — surface setup gaps and missing permissions.
     warnings = []
     if not c["post_channel"]:
         warnings.append("No Post Channel - renames aren't tracked for brackets (/config postchannel).")
-    if not c["bracket_channel"]:
-        warnings.append("No Bracket Channel - you can't run brackets (/bracket config).")
     guild = client.get_guild(guild_id)
     if guild is not None and guild.me is not None:
         p = guild.me.guild_permissions
@@ -498,12 +499,14 @@ async def process_rename(
         if icon_uid:
             log_pick(guild_id, icon_uid, icon_user or "Unknown", "icon", image_url)
 
-    image_file = await generate_card(
-        quote,
-        quote_user or "Unknown",
-        icon_user  or "Unknown",
-        icon_bytes,
-    )
+    # Names on the card follow the guild's credit style, resolved live from the
+    # member (a stored snapshot goes stale when someone changes their nickname).
+    # Cards are images, so they can never carry a mention.
+    style = credits.style_of(cfg)
+    quote_name = credits.resolve_name(client, guild_id, quote_uid, quote_user, style)
+    icon_name  = credits.resolve_name(client, guild_id, icon_uid,  icon_user,  style)
+
+    image_file = await generate_card(quote, quote_name, icon_name, icon_bytes)
     if not image_file:
         return
 
@@ -512,7 +515,7 @@ async def process_rename(
             image_file.seek(0)
             try:
                 await override_post_channel.send(
-                    f"🔍 **Preview** — Quote by {quote_user}, icon by {icon_user}:\n> {quote}",
+                    f"🔍 **Preview** — Quote by {quote_name}, icon by {icon_name}:\n> {quote}",
                     file=discord.File(fp=image_file, filename="preview.png"),
                 )
             except discord.HTTPException as e:
@@ -548,7 +551,8 @@ async def process_rename(
             # Grab the attachment URL as a cached snapshot.
             # (We always re-fetch fresh at bracket time since CDN URLs expire.)
             img_url = sent.attachments[0].url if sent.attachments else None
-            store_rename_post(guild_id, sent.id, sent.channel.id, quote, quote_user, quote_uid, img_url)
+            store_rename_post(guild_id, sent.id, sent.channel.id, quote, quote_user, quote_uid,
+                              img_url, icon_user=icon_user, icon_uid=icon_uid)
             if not cfg["voting_enabled_at"]:
                 set_config(guild_id, "voting_enabled_at", datetime.now(pytz.utc).isoformat())
 

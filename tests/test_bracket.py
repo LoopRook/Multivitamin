@@ -78,7 +78,18 @@ def test_scored_from_forwards_excludes_bot_and_dedups():
         forward_msg(None, [reaction(4)]),                               # not a forward -> ignored
     ]
     scored = run(bracket._scored_from_forwards(FakeClient(channel=Channel(msgs)), 7, posts))
-    assert sorted(scored) == [(3, "A", "u"), (5, "A", "u")]
+    # The whole post row rides along so the entry keeps its quote/icon credits.
+    assert sorted((c, p["quote"], p["quote_user"]) for c, p in scored) == [(3, "A", "u"), (5, "A", "u")]
+
+
+def test_crown_champion_credits_icon_poster(gid):
+    ch = Channel()
+    champ = {"id": 5, "quote": "Win", "quote_user": "a", "quote_uid": None,
+             "icon_user": "iconguy", "icon_uid": None, "season_reactions": 3}
+    run(bracket._crown_champion(FakeClient(FakeGuild("Old")), gid, ch,
+                                {"id": 9, "year": 2026, "label": "2026"}, champ, []))
+    body = "\n".join(m or "" for m in ch.sent)
+    assert "submitted by a" in body and "icon by iconguy" in body
 
 
 def test_crown_champion_renames_and_attaches_card():

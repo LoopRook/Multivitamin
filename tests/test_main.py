@@ -15,13 +15,16 @@ def test_command_surface():
     assert bnames == {"start", "test", "forceadvance", "status", "cancel", "history"}  # no /bracket config
     top = {c.name for c in main.client.tree.get_commands()}
     assert {"setup", "season", "showconfig", "help", "rename", "mystats", "preview", "contributors"} <= top
+    cnames = {c.name for c in main.config_group.walk_commands()}
+    assert "credits" in cnames
     # removed commands must be gone
-    assert "bracketchannel" not in {c.name for c in main.config_group.walk_commands()}
+    assert "bracketchannel" not in cnames
 
 
 def test_all_views_instantiate(gid):
     # Instantiating a View enforces Discord's 5-action-row budget.
     main._BracketStartView(1, gid)
+    main._BracketTestView(1, gid)
     main._SeasonView(1, gid)
     wiz = main._SetupWizardView(1, gid)     # stepped wizard
     for s in range(len(main._WIZARD_STEPS)):  # every step must build within the 5-row budget
@@ -34,6 +37,7 @@ def test_all_views_instantiate(gid):
     feat = db_utils.get_custom_feature_by_command(gid, "critter")
     main._ScheduleView(1, gid, feature=feat)
     main._ResetConfirmView(1, gid)
+    main._CreditsView(1, gid)
     main._CreateChannelsModal(gid)          # quote/icon/post/best-of name inputs
     main._BracketChannelModal(gid)          # bracket channel name input
     assert "schedule" in {c.name for c in main.feature_group.walk_commands()}
@@ -143,8 +147,10 @@ class _HealthClient:
 def test_showconfig_health_warnings(gid):
     txt = run(bot_features.build_config(gid, _HealthClient(manage_guild=False)))
     assert "Warnings:" in txt
-    assert "No Post Channel" in txt and "No Bracket Channel" in txt
+    assert "No Post Channel" in txt
     assert "Manage Server" in txt
+    # The bracket channel is picked per-run in /bracket start — not a setup gap.
+    assert "No Bracket Channel" not in txt
 
 
 def test_showconfig_health_clean(gid):
