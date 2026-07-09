@@ -36,7 +36,7 @@ def test_all_views_instantiate(gid):
     main._ResetConfirmView(1, gid)
     main._CreateChannelsModal(gid)          # quote/icon/post/best-of name inputs
     main._BracketChannelModal(gid)          # bracket channel name input
-    assert "schedule" in {c.name for c in main.daily_group.walk_commands()}
+    assert "schedule" in {c.name for c in main.feature_group.walk_commands()}
     assert "reset" in {c.name for c in main.admin_group.walk_commands()}
 
 
