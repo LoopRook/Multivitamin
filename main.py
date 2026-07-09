@@ -830,6 +830,13 @@ _VOTING_CHOICES = [(6, "6 hours"), (12, "12 hours"), (24, "24 hours (1 day)"),
                    (48, "48 hours (2 days)"), (72, "72 hours (3 days)"), (168, "168 hours (1 week)")]
 
 
+def _fmt_duration(hours: int) -> str:
+    if hours < 24:
+        return f"~{hours} hour(s)"
+    days = hours / 24
+    return f"~{int(days)} days" if days == int(days) else f"~{days:.1f} days"
+
+
 class _BracketStartView(discord.ui.View):
     """Per-run bracket launcher — scope, size, voting window & pacing, pre-filled to last-used."""
     def __init__(self, author_id: int, guild_id: int):
@@ -891,6 +898,24 @@ class _BracketStartView(discord.ui.View):
             discord.SelectOption(label="Daily — one matchup per day", value="daily", default=(self.pacing == "daily")),
         ]
 
+    def _content(self) -> str:
+        rounds   = self.size.bit_length() - 1           # log2(size) for powers of 2
+        matchups = self.size - 1                         # single-elimination
+        total_h  = (matchups if self.pacing == "daily" else rounds) * self.voting
+        scope_label = f"this year ({datetime.now().year})" if self.scope == "year" else self.scope.split(":", 1)[1]
+        src = "best-of channel (forwarded nominations)" if not self.use_firehose else "all tracked renames"
+        return (
+            "🏆 **Start a bracket** — adjust any setting, then 🚀 **Launch**. *(Pre-filled to your last run.)*\n"
+            f"• **Scope** — which renames compete: **{scope_label}**\n"
+            f"• **Size** — how many names enter: **{self.size}**\n"
+            f"• **Voting** — how long each matchup's poll stays open: **{self.voting}h**\n"
+            f"• **Pacing** — **{self.pacing}**: *round* posts a whole round of matchups at once (faster); "
+            "*daily* posts one matchup at a time (much longer)\n"
+            f"• **Source** — **{src}**\n\n"
+            f"⏱️ **Estimated length: {_fmt_duration(total_h)}** — {rounds} round(s), {matchups} matchup(s) "
+            f"× {self.voting}h."
+        )
+
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
             await interaction.response.send_message(
@@ -898,37 +923,40 @@ class _BracketStartView(discord.ui.View):
             return False
         return True
 
+    async def _refresh(self, interaction):
+        self._refresh_options()
+        await interaction.response.edit_message(content=self._content(), view=self)
+
     @discord.ui.select(placeholder="Scope — this year or a season",
                        options=[discord.SelectOption(label="This year", value="year")], row=0)
     async def scope_select(self, interaction: discord.Interaction, select: discord.ui.Select):
         self.scope = select.values[0]
-        await interaction.response.defer()
+        await self._refresh(interaction)
 
     @discord.ui.select(placeholder="Size — how many names",
                        options=[discord.SelectOption(label="8 names", value="8")], row=1)
     async def size_select(self, interaction: discord.Interaction, select: discord.ui.Select):
         self.size = int(select.values[0])
-        await interaction.response.defer()
+        await self._refresh(interaction)
 
     @discord.ui.select(placeholder="Voting window per matchup",
                        options=[discord.SelectOption(label="24 hours", value="24")], row=2)
     async def voting_select(self, interaction: discord.Interaction, select: discord.ui.Select):
         self.voting = int(select.values[0])
-        await interaction.response.defer()
+        await self._refresh(interaction)
 
     @discord.ui.select(placeholder="Pacing — all at once or one per day",
                        options=[discord.SelectOption(label="Round", value="round")], row=3)
     async def pacing_select(self, interaction: discord.Interaction, select: discord.ui.Select):
         self.pacing = select.values[0]
-        await interaction.response.defer()
+        await self._refresh(interaction)
 
     @discord.ui.button(label="Source", style=discord.ButtonStyle.secondary, emoji="🔀", row=4)
     async def source_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         # Only togglable when a best-of channel exists (else it stays on firehose).
         self.use_firehose = not self.use_firehose
         button.label = self._source_label()
-        self._refresh_options()
-        await interaction.response.edit_message(view=self)
+        await self._refresh(interaction)
 
     @discord.ui.button(label="Launch bracket", style=discord.ButtonStyle.success, emoji="🚀", row=4)
     async def launch_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -969,9 +997,7 @@ async def bracket_config(interaction: discord.Interaction):
 @admin_only()
 async def bracket_start(interaction: discord.Interaction):
     view = _BracketStartView(interaction.user.id, interaction.guild_id)
-    await interaction.response.send_message(
-        "🏆 **Start a bracket** — settings are pre-filled to your last run; adjust any, then hit **🚀 Launch**.",
-        view=view, ephemeral=True)
+    await interaction.response.send_message(view._content(), view=view, ephemeral=True)
 
 
 @bracket_group.command(name="test", description="Start a test bracket from the quote channel (random scores)")
