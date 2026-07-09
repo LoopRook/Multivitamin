@@ -238,11 +238,36 @@ async def _dramatic_coin_flip(channel: discord.TextChannel, name_a: str, name_b:
     return winner
 
 
+# Guilds we've already warned this run about a missing Manage Server permission,
+# so a bracket that renames often doesn't spam the notice. Reset at bracket start.
+_rename_forbidden_warned: set[int] = set()
+
+
+async def _warn_rename_forbidden(client: discord.Client, guild_id: int) -> None:
+    """Tell admins (once per bracket) that renames are being skipped for lack of perms."""
+    if guild_id in _rename_forbidden_warned:
+        return
+    _rename_forbidden_warned.add(guild_id)
+    log.warning("[%s] Missing Manage Server — bracket renames are being skipped.", guild_id)
+    cfg = get_config(guild_id)
+    channel = client.get_channel(cfg["bracket_channel"]) if cfg["bracket_channel"] else None
+    if channel:
+        try:
+            await channel.send(
+                "⚠️ I can't rename the server — I'm missing the **Manage Server** permission, "
+                "so bracket renames are being skipped. Grant it and the name will update from the "
+                "next result onward."
+            )
+        except discord.HTTPException:
+            pass
+
+
 async def _rename_guild(client: discord.Client, guild_id: int, name: str) -> bool:
     """
     Set the server name (truncated to Discord's 100-char cap). Idempotent — a
     no-op that returns True if the name is already set (so we never waste one of
     Discord's scarce guild-rename calls, ~2 per 10 min). Returns False on failure.
+    On a missing-permission error, warns the bracket channel once (see above).
     """
     from image_utils import truncate_to_100_chars
     guild = client.get_guild(guild_id)
@@ -255,9 +280,42 @@ async def _rename_guild(client: discord.Client, guild_id: int, name: str) -> boo
         await guild.edit(name=new_name)
         log.info('[%s] Server renamed to: "%s"', guild_id, name)
         return True
+    except discord.Forbidden:
+        await _warn_rename_forbidden(client, guild_id)
+        return False
     except discord.HTTPException as e:
         log.error("[%s] Failed to rename server: %s", guild_id, e)
         return False
+
+
+async def _drive_server_name(
+    client: discord.Client, guild_id: int, bracket, name: str,
+    bracket_channel: discord.TextChannel | None = None,
+) -> bool:
+    """
+    Point the server name at *name* for a real bracket. For a **test** bracket
+    (year==0) the real server is never touched — instead we log and (if given a
+    channel) post what it *would* rename to, so the behavior is visible when
+    testing. Returns True only when the real server was actually renamed.
+    """
+    if bracket["year"] == 0:
+        log.info('[%s] TEST bracket — would rename server to: "%s"', guild_id, name)
+        if bracket_channel:
+            try:
+                await bracket_channel.send(f'🏷️ *(test — real server unchanged)* would rename to: **"{name}"**')
+            except discord.HTTPException:
+                pass
+        return False
+    return await _rename_guild(client, guild_id, name)
+
+
+async def restore_pre_bracket_name(client: discord.Client, guild_id: int) -> str | None:
+    """Restore the server name saved when the bracket started (used on cancel). Returns the name if applied."""
+    cfg  = get_config(guild_id)
+    name = cfg["pre_bracket_name"]
+    if name and await _rename_guild(client, guild_id, name):
+        return name
+    return None
 
 
 _MIN_ROTATE_MINUTES = 10  # keep guild renames spaced out (Discord ~2 / 10 min cap)
@@ -335,6 +393,8 @@ async def _crown_champion(
         renamed = await _rename_guild(client, guild_id, champion["quote"])
         if renamed:
             log.info('[%s] Server name is the bracket champion: "%s"', guild_id, champion["quote"])
+    else:
+        log.info('[%s] TEST bracket — would rename server to champion: "%s"', guild_id, champion["quote"])
 
     card_file = None
     try:
@@ -344,7 +404,12 @@ async def _crown_champion(
     except Exception as e:
         log.warning("[%s] Could not build champion card image: %s", guild_id, e)
 
-    tail = "\n\n👑 *The server name is now the winning entry!*" if renamed else ""
+    if renamed:
+        tail = "\n\n👑 *The server name is now the winning entry!*"
+    elif bracket["year"] == 0:
+        tail = "\n\n🧪 *(test bracket — the real server name was not changed)*"
+    else:
+        tail = ""
     content = (
         f"\n🎊🏆🎊 **{_bracket_label(bracket)} SERVER NAME CHAMPION** 🎊🏆🎊\n\n"
         f'**"{champion["quote"]}"**\n'
@@ -789,9 +854,9 @@ async def force_bracket_advance(guild_id: int, client: discord.Client) -> tuple[
 
     # Daily pacing: the server name tracks the day's matchup winner (see
     # check_bracket_advancement). Round pacing stays frozen until the champion.
-    if pacing == "daily" and last_winner_id is not None and bracket["year"] != 0:
+    if pacing == "daily" and last_winner_id is not None:
         _dw = get_bracket_entry(last_winner_id)
-        if _dw and await _rename_guild(client, guild_id, _dw["quote"]):
+        if _dw and await _drive_server_name(client, guild_id, bracket, _dw["quote"], bracket_channel):
             await bracket_channel.send(f'🏷️ Server renamed to the latest winner: **"{_dw["quote"]}"**')
 
     # Daily pacing: if matchups in this round remain unposted, post the next one
@@ -864,6 +929,13 @@ async def _start_range_bracket(
     bracket_channel = client.get_channel(cfg["bracket_channel"])
     if not bracket_channel:
         return False, "⚠️ No bracket channel configured. Set one with `/bracket config` first."
+
+    # Remember the current server name so /bracket cancel can restore it, and let
+    # this bracket warn afresh if it can't rename (missing Manage Server).
+    _rename_forbidden_warned.discard(guild_id)
+    _pre = client.get_guild(guild_id)
+    if _pre:
+        set_config(guild_id, "pre_bracket_name", _pre.name)
 
     bracket_size = size         or cfg["bracket_size"]         or 8
     voting_hours = voting_hours or cfg["bracket_voting_hours"] or 24
@@ -1085,9 +1157,9 @@ async def check_bracket_advancement(guild_id: int, client: discord.Client) -> No
     # the champion: many matchups resolve at once and guild renames are limited
     # to ~2 / 10 min.) The final matchup sets the champion's name here; the crown
     # step below is idempotent, so it won't double-edit.
-    if _bracket_pacing(eff) == "daily" and last_winner_id is not None and bracket["year"] != 0:
+    if _bracket_pacing(eff) == "daily" and last_winner_id is not None:
         _dw = get_bracket_entry(last_winner_id)
-        if _dw and await _rename_guild(client, guild_id, _dw["quote"]):
+        if _dw and await _drive_server_name(client, guild_id, bracket, _dw["quote"], bracket_channel):
             await bracket_channel.send(f'🏷️ Server renamed to the latest winner: **"{_dw["quote"]}"**')
 
     # Daily pacing: post the next unposted matchup now that this poll has
