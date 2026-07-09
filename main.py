@@ -78,16 +78,6 @@ def _valid_hhmm(t: str) -> bool:
     except Exception:
         return False
 
-_SETUP_INTRO = (
-    "🛠️ **Quick setup** — pick your core channels and timezone below (each saves as you go), "
-    "or hit **🏗️ Create channels for me** to make fresh ones (named how you like).\n"
-    "Then set up the rest:\n"
-    "• `/bracket config` — bracket channel + optional best-of channel\n"
-    "• `/daily setup` — your own 'X of the day' posts (meme, song, …)\n"
-    "• `/config schedule` — rename time & how often (daily, every N days, or weekdays)\n"
-    "• `/help` — every command"
-)
-
 # Curated timezones for the /setup dropdown; anything else via `/config timezone`.
 _COMMON_TIMEZONES = [
     "US/Eastern", "US/Central", "US/Mountain", "US/Pacific", "America/Sao_Paulo",
@@ -764,6 +754,36 @@ async def _post_source_instructions(guild: discord.Guild, channel_id: int) -> No
         pass  # missing Manage Messages — leave it unpinned
 
 
+class _BracketChannelsModal(discord.ui.Modal, title="Create bracket channels"):
+    """Name and create the bracket + best-of channels (reuses any that already exist)."""
+    def __init__(self, guild_id: int):
+        super().__init__()
+        cfg = get_config(guild_id)
+
+        def mk(label, field, default):
+            ti = discord.ui.TextInput(label=label, required=False, max_length=90,
+                                      default=("" if cfg[field] else default), placeholder=f"#{default}")
+            self.add_item(ti)
+            return ti
+
+        self.bracket_in = mk("Bracket channel name", "bracket_channel", "brackets")
+        self.bestof_in  = mk("Best-of channel name (optional)", "bracket_source_channel", "best-of")
+
+    async def on_submit(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        if not guild.me.guild_permissions.manage_channels:
+            await interaction.response.send_message(
+                "⚠️ I need the **Manage Channels** permission to create channels. Grant it, or pick "
+                "existing channels with the dropdowns.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        made, reused, best_id = await _ensure_channels(guild, [
+            (self.bracket_in.value, "bracket_channel",        "Bracket"),
+            (self.bestof_in.value,  "bracket_source_channel", "Best-of"),
+        ])
+        await _channels_reply(interaction, made, reused, best_id, guild)
+
+
 class _BracketConfigView(discord.ui.View):
     """Persistent bracket setup: where matchups post + the optional best-of source channel."""
     def __init__(self, author_id: int, guild_id: int):
@@ -806,6 +826,10 @@ class _BracketConfigView(discord.ui.View):
         await interaction.response.edit_message(content=self._render(), view=self)
         if new_id != old_id:
             await _post_source_instructions(interaction.guild, new_id)
+
+    @discord.ui.button(label="Create channels", style=discord.ButtonStyle.primary, emoji="🏗️", row=2)
+    async def create_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(_BracketChannelsModal(self.guild_id))
 
     @discord.ui.button(label="No best-of", style=discord.ButtonStyle.secondary, emoji="🚫", row=2)
     async def clear_source_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1562,160 +1586,284 @@ def _normalize_channel_name(raw: str) -> str:
     return raw.strip().lstrip("#").lower().replace(" ", "-")
 
 
-class _CreateChannelsModal(discord.ui.Modal, title="Create setup channels"):
-    """Name and create the bot's channels for a fresh server (reuses any that already exist)."""
-    def __init__(self, view: "_CoreSetupView"):
-        super().__init__()
-        self._view = view
-        cfg = get_config(view.guild_id)
+async def _ensure_channels(guild: discord.Guild, wanted) -> tuple[list, list, int | None]:
+    """
+    For each (raw_name, config_field, label) in *wanted*: reuse a matching channel or
+    create it under the setup category, and save it to config. Blank names are skipped.
+    Returns (created_lines, reused_lines, best_of_channel_id_or_None).
+    """
+    category = discord.utils.get(guild.categories, name=_SETUP_CATEGORY)
+    if category is None and any(v.strip() for v, _, _ in wanted):
+        try:
+            category = await guild.create_category(_SETUP_CATEGORY)
+        except discord.HTTPException:
+            category = None
 
-        def mk(label: str, field: str, default: str):
-            ti = discord.ui.TextInput(
-                label=label, required=False, max_length=90,
-                default=("" if cfg[field] else default), placeholder=f"#{default}")
+    made, reused, best_id = [], [], None
+    for raw, field, label in wanted:
+        name = _normalize_channel_name(raw)
+        if not name:
+            continue
+        channel = discord.utils.get(guild.text_channels, name=name)
+        if channel:
+            reused.append(f"{label}: {channel.mention}")
+        else:
+            try:
+                channel = await guild.create_text_channel(name, category=category)
+            except discord.HTTPException:
+                continue
+            made.append(f"{label}: {channel.mention}")
+        set_config(guild.id, field, channel.id)
+        if field == "bracket_source_channel":
+            best_id = channel.id
+    return made, reused, best_id
+
+
+async def _channels_reply(interaction: discord.Interaction, made, reused, best_id, guild):
+    """Shared summary + best-of pin for the channel-creation modals (already deferred)."""
+    if best_id:
+        await _post_source_instructions(guild, best_id)
+    if not made and not reused:
+        await interaction.followup.send("Nothing to create — all fields were left blank.", ephemeral=True)
+        return
+    lines = ["✅ **Channels ready.**"]
+    if made:   lines.append("Created — " + " · ".join(made))
+    if reused: lines.append("Reused existing — " + " · ".join(reused))
+    await interaction.followup.send("\n".join(lines), ephemeral=True)
+
+
+class _CreateChannelsModal(discord.ui.Modal, title="Create channels"):
+    """Name and create the core channels (quote/icon/post) for a fresh server."""
+    def __init__(self, guild_id: int):
+        super().__init__()
+        cfg = get_config(guild_id)
+
+        def mk(label, field, default):
+            ti = discord.ui.TextInput(label=label, required=False, max_length=90,
+                                      default=("" if cfg[field] else default), placeholder=f"#{default}")
             self.add_item(ti)
             return ti
 
-        # Pre-fill a default name only where that channel isn't set yet (blank = skip it).
-        self.quote_in   = mk("Quote channel name", "quote_channel", "quotes")
-        self.icon_in    = mk("Icon channel name", "icon_channel", "icons")
-        self.post_in    = mk("Rename/post channel name", "post_channel", "renames")
-        self.bracket_in = mk("Bracket channel name", "bracket_channel", "brackets")
-        self.bestof_in  = mk("Best-of channel name (optional)", "bracket_source_channel", "best-of")
+        self.quote_in = mk("Quote channel name", "quote_channel", "quotes")
+        self.icon_in  = mk("Icon channel name", "icon_channel", "icons")
+        self.post_in  = mk("Rename/post channel name", "post_channel", "renames")
 
     async def on_submit(self, interaction: discord.Interaction):
         guild = interaction.guild
         if not guild.me.guild_permissions.manage_channels:
             await interaction.response.send_message(
                 "⚠️ I need the **Manage Channels** permission to create channels. Grant it (re-invite with "
-                "the updated link) and try again — or just pick existing channels with the dropdowns.",
-                ephemeral=True)
+                "the updated link), or pick existing channels with the dropdowns.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
-
-        wanted = [
-            (self.quote_in.value,   "quote_channel",          "Quote"),
-            (self.icon_in.value,    "icon_channel",           "Icon"),
-            (self.post_in.value,    "post_channel",           "Post/rename"),
-            (self.bracket_in.value, "bracket_channel",        "Bracket"),
-            (self.bestof_in.value,  "bracket_source_channel", "Best-of"),
-        ]
-        category = discord.utils.get(guild.categories, name=_SETUP_CATEGORY)
-        if category is None and any(v.strip() for v, _, _ in wanted):
-            try:
-                category = await guild.create_category(_SETUP_CATEGORY)
-            except discord.HTTPException:
-                category = None
-
-        made, reused, best_id = [], [], None
-        for raw, field, label in wanted:
-            name = _normalize_channel_name(raw)
-            if not name:
-                continue
-            channel = discord.utils.get(guild.text_channels, name=name)
-            if channel:
-                reused.append(f"{label}: {channel.mention}")
-            else:
-                try:
-                    channel = await guild.create_text_channel(name, category=category)
-                except discord.HTTPException as e:
-                    await interaction.followup.send(f"⚠️ Couldn't create **#{name}**: {e}", ephemeral=True)
-                    continue
-                made.append(f"{label}: {channel.mention}")
-            set_config(guild.id, field, channel.id)
-            if field == "bracket_source_channel":
-                best_id = channel.id
-
-        if best_id:
-            await _post_source_instructions(guild, best_id)
-
-        if not made and not reused:
-            await interaction.followup.send("Nothing to create — all fields were left blank.", ephemeral=True)
-            return
-        lines = ["✅ **Channels ready.**"]
-        if made:   lines.append("Created — " + " · ".join(made))
-        if reused: lines.append("Reused existing — " + " · ".join(reused))
-        lines.append("\nSet the schedule with `/config schedule`, or `/showconfig` to review.")
-        await interaction.followup.send("\n".join(lines), ephemeral=True)
+        made, reused, best_id = await _ensure_channels(guild, [
+            (self.quote_in.value, "quote_channel", "Quote"),
+            (self.icon_in.value,  "icon_channel",  "Icon"),
+            (self.post_in.value,  "post_channel",  "Post/rename"),
+        ])
+        await _channels_reply(interaction, made, reused, best_id, guild)
 
 
-class _CoreSetupView(discord.ui.View):
-    """Guided first-run setup: the core channels + timezone, saved as you pick."""
+# ── Guided /setup wizard (Channels → Timezone → Schedule → Done) ───────────────
+
+_WIZARD_STEPS = ["channels", "timezone", "schedule", "done"]
+
+
+class _SetupWizardView(discord.ui.View):
+    """
+    Stepped first-run setup in a single self-editing message. Channels and timezone
+    apply as you pick; the schedule (cadence + time) is drafted and applied on Finish.
+    """
     def __init__(self, author_id: int, guild_id: int):
-        super().__init__(timeout=300)
+        super().__init__(timeout=600)
         self.author_id = author_id
         self.guild_id  = guild_id
-        cur_tz = get_config(guild_id)["timezone"] or "US/Eastern"
-        self.tz_select.options = [
-            discord.SelectOption(label=z, value=z, default=(z == cur_tz)) for z in _COMMON_TIMEZONES
-        ]
-
-    def _render(self) -> str:
-        cfg = get_config(self.guild_id)
-        def m(cid): return f"<#{cid}>" if cid else "*not set*"
-        return (
-            f"{_SETUP_INTRO}\n\n"
-            f"• **Quote channel:** {m(cfg['quote_channel'])}\n"
-            f"• **Icon channel:** {m(cfg['icon_channel'])}\n"
-            f"• **Post channel:** {m(cfg['post_channel'])}  *(turns on bracket tracking)*\n"
-            f"• **Bracket channel:** {m(cfg['bracket_channel'])}\n"
-            f"• **Best-of channel:** {m(cfg['bracket_source_channel'])}\n"
-            f"• **Timezone:** {cfg['timezone'] or 'US/Eastern'}"
-        )
+        self.step = 0
+        cfg = get_config(guild_id)
+        wd = (cfg["quote_weekdays"] or "").strip()
+        self.mode         = "weekly" if wd else "interval"
+        self.interval     = cfg["quote_interval_days"] or 1
+        self.weekdays     = {int(x) for x in wd.split(",") if x.strip().isdigit()} if wd else set()
+        self.pending_time = cfg["quote_time"] or "4:00"
+        self.pending_tz   = cfg["timezone"] or "US/Eastern"
+        self._rebuild()
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
-            await interaction.response.send_message(
-                "This setup panel isn't yours — run `/setup` yourself.", ephemeral=True)
+            await interaction.response.send_message("This setup isn't yours — run `/setup` yourself.", ephemeral=True)
             return False
         return True
 
-    @discord.ui.select(cls=discord.ui.ChannelSelect, channel_types=[discord.ChannelType.text],
-                       placeholder="Quote channel — where members post quotes", row=0)
-    async def quote_select(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
-        set_config(self.guild_id, "quote_channel", select.values[0].id)
-        await interaction.response.edit_message(content=self._render(), view=self)
+    def _cadence_text(self) -> str:
+        if self.mode == "weekly":
+            days = ", ".join(_WEEKDAY_ABBR[d] for d in sorted(self.weekdays)) if self.weekdays else "*(pick weekday(s))*"
+            return f"Weekly on {days}"
+        return "Daily" if self.interval <= 1 else f"Every {self.interval} days"
 
-    @discord.ui.select(cls=discord.ui.ChannelSelect, channel_types=[discord.ChannelType.text],
-                       placeholder="Icon channel — where members post icon images", row=1)
-    async def icon_select(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
-        set_config(self.guild_id, "icon_channel", select.values[0].id)
-        await interaction.response.edit_message(content=self._render(), view=self)
+    def _content(self) -> str:
+        cfg = get_config(self.guild_id)
+        def m(cid): return f"<#{cid}>" if cid else "*not set*"
+        step = _WIZARD_STEPS[self.step]
+        if step == "channels":
+            body = ("**Step 1 of 3 — Channels**\n"
+                    f"• Quote: {m(cfg['quote_channel'])}\n"
+                    f"• Icon: {m(cfg['icon_channel'])}\n"
+                    f"• Post/rename: {m(cfg['post_channel'])}  *(turns on bracket tracking)*\n\n"
+                    "Pick existing channels, or **🏗️ Create channels** to make them, then **Next ▶**.")
+        elif step == "timezone":
+            body = ("**Step 2 of 3 — Timezone**\n"
+                    f"• Current: **{self.pending_tz}**\n\n"
+                    "Pick your timezone (the daily rename time is in this zone), then **Next ▶**.")
+        elif step == "schedule":
+            body = ("**Step 3 of 3 — Schedule** *(draft — applied when you press Finish)*\n"
+                    f"• Frequency: **{self._cadence_text()}**\n"
+                    f"• Time: **{self.pending_time}** ({self.pending_tz})\n\n"
+                    "Set how often & when the server renames, then **✅ Finish**. "
+                    "*(Weekday mode = 'every Sunday'.)*")
+        else:
+            body = ("🎉 **Setup complete!**\n"
+                    f"• Quote {m(cfg['quote_channel'])} · Icon {m(cfg['icon_channel'])} · Post {m(cfg['post_channel'])}\n"
+                    f"• Renames **{self._cadence_text()}** at **{self.pending_time}** ({self.pending_tz})\n\n"
+                    "Optional next steps: `/bracket config` (name brackets) · `/daily setup` "
+                    "(an 'X of the day') · `/showconfig` to review · `/help` for everything.")
+        return "🛠️ **Server setup**\n\n" + body
 
-    @discord.ui.select(cls=discord.ui.ChannelSelect, channel_types=[discord.ChannelType.text],
-                       placeholder="Post channel — where daily rename cards post (tracked for brackets)", row=2)
-    async def post_select(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
-        set_config(self.guild_id, "post_channel", select.values[0].id)
-        await interaction.response.edit_message(content=self._render(), view=self)
+    # ── component building per step ───────────────────────────────────────────
+    def _rebuild(self) -> None:
+        self.clear_items()
+        step = _WIZARD_STEPS[self.step]
+        if step == "channels":
+            for field, ph in (("quote_channel", "Quote channel — where members post quotes"),
+                              ("icon_channel", "Icon channel — where members post icon images"),
+                              ("post_channel", "Post channel — daily rename cards (tracked for brackets)")):
+                sel = discord.ui.ChannelSelect(channel_types=[discord.ChannelType.text], placeholder=ph)
+                sel.callback = self._channel_cb(sel, field)
+                self.add_item(sel)
+            self._button("Create channels", "🏗️", discord.ButtonStyle.primary, self._cb_create)
+            self._button("Next ▶", None, discord.ButtonStyle.success, self._cb_next)
+        elif step == "timezone":
+            tz = discord.ui.Select(placeholder="Timezone", options=[
+                discord.SelectOption(label=z, value=z, default=(z == self.pending_tz)) for z in _COMMON_TIMEZONES])
+            tz.callback = self._tz_cb(tz)
+            self.add_item(tz)
+            self._button("◀ Back", None, discord.ButtonStyle.secondary, self._cb_back)
+            self._button("Next ▶", None, discord.ButtonStyle.success, self._cb_next)
+        elif step == "schedule":
+            self._add_schedule_selects()
+            self._button("Set time", "🕐", discord.ButtonStyle.secondary, self._cb_set_time)
+            self._button("◀ Back", None, discord.ButtonStyle.secondary, self._cb_back)
+            self._button("Finish ✅", None, discord.ButtonStyle.success, self._cb_finish)
 
-    @discord.ui.select(placeholder="Timezone",
-                       options=[discord.SelectOption(label="US/Eastern", value="US/Eastern")], row=3)
-    async def tz_select(self, interaction: discord.Interaction, select: discord.ui.Select):
-        set_config(self.guild_id, "timezone", select.values[0])
-        await interaction.response.edit_message(content=self._render(), view=self)
+    def _button(self, label, emoji, style, cb):
+        b = discord.ui.Button(label=label, emoji=emoji, style=style)
+        b.callback = cb
+        self.add_item(b)
 
-    @discord.ui.button(label="Create channels for me", style=discord.ButtonStyle.primary, emoji="🏗️", row=4)
-    async def create_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(_CreateChannelsModal(self))
+    def _add_schedule_selects(self):
+        mode = discord.ui.Select(placeholder="Mode — every N days, or specific weekdays", options=[
+            discord.SelectOption(label="Every N days", value="interval", default=(self.mode == "interval")),
+            discord.SelectOption(label="Specific weekdays", value="weekly", default=(self.mode == "weekly"))])
+        mode.callback = self._mode_cb(mode)
+        self.add_item(mode)
+        iv = discord.ui.Select(placeholder="Every N days (interval mode)", options=[
+            discord.SelectOption(label=lbl, value=str(n), default=(n == self.interval)) for n, lbl in _INTERVAL_CHOICES])
+        iv.callback = self._interval_cb(iv)
+        self.add_item(iv)
+        wd = discord.ui.Select(placeholder="Weekdays (weekday mode)", min_values=1, max_values=7, options=[
+            discord.SelectOption(label=lbl, value=val, default=(int(val) in self.weekdays)) for val, lbl in _WEEKDAY_CHOICES])
+        wd.callback = self._weekday_cb(wd)
+        self.add_item(wd)
 
-    @discord.ui.button(label="Done", style=discord.ButtonStyle.success, emoji="✅", row=4)
-    async def done_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        for c in self.children:
-            c.disabled = True
-        await interaction.response.edit_message(
-            content=(self._render() + "\n\n✅ **Saved.** Next: `/bracket config` · `/daily setup` · "
-                     "`/config schedule` (time & frequency). Run `/showconfig` to check for warnings, "
-                     "or `/help` for everything."),
-            view=self)
+    # ── callbacks ──────────────────────────────────────────────────────────────
+    def _channel_cb(self, select, field):
+        async def cb(interaction):
+            set_config(self.guild_id, field, select.values[0].id)
+            await interaction.response.edit_message(content=self._content(), view=self)
+        return cb
+
+    def _tz_cb(self, select):
+        async def cb(interaction):
+            self.pending_tz = select.values[0]
+            set_config(self.guild_id, "timezone", self.pending_tz)
+            self._rebuild()
+            await interaction.response.edit_message(content=self._content(), view=self)
+        return cb
+
+    def _mode_cb(self, select):
+        async def cb(interaction):
+            self.mode = select.values[0]
+            self._rebuild()
+            await interaction.response.edit_message(content=self._content(), view=self)
+        return cb
+
+    def _interval_cb(self, select):
+        async def cb(interaction):
+            self.interval = int(select.values[0]); self.mode = "interval"
+            self._rebuild()
+            await interaction.response.edit_message(content=self._content(), view=self)
+        return cb
+
+    def _weekday_cb(self, select):
+        async def cb(interaction):
+            self.weekdays = {int(v) for v in select.values}; self.mode = "weekly"
+            self._rebuild()
+            await interaction.response.edit_message(content=self._content(), view=self)
+        return cb
+
+    async def _cb_next(self, interaction):
+        self.step += 1
+        self._rebuild()
+        await interaction.response.edit_message(content=self._content(), view=self)
+
+    async def _cb_back(self, interaction):
+        self.step -= 1
+        self._rebuild()
+        await interaction.response.edit_message(content=self._content(), view=self)
+
+    async def _cb_create(self, interaction):
+        await interaction.response.send_modal(_CreateChannelsModal(self.guild_id))
+
+    async def _cb_set_time(self, interaction):
+        await interaction.response.send_modal(_WizardTimeModal(self))
+
+    async def _cb_finish(self, interaction):
+        if self.mode == "weekly" and not self.weekdays:
+            await interaction.response.send_message(
+                "⚠️ Pick at least one weekday, or switch the mode to 'Every N days'.", ephemeral=True)
+            return
+        if self.mode == "weekly":
+            set_config(self.guild_id, "quote_weekdays", ",".join(str(d) for d in sorted(self.weekdays)))
+        else:
+            set_config(self.guild_id, "quote_weekdays", None)
+            set_config(self.guild_id, "quote_interval_days", self.interval)
+        set_config(self.guild_id, "quote_time", self.pending_time)
+        self.step = _WIZARD_STEPS.index("done")
+        self.clear_items()
+        await interaction.response.edit_message(content=self._content(), view=self)
         self.stop()
 
 
-@client.tree.command(name="setup", description="Guided setup — core channels & timezone")
+class _WizardTimeModal(discord.ui.Modal, title="Set the rename time"):
+    time_in = discord.ui.TextInput(label="Time (24-hour H:MM, server timezone)", placeholder="8:00", max_length=5)
+
+    def __init__(self, view: "_SetupWizardView"):
+        super().__init__()
+        self._view = view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not _valid_hhmm(self.time_in.value):
+            await interaction.response.send_message("⚠️ Time must be `H:MM` (24-hour), e.g. `8:00`.", ephemeral=True)
+            return
+        self._view.pending_time = self.time_in.value.strip()
+        await interaction.response.edit_message(content=self._view._content(), view=self._view)
+
+
+@client.tree.command(name="setup", description="Guided step-by-step setup (channels, timezone, schedule)")
 @app_commands.guild_only()
 @admin_only()
 async def setup_cmd(interaction: discord.Interaction):
-    view = _CoreSetupView(interaction.user.id, interaction.guild_id)
-    await interaction.response.send_message(view._render(), view=view, ephemeral=True)
+    view = _SetupWizardView(interaction.user.id, interaction.guild_id)
+    await interaction.response.send_message(view._content(), view=view, ephemeral=True)
 
 
 @client.tree.command(name="showconfig", description="Show this server's current settings")
