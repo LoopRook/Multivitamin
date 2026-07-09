@@ -754,38 +754,33 @@ async def _post_source_instructions(guild: discord.Guild, channel_id: int) -> No
         pass  # missing Manage Messages — leave it unpinned
 
 
-class _BracketChannelsModal(discord.ui.Modal, title="Create bracket channels"):
-    """Name and create the bracket + best-of channels (reuses any that already exist)."""
+class _BracketChannelModal(discord.ui.Modal, title="Create bracket channel"):
+    """Name and create the bracket channel (reuses one that already exists)."""
     def __init__(self, guild_id: int):
         super().__init__()
         cfg = get_config(guild_id)
-
-        def mk(label, field, default):
-            ti = discord.ui.TextInput(label=label, required=False, max_length=90,
-                                      default=("" if cfg[field] else default), placeholder=f"#{default}")
-            self.add_item(ti)
-            return ti
-
-        self.bracket_in = mk("Bracket channel name", "bracket_channel", "brackets")
-        self.bestof_in  = mk("Best-of channel name (optional)", "bracket_source_channel", "best-of")
+        self.bracket_in = discord.ui.TextInput(
+            label="Bracket channel name", required=False, max_length=90,
+            default=("" if cfg["bracket_channel"] else "brackets"), placeholder="#brackets")
+        self.add_item(self.bracket_in)
 
     async def on_submit(self, interaction: discord.Interaction):
         guild = interaction.guild
         if not guild.me.guild_permissions.manage_channels:
             await interaction.response.send_message(
                 "⚠️ I need the **Manage Channels** permission to create channels. Grant it, or pick "
-                "existing channels with the dropdowns.", ephemeral=True)
+                "an existing channel with the dropdown.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
-        made, reused, best_id = await _ensure_channels(guild, [
-            (self.bracket_in.value, "bracket_channel",        "Bracket"),
-            (self.bestof_in.value,  "bracket_source_channel", "Best-of"),
-        ])
-        await _channels_reply(interaction, made, reused, best_id, guild)
+        made, reused, _ = await _ensure_channels(guild, [(self.bracket_in.value, "bracket_channel", "Bracket")])
+        await _channels_reply(interaction, made, reused, None, guild)
 
 
 class _BracketConfigView(discord.ui.View):
-    """Persistent bracket setup: where matchups post + the optional best-of source channel."""
+    """Persistent bracket setup: the channel where matchups & results post.
+
+    (The best-of source channel is set in /setup and chosen per-bracket in /bracket start.)
+    """
     def __init__(self, author_id: int, guild_id: int):
         super().__init__(timeout=300)
         self.author_id = author_id
@@ -794,14 +789,12 @@ class _BracketConfigView(discord.ui.View):
     def _render(self) -> str:
         cfg = get_config(self.guild_id)
         bc  = f"<#{cfg['bracket_channel']}>" if cfg["bracket_channel"] else "*not set*"
-        src = f"<#{cfg['bracket_source_channel']}>" if cfg["bracket_source_channel"] else "*all tracked renames*"
+        src = f"<#{cfg['bracket_source_channel']}>" if cfg["bracket_source_channel"] else "*not set*"
         return (
-            "🏆 **Bracket setup**\n"
-            f"• Matchups post to: {bc}\n"
-            f"• Seeded from: {src}\n\n"
-            "Pick the channels below. The **best-of source** is optional — members "
-            "**forward** rename cards there to nominate them (Discord's Forward button). "
-            "Use **🚫 No best-of** to seed from every tracked rename instead. Hit **✅ Done** when finished."
+            "🏆 **Bracket channel**\n"
+            f"• Matchups & results post to: {bc}\n\n"
+            "Pick it below, or **🏗️ Create channel** to make one. Hit **✅ Done** when finished.\n"
+            f"*(Best-of source: {src} — set it in `/setup`; pick best-of vs all-renames per bracket in `/bracket start`.)*"
         )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -817,35 +810,18 @@ class _BracketConfigView(discord.ui.View):
         set_config(self.guild_id, "bracket_channel", select.values[0].id)
         await interaction.response.edit_message(content=self._render(), view=self)
 
-    @discord.ui.select(cls=discord.ui.ChannelSelect, channel_types=[discord.ChannelType.text],
-                       placeholder="Best-of source — members forward renames here (optional)", row=1)
-    async def source_channel_select(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
-        new_id = select.values[0].id
-        old_id = get_config(self.guild_id)["bracket_source_channel"]
-        set_config(self.guild_id, "bracket_source_channel", new_id)
-        await interaction.response.edit_message(content=self._render(), view=self)
-        if new_id != old_id:
-            await _post_source_instructions(interaction.guild, new_id)
-
-    @discord.ui.button(label="Create channels", style=discord.ButtonStyle.primary, emoji="🏗️", row=2)
+    @discord.ui.button(label="Create channel", style=discord.ButtonStyle.primary, emoji="🏗️", row=1)
     async def create_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(_BracketChannelsModal(self.guild_id))
+        await interaction.response.send_modal(_BracketChannelModal(self.guild_id))
 
-    @discord.ui.button(label="No best-of", style=discord.ButtonStyle.secondary, emoji="🚫", row=2)
-    async def clear_source_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        set_config(self.guild_id, "bracket_source_channel", None)
-        await interaction.response.edit_message(content=self._render(), view=self)
-
-    @discord.ui.button(label="Done", style=discord.ButtonStyle.success, emoji="✅", row=2)
+    @discord.ui.button(label="Done", style=discord.ButtonStyle.success, emoji="✅", row=1)
     async def done_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         for c in self.children:
             c.disabled = True
         cfg = get_config(self.guild_id)
         bc  = f"<#{cfg['bracket_channel']}>" if cfg["bracket_channel"] else "*not set*"
-        src = f"<#{cfg['bracket_source_channel']}>" if cfg["bracket_source_channel"] else "*all tracked renames*"
         await interaction.response.edit_message(
-            content=(f"🏁 **Bracket setup saved.**\n• Matchups → {bc}\n• Seeded from → {src}\n\n"
-                     "Start a bracket any time with `/bracket start`."),
+            content=(f"🏁 **Bracket channel saved** → {bc}\n\nStart a bracket any time with `/bracket start`."),
             view=self)
         self.stop()
 
@@ -887,6 +863,33 @@ class _BracketStartView(discord.ui.View):
             discord.SelectOption(label="Daily — one matchup per day", value="daily",
                                  default=(self.pacing == "daily")),
         ]
+        # Source for this bracket: the configured best-of channel, or the firehose
+        # (all tracked renames). Forced to firehose when no best-of is set.
+        self._has_bestof  = bool(cfg["bracket_source_channel"])
+        self.use_firehose = not self._has_bestof
+        self.source_btn.label    = self._source_label()
+        self.source_btn.disabled = not self._has_bestof
+
+    def _source_label(self) -> str:
+        return "Source: all renames" if self.use_firehose else "Source: best-of channel"
+
+    def _refresh_options(self) -> None:
+        """Rebuild every dropdown's options with the current selection as default (so picks stick on re-render)."""
+        scope_opts = [discord.SelectOption(label=f"This year ({datetime.now().year})", value="year",
+                                           default=(self.scope == "year"))]
+        for s in get_seasons(self.guild_id)[:24]:
+            val = f'season:{s["name"]}'[:100]
+            scope_opts.append(discord.SelectOption(label=f'Season: {s["name"]}'[:100], value=val,
+                                                   default=(self.scope == val)))
+        self.scope_select.options = scope_opts
+        self.size_select.options = [discord.SelectOption(label=f"{n} names", value=str(n),
+                                                         default=(n == self.size)) for n in (4, 8, 16, 32)]
+        self.voting_select.options = [discord.SelectOption(label=lbl, value=str(v), default=(v == self.voting))
+                                      for v, lbl in _VOTING_CHOICES]
+        self.pacing_select.options = [
+            discord.SelectOption(label="Round — all matchups at once", value="round", default=(self.pacing == "round")),
+            discord.SelectOption(label="Daily — one matchup per day", value="daily", default=(self.pacing == "daily")),
+        ]
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
@@ -919,14 +922,23 @@ class _BracketStartView(discord.ui.View):
         self.pacing = select.values[0]
         await interaction.response.defer()
 
+    @discord.ui.button(label="Source", style=discord.ButtonStyle.secondary, emoji="🔀", row=4)
+    async def source_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Only togglable when a best-of channel exists (else it stays on firehose).
+        self.use_firehose = not self.use_firehose
+        button.label = self._source_label()
+        self._refresh_options()
+        await interaction.response.edit_message(view=self)
+
     @discord.ui.button(label="Launch bracket", style=discord.ButtonStyle.success, emoji="🚀", row=4)
     async def launch_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         for c in self.children:
             c.disabled = True
         scope_label = "this year" if self.scope == "year" else self.scope.split(":", 1)[1]
+        source_label = "all renames" if self.use_firehose else "best-of channel"
         await interaction.response.edit_message(
-            content=(f"🚀 **Launching** — {scope_label} · {self.size} names · {self.voting}h · {self.pacing}. "
-                     "Watch the bracket channel."),
+            content=(f"🚀 **Launching** — {scope_label} · {self.size} names · {self.voting}h · {self.pacing} · "
+                     f"from {source_label}. Watch the bracket channel."),
             view=self)
         self.stop()
         # Remember these as the new defaults (pre-fill for next time).
@@ -936,15 +948,17 @@ class _BracketStartView(discord.ui.View):
         if self.scope.startswith("season:"):
             _, msg = await start_season_bracket(
                 self.guild_id, client, self.scope.split(":", 1)[1],
-                size=self.size, voting_hours=self.voting, pacing=self.pacing)
+                size=self.size, voting_hours=self.voting, pacing=self.pacing,
+                force_firehose=self.use_firehose)
         else:
             _, msg = await start_bracket(
                 self.guild_id, client, datetime.now().year,
-                size=self.size, voting_hours=self.voting, pacing=self.pacing)
+                size=self.size, voting_hours=self.voting, pacing=self.pacing,
+                force_firehose=self.use_firehose)
         await interaction.followup.send(msg, ephemeral=True)
 
 
-@bracket_group.command(name="config", description="Set the bracket channel + optional best-of source channel")
+@bracket_group.command(name="config", description="Set the bracket channel (where matchups & results post)")
 @admin_only()
 async def bracket_config(interaction: discord.Interaction):
     view = _BracketConfigView(interaction.user.id, interaction.guild_id)
@@ -1633,7 +1647,7 @@ async def _channels_reply(interaction: discord.Interaction, made, reused, best_i
 
 
 class _CreateChannelsModal(discord.ui.Modal, title="Create channels"):
-    """Name and create the core channels (quote/icon/post) for a fresh server."""
+    """Name and create the setup channels (quote/icon/post + optional best-of) for a fresh server."""
     def __init__(self, guild_id: int):
         super().__init__()
         cfg = get_config(guild_id)
@@ -1644,9 +1658,10 @@ class _CreateChannelsModal(discord.ui.Modal, title="Create channels"):
             self.add_item(ti)
             return ti
 
-        self.quote_in = mk("Quote channel name", "quote_channel", "quotes")
-        self.icon_in  = mk("Icon channel name", "icon_channel", "icons")
-        self.post_in  = mk("Rename/post channel name", "post_channel", "renames")
+        self.quote_in  = mk("Quote channel name", "quote_channel", "quotes")
+        self.icon_in   = mk("Icon channel name", "icon_channel", "icons")
+        self.post_in   = mk("Rename/post channel name", "post_channel", "renames")
+        self.bestof_in = mk("Best-of channel name (optional)", "bracket_source_channel", "best-of")
 
     async def on_submit(self, interaction: discord.Interaction):
         guild = interaction.guild
@@ -1657,9 +1672,10 @@ class _CreateChannelsModal(discord.ui.Modal, title="Create channels"):
             return
         await interaction.response.defer(ephemeral=True)
         made, reused, best_id = await _ensure_channels(guild, [
-            (self.quote_in.value, "quote_channel", "Quote"),
-            (self.icon_in.value,  "icon_channel",  "Icon"),
-            (self.post_in.value,  "post_channel",  "Post/rename"),
+            (self.quote_in.value,  "quote_channel",          "Quote"),
+            (self.icon_in.value,   "icon_channel",           "Icon"),
+            (self.post_in.value,   "post_channel",           "Post/rename"),
+            (self.bestof_in.value, "bracket_source_channel", "Best-of"),
         ])
         await _channels_reply(interaction, made, reused, best_id, guild)
 
@@ -1708,7 +1724,9 @@ class _SetupWizardView(discord.ui.View):
             body = ("**Step 1 of 3 — Channels**\n"
                     f"• Quote: {m(cfg['quote_channel'])}\n"
                     f"• Icon: {m(cfg['icon_channel'])}\n"
-                    f"• Post/rename: {m(cfg['post_channel'])}  *(turns on bracket tracking)*\n\n"
+                    f"• Post/rename: {m(cfg['post_channel'])}  *(turns on bracket tracking)*\n"
+                    f"• Best-of *(optional)*: {m(cfg['bracket_source_channel'])}  "
+                    "*(members forward favorite renames here for bracket seeding)*\n\n"
                     "Pick existing channels, or **🏗️ Create channels** to make them, then **Next ▶**.")
         elif step == "timezone":
             body = ("**Step 2 of 3 — Timezone**\n"
@@ -1735,7 +1753,8 @@ class _SetupWizardView(discord.ui.View):
         if step == "channels":
             for field, ph in (("quote_channel", "Quote channel — where members post quotes"),
                               ("icon_channel", "Icon channel — where members post icon images"),
-                              ("post_channel", "Post channel — daily rename cards (tracked for brackets)")):
+                              ("post_channel", "Post channel — daily rename cards (tracked for brackets)"),
+                              ("bracket_source_channel", "Best-of channel — forward favorite renames here (optional)")):
                 sel = discord.ui.ChannelSelect(channel_types=[discord.ChannelType.text], placeholder=ph)
                 sel.callback = self._channel_cb(sel, field)
                 self.add_item(sel)
@@ -1777,8 +1796,12 @@ class _SetupWizardView(discord.ui.View):
     # ── callbacks ──────────────────────────────────────────────────────────────
     def _channel_cb(self, select, field):
         async def cb(interaction):
-            set_config(self.guild_id, field, select.values[0].id)
+            new_id = select.values[0].id
+            old_id = get_config(self.guild_id)[field]
+            set_config(self.guild_id, field, new_id)
             await interaction.response.edit_message(content=self._content(), view=self)
+            if field == "bracket_source_channel" and new_id != old_id:
+                await _post_source_instructions(interaction.guild, new_id)
         return cb
 
     def _tz_cb(self, select):

@@ -916,6 +916,7 @@ async def _start_range_bracket(
     range_start_utc: str, range_end_utc: str,
     label: str, year_value: int, scope_desc: str,
     size: int | None = None, voting_hours: int | None = None, pacing: str | None = None,
+    force_firehose: bool = False,
 ) -> tuple[bool, str]:
     """
     Shared seeding + launch for real brackets over an arbitrary date window.
@@ -962,7 +963,9 @@ async def _start_range_bracket(
     # If a curated "best of" source channel is configured, seed from the renames
     # members forwarded there (scored by reactions on the forwards). Otherwise,
     # seed from every tracked rename in the window (scored by reactions in place).
-    source_channel_id = cfg["bracket_source_channel"]
+    # Per-bracket choice from the start panel: force_firehose ignores the best-of
+    # channel and seeds from every tracked rename in the window instead.
+    source_channel_id = None if force_firehose else cfg["bracket_source_channel"]
     if source_channel_id:
         if not client.get_channel(source_channel_id):
             return False, (
@@ -1045,6 +1048,7 @@ async def _start_range_bracket(
 async def start_bracket(
     guild_id: int, client: discord.Client, year: int,
     size: int | None = None, voting_hours: int | None = None, pacing: str | None = None,
+    force_firehose: bool = False,
 ) -> tuple[bool, str]:
     """Seed and launch a real bracket for a calendar *year*, seeded by reaction counts."""
     cfg = get_config(guild_id)
@@ -1053,13 +1057,14 @@ async def start_bracket(
     return await _start_range_bracket(
         guild_id, client, year_start, year_end,
         label=str(year), year_value=year, scope_desc=str(year),
-        size=size, voting_hours=voting_hours, pacing=pacing,
+        size=size, voting_hours=voting_hours, pacing=pacing, force_firehose=force_firehose,
     )
 
 
 async def start_season_bracket(
     guild_id: int, client: discord.Client, season_name: str,
     size: int | None = None, voting_hours: int | None = None, pacing: str | None = None,
+    force_firehose: bool = False,
 ) -> tuple[bool, str]:
     """Seed and launch a bracket from a named season's date window."""
     season = get_season(guild_id, season_name)
@@ -1078,7 +1083,7 @@ async def start_season_bracket(
     return await _start_range_bracket(
         guild_id, client, season["start_at"], season["end_at"],
         label=name, year_value=max(year_value, 1), scope_desc=f'season "{name}"',
-        size=size, voting_hours=voting_hours, pacing=pacing,
+        size=size, voting_hours=voting_hours, pacing=pacing, force_firehose=force_firehose,
     )
 
 
