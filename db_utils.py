@@ -15,6 +15,7 @@ _VALID_CONFIG_FIELDS = frozenset({
     "bracket_channel", "bracket_size", "bracket_voting_hours", "voting_enabled_at",
     "bracket_pacing", "bracket_source_channel", "pre_bracket_name",
     "quote_interval_days", "quote_weekdays",
+    "credit_style", "credit_mentions",
 })
 
 _CREATE_CONFIG = """
@@ -88,6 +89,8 @@ CREATE TABLE IF NOT EXISTS rename_posts (
     quote       TEXT    NOT NULL,
     quote_user  TEXT,
     quote_uid   INTEGER,
+    icon_user   TEXT,              -- who posted the icon this card was built from
+    icon_uid    INTEGER,
     image_url   TEXT,
     posted_at   TEXT    NOT NULL
 )
@@ -108,7 +111,8 @@ CREATE TABLE IF NOT EXISTS brackets (
     range_end     TEXT,             -- ISO UTC end of the seeding window (NULL for test)
     pacing        TEXT,             -- 'round'|'daily' snapshot at launch (NULL for legacy → falls back to live config)
     champion_quote TEXT,            -- winning entry, recorded at crowning (for /bracket history)
-    champion_user  TEXT             -- who submitted the winning entry
+    champion_user  TEXT,            -- who submitted the winning entry
+    champion_uid   INTEGER          -- ...and their user id, so history can re-resolve/mention them
 )
 """
 
@@ -151,6 +155,9 @@ CREATE TABLE IF NOT EXISTS bracket_entries (
     seed             INTEGER NOT NULL,
     quote            TEXT    NOT NULL,
     quote_user       TEXT,
+    quote_uid        INTEGER,
+    icon_user        TEXT,          -- credit for the card's icon (carried from rename_posts)
+    icon_uid         INTEGER,
     season_reactions INTEGER DEFAULT 0,
     FOREIGN KEY (bracket_id) REFERENCES brackets(id)
 )
@@ -194,10 +201,14 @@ _CONFIG_MIGRATIONS = [
     ("pre_bracket_name",       "TEXT"),
     ("quote_interval_days",    "INTEGER DEFAULT 1"),
     ("quote_weekdays",         "TEXT"),
+    ("credit_style",           "TEXT DEFAULT 'nickname'"),  # 'nickname' | 'username'
+    ("credit_mentions",        "INTEGER DEFAULT 0"),        # 1 = @mention contributors in posts
 ]
 
 _RENAME_POSTS_MIGRATIONS = [
     ("image_url", "TEXT"),
+    ("icon_user", "TEXT"),
+    ("icon_uid",  "INTEGER"),
 ]
 
 _BRACKET_MIGRATIONS = [
@@ -207,6 +218,13 @@ _BRACKET_MIGRATIONS = [
     ("pacing",      "TEXT"),
     ("champion_quote", "TEXT"),
     ("champion_user",  "TEXT"),
+    ("champion_uid",   "INTEGER"),
+]
+
+_BRACKET_ENTRIES_MIGRATIONS = [
+    ("quote_uid", "INTEGER"),
+    ("icon_user", "TEXT"),
+    ("icon_uid",  "INTEGER"),
 ]
 
 # custom_features already ships in live DBs, so new columns must be ALTER-added.
@@ -255,6 +273,11 @@ def init_db() -> None:
         for col, definition in _BRACKET_MIGRATIONS:
             try:
                 conn.execute(f"ALTER TABLE brackets ADD COLUMN {col} {definition}")
+            except sqlite3.OperationalError:
+                pass
+        for col, definition in _BRACKET_ENTRIES_MIGRATIONS:
+            try:
+                conn.execute(f"ALTER TABLE bracket_entries ADD COLUMN {col} {definition}")
             except sqlite3.OperationalError:
                 pass
         for col, definition in _CUSTOM_FEATURES_MIGRATIONS:
@@ -424,14 +447,16 @@ def store_rename_post(
     guild_id: int, message_id: int, channel_id: int,
     quote: str, quote_user: str | None, quote_uid: int | None,
     image_url: str | None = None,
+    icon_user: str | None = None, icon_uid: int | None = None,
 ) -> None:
     with db_conn() as conn:
         conn.execute(
             "INSERT INTO rename_posts "
-            "(guild_id, message_id, channel_id, quote, quote_user, quote_uid, image_url, posted_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "(guild_id, message_id, channel_id, quote, quote_user, quote_uid, "
+            " icon_user, icon_uid, image_url, posted_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (guild_id, message_id, channel_id, quote, quote_user, quote_uid,
-             image_url, datetime.now(timezone.utc).isoformat()),
+             icon_user, icon_uid, image_url, datetime.now(timezone.utc).isoformat()),
         )
         conn.commit()
 
@@ -514,14 +539,29 @@ def get_active_bracket(guild_id: int) -> sqlite3.Row | None:
         ).fetchone()
 
 
-def create_bracket_entry(bracket_id: int, seed: int, quote: str, quote_user: str | None, season_reactions: int) -> int:
+def create_bracket_entry(
+    bracket_id: int, seed: int, quote: str, quote_user: str | None, season_reactions: int,
+    quote_uid: int | None = None, icon_user: str | None = None, icon_uid: int | None = None,
+) -> int:
     with db_conn() as conn:
         cur = conn.execute(
-            "INSERT INTO bracket_entries (bracket_id, seed, quote, quote_user, season_reactions) VALUES (?, ?, ?, ?, ?)",
-            (bracket_id, seed, quote, quote_user, season_reactions),
+            "INSERT INTO bracket_entries "
+            "(bracket_id, seed, quote, quote_user, quote_uid, icon_user, icon_uid, season_reactions) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (bracket_id, seed, quote, quote_user, quote_uid, icon_user, icon_uid, season_reactions),
         )
         conn.commit()
         return cur.lastrowid
+
+
+def set_bracket_entry_icon(entry_id: int, icon_user: str | None, icon_uid: int | None) -> None:
+    """Backfill an entry's icon credit — test brackets pick their icons after seeding."""
+    with db_conn() as conn:
+        conn.execute(
+            "UPDATE bracket_entries SET icon_user=?, icon_uid=? WHERE id=?",
+            (icon_user, icon_uid, entry_id),
+        )
+        conn.commit()
 
 
 def get_bracket_entry(entry_id: int) -> sqlite3.Row | None:
@@ -588,12 +628,14 @@ def complete_bracket(bracket_id: int) -> None:
         conn.commit()
 
 
-def set_bracket_champion(bracket_id: int, quote: str, quote_user: str | None) -> None:
+def set_bracket_champion(
+    bracket_id: int, quote: str, quote_user: str | None, quote_uid: int | None = None,
+) -> None:
     """Record a completed bracket's winner, for /bracket history."""
     with db_conn() as conn:
         conn.execute(
-            "UPDATE brackets SET champion_quote=?, champion_user=? WHERE id=?",
-            (quote, quote_user, bracket_id),
+            "UPDATE brackets SET champion_quote=?, champion_user=?, champion_uid=? WHERE id=?",
+            (quote, quote_user, quote_uid, bracket_id),
         )
         conn.commit()
 

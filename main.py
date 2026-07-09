@@ -35,6 +35,7 @@ from bracket import (
     force_bracket_advance,
     restore_pre_bracket_name,
 )
+import credits
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -142,7 +143,8 @@ def build_help_embed(is_admin: bool = False, is_manager: bool = False) -> discor
             "`/config feature <quote|cooldown> <on/off>`\n"
             "*(Bracket tracking is always on once a Post Channel is set.)*\n"
             "`/config timezone <tz>` — IANA name, e.g. `US/Eastern`\n"
-            "`/config schedule` — **guided**: rename time & frequency (daily, every N days, or weekdays)"
+            "`/config schedule` — **guided**: rename time & frequency (daily, every N days, or weekdays)\n"
+            "`/config credits` — **guided**: name contributors by nickname or username, and @tag them"
         ),
         inline=False,
     )
@@ -720,6 +722,82 @@ async def config_schedule(interaction: discord.Interaction):
     await interaction.response.send_message(view._render(), view=view, ephemeral=True)
 
 
+class _CreditsView(discord.ui.View):
+    """How contributors are named on cards, matchups and champion posts."""
+    def __init__(self, author_id: int, guild_id: int):
+        super().__init__(timeout=300)
+        self.author_id = author_id
+        self.guild_id  = guild_id
+        cfg = get_config(guild_id)
+        self.style    = credits.style_of(cfg)
+        self.mentions = credits.mentions_on(cfg)
+        self._sync_buttons()
+
+    def _sync_buttons(self) -> None:
+        self.style_btn.label = ("Names: server nickname" if self.style == "nickname"
+                                else "Names: @username")
+        self.mention_btn.label = f"Tag them: {'on' if self.mentions else 'off'}"
+        self.mention_btn.style = (discord.ButtonStyle.success if self.mentions
+                                  else discord.ButtonStyle.secondary)
+
+    def _render(self) -> str:
+        style_txt = ("**server nickname** — whatever they're called in this server"
+                     if self.style == "nickname" else
+                     "**@username** — their Discord handle, the same everywhere")
+        mention_txt = ("**on** — the champion announcement pings the winner, and credits "
+                       "render as mentions in bracket posts"
+                       if self.mentions else
+                       "**off** — credits are plain text, nobody gets pinged")
+        return (
+            "🙋 **Contributor credits** — how people are named when the bot credits them.\n"
+            f"• **Name style**: {style_txt}\n"
+            f"• **Tag them**: {mention_txt}\n\n"
+            "Names are looked up fresh each time, so a nickname change shows up everywhere. "
+            "Cards are images — they always show a plain name, never a mention."
+        )
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                "This panel isn't yours — run `/config credits` yourself.", ephemeral=True)
+            return False
+        return True
+
+    async def _refresh(self, interaction):
+        self._sync_buttons()
+        await interaction.response.edit_message(content=self._render(), view=self)
+
+    @discord.ui.button(label="Names", style=discord.ButtonStyle.primary, emoji="🏷️")
+    async def style_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.style = "username" if self.style == "nickname" else "nickname"
+        await self._refresh(interaction)
+
+    @discord.ui.button(label="Tag them", style=discord.ButtonStyle.secondary, emoji="📣")
+    async def mention_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.mentions = not self.mentions
+        await self._refresh(interaction)
+
+    @discord.ui.button(label="Save", style=discord.ButtonStyle.success, emoji="✅")
+    async def save_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        set_config(self.guild_id, "credit_style", self.style)
+        set_config(self.guild_id, "credit_mentions", 1 if self.mentions else 0)
+        for c in self.children:
+            c.disabled = True
+        await interaction.response.edit_message(
+            content=(f"✅ **Saved** — contributors are credited by "
+                     f"**{'server nickname' if self.style == 'nickname' else '@username'}**, "
+                     f"tagging **{'on' if self.mentions else 'off'}**."),
+            view=self)
+        self.stop()
+
+
+@config_group.command(name="credits", description="How contributors are named — nickname vs username, and @tagging")
+@admin_only()
+async def config_credits(interaction: discord.Interaction):
+    view = _CreditsView(interaction.user.id, interaction.guild_id)
+    await interaction.response.send_message(view._render(), view=view, ephemeral=True)
+
+
 client.tree.add_command(config_group)
 
 
@@ -945,12 +1023,63 @@ async def bracket_start(interaction: discord.Interaction):
     await interaction.response.send_message(view._content(), view=view, ephemeral=True)
 
 
+class _BracketTestView(discord.ui.View):
+    """Test-bracket launcher — same channel picker as /bracket start, nothing else to choose."""
+    def __init__(self, author_id: int, guild_id: int):
+        super().__init__(timeout=300)
+        self.author_id = author_id
+        self.guild_id  = guild_id
+
+    def _content(self) -> str:
+        cfg  = get_config(self.guild_id)
+        chan = f"<#{cfg['bracket_channel']}>" if cfg["bracket_channel"] else "⚠️ *pick or create one below*"
+        size = int(cfg["bracket_size"] or 8)
+        return (
+            "🧪 **Test bracket** — a full dry run seeded from the quote channel with random scores. "
+            "The real server is never renamed.\n"
+            f"• **Posts to**: {chan}\n"
+            f"• **Size**: {size} names · **Voting**: {cfg['bracket_voting_hours'] or 24}h "
+            "*(from your saved settings — change them in `/bracket start`)*"
+        )
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                "This panel isn't yours — run `/bracket test` yourself.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.select(cls=discord.ui.ChannelSelect, channel_types=[discord.ChannelType.text],
+                       placeholder="Posts to — where the test bracket appears", row=0)
+    async def channel_select(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
+        set_config(self.guild_id, "bracket_channel", select.values[0].id)
+        await interaction.response.edit_message(content=self._content(), view=self)
+
+    @discord.ui.button(label="Create channel", style=discord.ButtonStyle.primary, emoji="🏗️", row=1)
+    async def create_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(_BracketChannelModal(self.guild_id))
+
+    @discord.ui.button(label="Run test", style=discord.ButtonStyle.success, emoji="🧪", row=1)
+    async def run_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not get_config(self.guild_id)["bracket_channel"]:
+            await interaction.response.send_message(
+                "⚠️ Pick or **🏗️ Create** a bracket channel first — that's where the test posts.",
+                ephemeral=True)
+            return
+        for c in self.children:
+            c.disabled = True
+        await interaction.response.edit_message(
+            content="🧪 **Running the test bracket** — watch the bracket channel.", view=self)
+        self.stop()
+        _, msg = await start_test_bracket(self.guild_id, client)
+        await interaction.followup.send(msg, ephemeral=True)
+
+
 @bracket_group.command(name="test", description="Start a test bracket from the quote channel (random scores)")
 @admin_only()
 async def bracket_test(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-    _, msg = await start_test_bracket(interaction.guild_id, client)
-    await interaction.followup.send(msg, ephemeral=True)
+    view = _BracketTestView(interaction.user.id, interaction.guild_id)
+    await interaction.response.send_message(view._content(), view=view, ephemeral=True)
 
 
 @bracket_group.command(name="forceadvance", description="Tally current polls now and advance the bracket")
@@ -974,13 +1103,16 @@ async def bracket_history(interaction: discord.Interaction):
         await interaction.response.send_message(
             "🏆 No completed brackets yet — run one with `/bracket start`.", ephemeral=True)
         return
+    cfg   = get_config(interaction.guild_id)
     lines = ["🏆 **Hall of Champions**"]
     for r in rows:
         label = r["label"] or str(r["year"])
         date  = (r["created_at"] or "")[:10]
         champ = r["champion_quote"]
         if champ:
-            who = f" — *{r['champion_user']}*" if r["champion_user"] else ""
+            name = credits.resolve_name(client, interaction.guild_id, r["champion_uid"],
+                                        r["champion_user"], credits.style_of(cfg))
+            who = f" — *{name}*" if (r["champion_user"] or r["champion_uid"]) else ""
             lines.append(f'• **{label}** ({date}): "{champ}"{who}')
         else:
             lines.append(f"• **{label}** ({date}): *champion not recorded*")
@@ -1711,9 +1843,12 @@ class _SetupWizardView(discord.ui.View):
                     "Set how often & when the server renames, then **✅ Finish**. "
                     "*(Weekday mode = 'every Sunday'.)*")
         else:
+            style = ("server nickname" if credits.style_of(cfg) == "nickname" else "@username")
+            tagging = "with pings" if credits.mentions_on(cfg) else "no pings"
             body = ("🎉 **Setup complete!**\n"
                     f"• Quote {m(cfg['quote_channel'])} · Icon {m(cfg['icon_channel'])} · Post {m(cfg['post_channel'])}\n"
-                    f"• Renames **{self._cadence_text()}** at **{self.pending_time}** ({self.pending_tz})\n\n"
+                    f"• Renames **{self._cadence_text()}** at **{self.pending_time}** ({self.pending_tz})\n"
+                    f"• Contributors credited by **{style}**, {tagging} — change with `/config credits`\n\n"
                     "Optional next steps: `/bracket start` (run a name bracket) · `/feature setup` "
                     "(an 'X of the day') · `/showconfig` to review · `/help` for everything.")
         return "🛠️ **Server setup**\n\n" + body

@@ -24,8 +24,9 @@ from db_utils import (
     create_bracket_matchup, update_matchup_posted,
     get_active_round_matchups, set_matchup_winner,
     get_round_winners_ordered, advance_bracket_round, complete_bracket,
-    set_bracket_champion, get_season,
+    set_bracket_champion, set_bracket_entry_icon, get_season,
 )
+import credits
 
 log = logging.getLogger(__name__)
 
@@ -79,6 +80,10 @@ def _bracket_col(bracket, col: str):
         return bracket[col]
     except (IndexError, KeyError):
         return None
+
+
+# Rows predating the credit columns (and test fakes) simply don't have them.
+_col = _bracket_col
 
 
 def _effective_cfg(cfg, bracket) -> dict:
@@ -155,12 +160,11 @@ async def _scored_from_forwards(
     window and the tracking floor still apply. Screenshots or re-uploads have no
     such reference and are silently ignored — members must use the Forward button.
 
-    Returns (reaction_count, quote, quote_user) tuples scored by the reactions on
-    the *forwarded* message. Dedup-by-quote happens in the caller.
+    Returns (reaction_count, post_row) tuples scored by the reactions on the
+    *forwarded* message; the row carries the quote and both credits. Dedup-by-
+    quote happens in the caller.
     """
-    by_msg = {
-        p["message_id"]: (p["quote"], p["quote_user"]) for p in posts_in_window
-    }
+    by_msg = {p["message_id"]: p for p in posts_in_window}
     if not by_msg:
         return []
 
@@ -168,7 +172,7 @@ async def _scored_from_forwards(
     if not channel:
         return []
 
-    scored: list[tuple[int, str, str | None]] = []
+    scored: list[tuple[int, object]] = []
     try:
         async for msg in channel.history(limit=None):
             ref = msg.reference
@@ -177,11 +181,10 @@ async def _scored_from_forwards(
             original = by_msg.get(ref.message_id)
             if original is None:
                 continue
-            quote, user = original
             # Count human reactions only — the bot's own ℹ️/🔁 confirmation
             # reactions must not add to a forward's score.
             count = sum(r.count - (1 if r.me else 0) for r in msg.reactions)
-            scored.append((count, quote, user))
+            scored.append((count, original))
     except discord.HTTPException as e:
         log.warning("Could not scan bracket source channel %s: %s", source_channel_id, e)
     return scored
@@ -392,7 +395,8 @@ async def _crown_champion(
 
     # Record the winner for /bracket history (real brackets only).
     if bracket["year"] != 0:
-        set_bracket_champion(bracket["id"], champion["quote"], champion["quote_user"])
+        set_bracket_champion(bracket["id"], champion["quote"], champion["quote_user"],
+                             _col(champion, "quote_uid"))
 
     renamed = False
     if bracket["year"] != 0:
@@ -416,11 +420,16 @@ async def _crown_champion(
         tail = "\n\n🧪 *(test bracket — the real server name was not changed)*"
     else:
         tail = ""
+    # The one place mentions actually ping — winning the bracket is worth a ping.
+    who = credits.credit_line(
+        client, guild_id, get_config(guild_id),
+        quote_user=champion["quote_user"], quote_uid=_col(champion, "quote_uid"),
+        icon_user=_col(champion, "icon_user"), icon_uid=_col(champion, "icon_uid"),
+    )
     content = (
         f"\n🎊🏆🎊 **{_bracket_label(bracket)} SERVER NAME CHAMPION** 🎊🏆🎊\n\n"
         f'**"{champion["quote"]}"**\n'
-        f'*submitted by {champion["quote_user"] or "Unknown"} · '
-        f'{champion["season_reactions"]} reactions this season*\n\n'
+        f'*{who} · {champion["season_reactions"]} reactions this season*\n\n'
         f"Congratulations! 🎉{tail}"
     )
     try:
@@ -465,7 +474,8 @@ async def _get_card_bytes(
     return None
 
 
-def _build_matchup_embeds(match_num: int, entry_a, entry_b, bytes_a, bytes_b):
+def _build_matchup_embeds(match_num: int, entry_a, entry_b, bytes_a, bytes_b,
+                          client: discord.Client, guild_id: int, cfg):
     """
     Build the (embeds, files) for one matchup's two cards, labeled
     "Match N — Option A/B".  Images are attached via the attachment:// scheme
@@ -478,11 +488,17 @@ def _build_matchup_embeds(match_num: int, entry_a, entry_b, bytes_a, bytes_b):
         ("A", entry_a, bytes_a, discord.Color.blue()),
         ("B", entry_b, bytes_b, discord.Color.red()),
     ):
+        # Mentions inside an embed render as a name but never ping — safe here.
+        who = credits.credit_line(
+            client, guild_id, cfg,
+            quote_user=entry["quote_user"], quote_uid=_col(entry, "quote_uid"),
+            icon_user=_col(entry, "icon_user"), icon_uid=_col(entry, "icon_uid"),
+        )
         embed = discord.Embed(
             title=f"Match {match_num + 1} — Option {side}  ·  #{entry['seed']} seed",
             description=(
                 f'**"{entry["quote"]}"**\n'
-                f'*submitted by {entry["quote_user"] or "Unknown"}*\n'
+                f'*{who}*\n'
                 f'{entry["season_reactions"]} reactions this season'
             ),
             color=color,
@@ -524,7 +540,8 @@ async def _post_matchup(
         _get_card_bytes(entry_a, bracket_id, client, rename_posts),
         _get_card_bytes(entry_b, bracket_id, client, rename_posts),
     )
-    embeds, files = _build_matchup_embeds(match_num, entry_a, entry_b, bytes_a, bytes_b)
+    embeds, files = _build_matchup_embeds(match_num, entry_a, entry_b, bytes_a, bytes_b,
+                                          client, channel.guild.id, cfg)
 
     header = (
         f"─────────────────────────\n"
@@ -659,7 +676,10 @@ async def start_test_bracket(guild_id: int, client: discord.Client) -> tuple[boo
 
     bracket_channel = client.get_channel(cfg["bracket_channel"])
     if not bracket_channel:
-        return False, "⚠️ No bracket channel configured. Set one with `/bracket config` first."
+        return False, (
+            "⚠️ No bracket channel yet. Open `/bracket start` and pick (or 🏗️ create) "
+            "one from the top dropdown — that saves it — then run `/bracket test`."
+        )
 
     quote_channel = client.get_channel(cfg["quote_channel"])
     if not quote_channel:
@@ -692,7 +712,7 @@ async def start_test_bracket(guild_id: int, client: discord.Client) -> tuple[boo
 
     # Random scores simulate a real season of voting
     scored = sorted(
-        [(random.randint(1, 50), quote, name) for _, (quote, name, _) in pool.items()],
+        [(random.randint(1, 50), quote, name, uid) for uid, (quote, name, _) in pool.items()],
         reverse=True,
     )
 
@@ -713,16 +733,17 @@ async def start_test_bracket(guild_id: int, client: discord.Client) -> tuple[boo
         pacing=cfg["bracket_pacing"] or "round",
     )
     entry_ids  = []
-    for seed, (score, quote, user) in enumerate(nominees, start=1):
-        eid = create_bracket_entry(bracket_id, seed, quote, user, score)
+    for seed, (score, quote, user, uid) in enumerate(nominees, start=1):
+        eid = create_bracket_entry(bracket_id, seed, quote, user, score, quote_uid=uid)
         entry_ids.append(eid)
 
     lines = [
         f"🧪 **TEST BRACKET — {actual_size} names** *(random scores, not a real bracket)*",
         f"{total_rounds} round(s) · {voting_hours}h per matchup · use `/bracket forceadvance` to skip the wait\n",
     ]
-    for seed, (score, quote, user) in enumerate(nominees, start=1):
-        lines.append(f'  **#{seed}** "{quote}" — *{user}* · {score} reactions (random)')
+    for seed, (score, quote, user, uid) in enumerate(nominees, start=1):
+        who = credits.resolve_name(client, guild_id, uid, user, credits.style_of(cfg))
+        lines.append(f'  **#{seed}** "{quote}" — *{who}* · {score} reactions (random)')
     await bracket_channel.send("\n".join(lines))
 
     # Generate card images for each nominee upfront and store the bytes in
@@ -733,16 +754,21 @@ async def start_test_bracket(guild_id: int, client: discord.Client) -> tuple[boo
 
     icon_channel = client.get_channel(cfg["icon_channel"])
 
-    async def _make_test_card(entry_id: int, quote: str, user: str) -> None:
+    style = credits.style_of(cfg)
+
+    async def _make_test_card(entry_id: int, quote: str, user: str, uid: int | None) -> None:
         from bot_features import get_random_icon
         from image_utils import generate_card
         import aiohttp
         _TIMEOUT = aiohttp.ClientTimeout(total=15)
 
-        icon_url, icon_user, _ = await get_random_icon(icon_channel)
+        icon_url, icon_user, icon_uid = await get_random_icon(icon_channel)
         if not icon_url:
             log.warning("Test card: no icon available for entry %s", entry_id)
             return
+        # The icon is only chosen now, after seeding, so the entry's icon credit
+        # has to be backfilled for the matchup embeds to show it.
+        set_bracket_entry_icon(entry_id, icon_user, icon_uid)
         try:
             async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
                 async with session.get(icon_url) as resp:
@@ -751,12 +777,17 @@ async def start_test_bracket(guild_id: int, client: discord.Client) -> tuple[boo
         except Exception as e:
             log.warning("Test card: failed to download icon: %s", e)
             return
-        card = await generate_card(quote, user, icon_user or "Unknown", icon_bytes)
+        card = await generate_card(
+            quote,
+            credits.resolve_name(client, guild_id, uid, user, style),
+            credits.resolve_name(client, guild_id, icon_uid, icon_user, style),
+            icon_bytes,
+        )
         if card:
             card_bytes_map[entry_id] = card.read()
 
-    for eid, (score, quote, user) in zip(entry_ids, nominees):
-        await _make_test_card(eid, quote, user)
+    for eid, (score, quote, user, uid) in zip(entry_ids, nominees):
+        await _make_test_card(eid, quote, user, uid)
 
     _test_card_cache[bracket_id] = card_bytes_map
 
@@ -935,7 +966,10 @@ async def _start_range_bracket(
 
     bracket_channel = client.get_channel(cfg["bracket_channel"])
     if not bracket_channel:
-        return False, "⚠️ No bracket channel configured. Set one with `/bracket config` first."
+        return False, (
+            "⚠️ No bracket channel yet. Pick (or 🏗️ create) one from the top dropdown "
+            "in `/bracket start`."
+        )
 
     # Remember the current server name so /bracket cancel can restore it, and let
     # this bracket warn afresh if it can't rename (missing Manage Server).
@@ -969,8 +1003,9 @@ async def _start_range_bracket(
     if source_channel_id:
         if not client.get_channel(source_channel_id):
             return False, (
-                "⚠️ The configured bracket source channel isn't accessible. "
-                "Re-set it (or clear it) in `/bracket config`."
+                "⚠️ The configured best-of source channel isn't accessible. "
+                "Re-set it (or clear it) in `/setup`, or pick 🔀 **Source: all renames** "
+                "in `/bracket start` to skip it."
             )
         scored = await _scored_from_forwards(client, source_channel_id, posts)
         if not scored:
@@ -989,13 +1024,14 @@ async def _start_range_bracket(
         scored = []
         for post in posts:
             count = await _get_total_reactions(client, post["channel_id"], post["message_id"])
-            scored.append((count, post["quote"], post["quote_user"]))
+            scored.append((count, post))
 
-    # Deduplicate — keep highest score per unique quote
-    best: dict[str, tuple[int, str | None]] = {}
-    for count, quote, user in scored:
+    # Deduplicate — keep the highest-scoring post per unique quote
+    best: dict[str, tuple[int, object]] = {}
+    for count, post in scored:
+        quote = post["quote"]
         if quote not in best or count > best[quote][0]:
-            best[quote] = (count, user)
+            best[quote] = (count, post)
 
     ranked = sorted(best.items(), key=lambda x: x[1][0], reverse=True)
 
@@ -1019,8 +1055,12 @@ async def _start_range_bracket(
         pacing=pacing,
     )
     entry_ids  = []
-    for seed, (quote, (score, user)) in enumerate(nominees, start=1):
-        eid = create_bracket_entry(bracket_id, seed, quote, user, score)
+    for seed, (quote, (score, post)) in enumerate(nominees, start=1):
+        eid = create_bracket_entry(
+            bracket_id, seed, quote, post["quote_user"], score,
+            quote_uid=_col(post, "quote_uid"),
+            icon_user=_col(post, "icon_user"), icon_uid=_col(post, "icon_uid"),
+        )
         entry_ids.append(eid)
 
     total_rounds = int(math.log2(actual_size))
@@ -1028,8 +1068,15 @@ async def _start_range_bracket(
         f"🏆 **{label} Server Name Championship — {actual_size}-name bracket!**",
         f"Seeded by total reactions · {total_rounds} round(s) · {voting_hours}h per matchup\n",
     ]
-    for seed, (quote, (score, user)) in enumerate(nominees, start=1):
-        lines.append(f'  **#{seed}** "{quote}" — *{user or "Unknown"}* · {score} reactions')
+    for seed, (quote, (score, post)) in enumerate(nominees, start=1):
+        # No mentions here — a seed list would ping every nominee at once.
+        who = credits.credit_line(
+            client, guild_id, cfg,
+            quote_user=post["quote_user"], quote_uid=_col(post, "quote_uid"),
+            icon_user=_col(post, "icon_user"), icon_uid=_col(post, "icon_uid"),
+            prefix="", mention=False,
+        )
+        lines.append(f'  **#{seed}** "{quote}" — *{who}* · {score} reactions')
     await bracket_channel.send("\n".join(lines))
 
     pairs = _first_round_pairs(entry_ids)
