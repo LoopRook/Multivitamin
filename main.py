@@ -79,7 +79,8 @@ def _valid_hhmm(t: str) -> bool:
         return False
 
 _SETUP_INTRO = (
-    "🛠️ **Quick setup** — pick your core channels and timezone below (each saves as you go).\n"
+    "🛠️ **Quick setup** — pick your core channels and timezone below (each saves as you go), "
+    "or hit **🏗️ Create channels for me** to make fresh ones (named how you like).\n"
     "Then set up the rest:\n"
     "• `/bracket config` — bracket channel + optional best-of channel\n"
     "• `/daily setup` — your own 'X of the day' posts (meme, song, …)\n"
@@ -1544,6 +1545,91 @@ async def help_cmd(interaction: discord.Interaction):
     await interaction.response.send_message(embed=build_help_embed(is_admin, is_manager), ephemeral=True)
 
 
+_SETUP_CATEGORY = "Server Renamer"
+
+
+def _normalize_channel_name(raw: str) -> str:
+    """Approximate Discord's text-channel naming so we can match an existing channel by name."""
+    return raw.strip().lstrip("#").lower().replace(" ", "-")
+
+
+class _CreateChannelsModal(discord.ui.Modal, title="Create setup channels"):
+    """Name and create the bot's channels for a fresh server (reuses any that already exist)."""
+    def __init__(self, view: "_CoreSetupView"):
+        super().__init__()
+        self._view = view
+        cfg = get_config(view.guild_id)
+
+        def mk(label: str, field: str, default: str):
+            ti = discord.ui.TextInput(
+                label=label, required=False, max_length=90,
+                default=("" if cfg[field] else default), placeholder=f"#{default}")
+            self.add_item(ti)
+            return ti
+
+        # Pre-fill a default name only where that channel isn't set yet (blank = skip it).
+        self.quote_in   = mk("Quote channel name", "quote_channel", "quotes")
+        self.icon_in    = mk("Icon channel name", "icon_channel", "icons")
+        self.post_in    = mk("Rename/post channel name", "post_channel", "renames")
+        self.bracket_in = mk("Bracket channel name", "bracket_channel", "brackets")
+        self.bestof_in  = mk("Best-of channel name (optional)", "bracket_source_channel", "best-of")
+
+    async def on_submit(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        if not guild.me.guild_permissions.manage_channels:
+            await interaction.response.send_message(
+                "⚠️ I need the **Manage Channels** permission to create channels. Grant it (re-invite with "
+                "the updated link) and try again — or just pick existing channels with the dropdowns.",
+                ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+
+        wanted = [
+            (self.quote_in.value,   "quote_channel",          "Quote"),
+            (self.icon_in.value,    "icon_channel",           "Icon"),
+            (self.post_in.value,    "post_channel",           "Post/rename"),
+            (self.bracket_in.value, "bracket_channel",        "Bracket"),
+            (self.bestof_in.value,  "bracket_source_channel", "Best-of"),
+        ]
+        category = discord.utils.get(guild.categories, name=_SETUP_CATEGORY)
+        if category is None and any(v.strip() for v, _, _ in wanted):
+            try:
+                category = await guild.create_category(_SETUP_CATEGORY)
+            except discord.HTTPException:
+                category = None
+
+        made, reused, best_id = [], [], None
+        for raw, field, label in wanted:
+            name = _normalize_channel_name(raw)
+            if not name:
+                continue
+            channel = discord.utils.get(guild.text_channels, name=name)
+            if channel:
+                reused.append(f"{label}: {channel.mention}")
+            else:
+                try:
+                    channel = await guild.create_text_channel(name, category=category)
+                except discord.HTTPException as e:
+                    await interaction.followup.send(f"⚠️ Couldn't create **#{name}**: {e}", ephemeral=True)
+                    continue
+                made.append(f"{label}: {channel.mention}")
+            set_config(guild.id, field, channel.id)
+            if field == "bracket_source_channel":
+                best_id = channel.id
+
+        if best_id:
+            await _post_source_instructions(guild, best_id)
+
+        if not made and not reused:
+            await interaction.followup.send("Nothing to create — all fields were left blank.", ephemeral=True)
+            return
+        lines = ["✅ **Channels ready.**"]
+        if made:   lines.append("Created — " + " · ".join(made))
+        if reused: lines.append("Reused existing — " + " · ".join(reused))
+        lines.append("\nSet the schedule with `/config schedule`, or `/showconfig` to review.")
+        await interaction.followup.send("\n".join(lines), ephemeral=True)
+
+
 class _CoreSetupView(discord.ui.View):
     """Guided first-run setup: the core channels + timezone, saved as you pick."""
     def __init__(self, author_id: int, guild_id: int):
@@ -1563,6 +1649,8 @@ class _CoreSetupView(discord.ui.View):
             f"• **Quote channel:** {m(cfg['quote_channel'])}\n"
             f"• **Icon channel:** {m(cfg['icon_channel'])}\n"
             f"• **Post channel:** {m(cfg['post_channel'])}  *(turns on bracket tracking)*\n"
+            f"• **Bracket channel:** {m(cfg['bracket_channel'])}\n"
+            f"• **Best-of channel:** {m(cfg['bracket_source_channel'])}\n"
             f"• **Timezone:** {cfg['timezone'] or 'US/Eastern'}"
         )
 
@@ -1596,6 +1684,10 @@ class _CoreSetupView(discord.ui.View):
     async def tz_select(self, interaction: discord.Interaction, select: discord.ui.Select):
         set_config(self.guild_id, "timezone", select.values[0])
         await interaction.response.edit_message(content=self._render(), view=self)
+
+    @discord.ui.button(label="Create channels for me", style=discord.ButtonStyle.primary, emoji="🏗️", row=4)
+    async def create_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(_CreateChannelsModal(self))
 
     @discord.ui.button(label="Done", style=discord.ButtonStyle.success, emoji="✅", row=4)
     async def done_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
