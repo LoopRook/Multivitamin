@@ -31,6 +31,7 @@ from bracket import (
     start_test_bracket,
     get_bracket_status_text,
     force_bracket_advance,
+    restore_pre_bracket_name,
 )
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -721,8 +722,15 @@ async def bracket_cancel(interaction: discord.Interaction):
     if not bracket:
         await interaction.response.send_message("⚠️ No active bracket to cancel.", ephemeral=True)
         return
+    await interaction.response.defer(ephemeral=True)
     cancel_bracket(bracket["id"])
-    await interaction.response.send_message("🗑️ Active bracket cancelled and removed.", ephemeral=True)
+    msg = "🗑️ Active bracket cancelled and removed."
+    # A real bracket may have changed the server name mid-run; put it back.
+    if bracket["year"] != 0:
+        restored = await restore_pre_bracket_name(client, interaction.guild_id)
+        if restored:
+            msg += f"\nServer name restored to **{restored}**."
+    await interaction.followup.send(msg, ephemeral=True)
 
 
 client.tree.add_command(bracket_group)
