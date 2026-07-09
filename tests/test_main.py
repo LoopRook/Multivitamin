@@ -46,6 +46,26 @@ def test_version_string():
     assert isinstance(main.__version__, str) and main.__version__
 
 
+def test_try_dm_delivery():
+    class OkUser:
+        bot = False
+        async def send(self, text): pass
+
+    class FailUser:
+        bot = False
+        async def send(self, text):
+            raise discord.HTTPException(type("R", (), {"status": 403, "reason": "x"})(), "no dm")
+
+    class BotUser:
+        bot = True
+        async def send(self, text): pass
+
+    assert run(main.client._try_dm(OkUser(), "hi")) is True
+    assert run(main.client._try_dm(FailUser(), "hi")) is False   # DMs off -> fall back
+    assert run(main.client._try_dm(None, "hi")) is False
+    assert run(main.client._try_dm(BotUser(), "hi")) is False
+
+
 def _fake_forward(gid, chan_id, reference, mid):
     o = type("Msg", (), {})()
     o.guild = type("G", (), {"id": gid})()

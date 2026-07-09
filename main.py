@@ -280,12 +280,46 @@ class QotdClient(discord.Client):
     async def on_guild_join(self, guild: discord.Guild) -> None:
         log.info("➕ Joined guild %s (%s)", guild.id, guild.name)
         get_config(guild.id)  # ensure a config row exists
+
+        # Prefer to DM whoever added the bot (private — no channel noise). Fall
+        # back to a channel only if the DM can't be delivered or we can't tell
+        # who invited it (needs View Audit Log for the lookup).
+        inviter = await self._find_inviter(guild)
+        if inviter and await self._try_dm(
+            inviter, f"👋 You added me to **{guild.name}**!\n\n{_WELCOME_TEXT}"
+        ):
+            log.info("[%s] Sent welcome DM to inviter %s.", guild.id, inviter.id)
+            return
+
         channel = _welcome_channel(guild)
         if channel:
             try:
                 await channel.send(_WELCOME_TEXT)
             except discord.HTTPException as e:
                 log.warning("[%s] Could not send welcome message: %s", guild.id, e)
+
+    async def _find_inviter(self, guild: discord.Guild):
+        """Who added the bot, via the audit log. None if unavailable (missing View Audit Log, etc.)."""
+        me = self.user
+        if me is None:
+            return None
+        try:
+            async for entry in guild.audit_logs(limit=8, action=discord.AuditLogAction.bot_add):
+                if entry.target and entry.target.id == me.id:
+                    return entry.user
+        except (discord.Forbidden, discord.HTTPException):
+            return None
+        return None
+
+    async def _try_dm(self, user, text: str) -> bool:
+        """DM a user; return True on success, False if it couldn't be delivered."""
+        if user is None or getattr(user, "bot", False):
+            return False
+        try:
+            await user.send(text)
+            return True
+        except discord.HTTPException:
+            return False
 
     async def on_guild_remove(self, guild: discord.Guild) -> None:
         # Keep the guild's data in case of a re-invite; just log the departure.

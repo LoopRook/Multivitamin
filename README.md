@@ -13,10 +13,10 @@ All commands are **slash (`/`) commands**. The bot is multi-server, uses no `Adm
 Invite link (replace `YOUR_APPLICATION_ID` with the Application ID from the Discord Developer Portal → General Information):
 
 ```
-https://discord.com/oauth2/authorize?client_id=YOUR_APPLICATION_ID&scope=bot+applications.commands&permissions=562949953539168
+https://discord.com/oauth2/authorize?client_id=YOUR_APPLICATION_ID&scope=bot+applications.commands&permissions=562949953539296
 ```
 
-Scopes: `bot` + `applications.commands`. The permission integer `562949953539168` grants exactly: View Channels, Send Messages, Embed Links, Attach Files, Add Reactions, Read Message History, Send Polls, and **Manage Server** (needed to rename the server). Prefer the Dev Portal's **OAuth2 → URL Generator** to (re)generate this by ticking those boxes.
+Scopes: `bot` + `applications.commands`. The permission integer `562949953539296` grants exactly: View Channels, Send Messages, Embed Links, Attach Files, Add Reactions, Read Message History, Send Polls, **View Audit Log** (to DM whoever adds the bot a private setup guide), and **Manage Server** (needed to rename the server). Prefer the Dev Portal's **OAuth2 → URL Generator** to (re)generate this by ticking those boxes. *(View Audit Log is optional — without it, onboarding falls back to a channel message instead of a DM.)*
 
 > Slash commands can take a few minutes to appear after inviting (Discord propagates global commands gradually).
 
