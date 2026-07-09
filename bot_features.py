@@ -347,6 +347,19 @@ async def build_contributors(guild_id: int, client: discord.Client, category: st
     return "\n".join(lines)
 
 
+_WEEKDAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+
+def _cadence_desc(c) -> str:
+    """Human description of the rename cadence for /showconfig."""
+    wd = (c.get("quote_weekdays") or "").strip()
+    if wd:
+        days = [_WEEKDAY_NAMES[int(x)] for x in wd.split(",") if x.strip().isdigit() and 0 <= int(x) <= 6]
+        return ("Weekly on " + ", ".join(days)) if days else "Daily"
+    n = c.get("quote_interval_days") or 1
+    return "Daily" if n <= 1 else f"Every {n} days"
+
+
 async def build_config(guild_id: int, client: discord.Client) -> str:
     """
     Return a formatted config string with channel IDs resolved to #channel-name.
@@ -389,6 +402,7 @@ async def build_config(guild_id: int, client: discord.Client) -> str:
         f"Seasons Defined:     {season_count}",
         f"Timezone:            {c['timezone'] or 'US/Eastern'}",
         f"Quote Time:          {c['quote_time'] or '4:00'}",
+        f"Rename Cadence:      {_cadence_desc(c)}",
         f"Song Time:           {c['song_time'] or '10:00'}",
     ]
 
@@ -664,6 +678,42 @@ async def process_custom_daily(
 
 # ── Scheduling (per-guild times and timezones) ───────────────────────────────
 
+def _cadence_due(weekdays_csv, interval_days, last_date_str, now) -> bool:
+    """
+    Shared cadence gate (used by both the server rename and custom features). The
+    caller already matched the time-of-day and the once-per-day guard.
+      • Weekday mode — *weekdays_csv* is a comma list of weekday numbers
+        (0=Mon .. 6=Sun). Due when today's weekday is in the set (e.g. "6" = every
+        Sunday). Overrides the interval.
+      • Interval mode (default) — due when at least *interval_days* have passed
+        since *last_date_str* (1 = daily).
+    """
+    weekdays = (weekdays_csv or "").strip()
+    if weekdays:
+        allowed = {int(x) for x in weekdays.split(",") if x.strip().isdigit()}
+        return now.weekday() in allowed
+    interval = interval_days or 1
+    if interval <= 1:
+        return True
+    if not last_date_str:
+        return True
+    try:
+        last_date = datetime.strptime(last_date_str, "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return True
+    return (now.date() - last_date).days >= interval
+
+
+def _rename_due(cfg, now) -> bool:
+    """Server-rename cadence (weekday mode via quote_weekdays, else quote_interval_days)."""
+    return _cadence_due(cfg["quote_weekdays"], cfg["quote_interval_days"], cfg["last_quote_date"], now)
+
+
+def _feature_due(feat, now) -> bool:
+    """Custom-feature cadence (weekday mode via weekdays, else interval_days)."""
+    return _cadence_due(feat["weekdays"], feat["interval_days"], feat["last_run_date"], now)
+
+
 async def scheduler_loop(client: discord.Client) -> None:
     await client.wait_until_ready()
     log.info("⏰ Scheduler loop started (checking every 60 s)")
@@ -683,7 +733,8 @@ async def scheduler_loop(client: discord.Client) -> None:
 
                 if cfg["enable_daily_quote"]:
                     scheduled = _normalize_time(cfg["quote_time"] or "04:00")
-                    if cur_time == scheduled and cfg["last_quote_date"] != today:
+                    if (cur_time == scheduled and cfg["last_quote_date"] != today
+                            and _rename_due(cfg, now)):
                         set_config(guild.id, "last_quote_date", today)
                         await process_rename(guild.id, client)
 
@@ -695,7 +746,7 @@ async def scheduler_loop(client: discord.Client) -> None:
                         scheduled = _normalize_time(feat["post_time"])
                     except Exception:
                         continue
-                    if cur_time == scheduled and feat["last_run_date"] != today:
+                    if cur_time == scheduled and feat["last_run_date"] != today and _feature_due(feat, now):
                         set_custom_feature_run_date(feat["id"], today)
                         await process_custom_daily(guild.id, client, feat)
 
