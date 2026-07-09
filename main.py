@@ -16,6 +16,7 @@ from db_utils import (
     add_custom_feature, get_custom_features,
     remove_custom_feature, set_custom_feature_enabled, count_custom_features,
     get_custom_feature_by_command, set_custom_feature_access, update_custom_feature,
+    get_rename_post_by_message_id, record_forward_nomination,
 )
 from bot_features import (
     process_rename,
@@ -298,9 +299,13 @@ class QotdClient(discord.Client):
         log.info("➖ Removed from guild %s (%s) — data retained.", guild.id, guild.name)
 
     async def on_message(self, message: discord.Message) -> None:
-        # The bot uses slash commands now; nudge anyone still typing old ! commands.
         if message.author.bot or not message.guild:
             return
+
+        # Best-of nominations: react to forwards of rename cards in the source channel.
+        await self._handle_forward_nomination(message)
+
+        # The bot uses slash commands now; nudge anyone still typing old ! commands.
         first = message.content.strip().lower().split(" ", 1)[0]
         if first in _LEGACY_HINTS:
             try:
@@ -310,6 +315,29 @@ class QotdClient(discord.Client):
                 )
             except discord.HTTPException:
                 pass
+
+    async def _handle_forward_nomination(self, message: discord.Message) -> None:
+        """
+        In the configured best-of source channel, react to native forwards of
+        rename cards: ℹ️ when it's a valid, first-time nomination (counted), 🔁 when
+        that rename was already forwarded here. Non-forwards, and forwards of
+        anything that isn't a tracked rename, are ignored.
+        """
+        cfg = get_config(message.guild.id)
+        source_id = cfg["bracket_source_channel"]
+        if not source_id or message.channel.id != source_id:
+            return
+        ref = message.reference
+        if not ref or getattr(ref, "type", None) != discord.MessageReferenceType.forward or not ref.message_id:
+            return
+        post = get_rename_post_by_message_id(message.guild.id, ref.message_id)
+        if not post:
+            return  # forwarded something that isn't a tracked rename
+        is_new = record_forward_nomination(message.guild.id, message.channel.id, post["quote"], message.id)
+        try:
+            await message.add_reaction("ℹ️" if is_new else "🔁")
+        except discord.HTTPException:
+            pass
 
 
 client = QotdClient()
@@ -525,6 +553,30 @@ client.tree.add_command(config_group)
 bracket_group = app_commands.Group(name="bracket", description="Bracket championship", guild_only=True)
 
 
+_SOURCE_INSTRUCTIONS = (
+    "📌 **Best-of nominations**\n"
+    "**Forward** your favorite rename cards into this channel (use Discord's **Forward** button — "
+    "screenshots and re-uploads don't count) to nominate them for the bracket.\n"
+    "• I'll react ℹ️ when a forward is counted, or 🔁 if that rename was already forwarded here.\n"
+    "• **React** to the forwards you like — the most-reacted renames get seeded into the bracket."
+)
+
+
+async def _post_source_instructions(guild: discord.Guild, channel_id: int) -> None:
+    """Post the how-to-nominate message in a newly set best-of channel and pin it (best effort)."""
+    channel = guild.get_channel(channel_id)
+    if not channel:
+        return
+    try:
+        msg = await channel.send(_SOURCE_INSTRUCTIONS)
+    except discord.HTTPException:
+        return
+    try:
+        await msg.pin()
+    except discord.HTTPException:
+        pass  # missing Manage Messages — leave it unpinned
+
+
 class _BracketConfigView(discord.ui.View):
     """Persistent bracket setup: where matchups post + the optional best-of source channel."""
     def __init__(self, author_id: int, guild_id: int):
@@ -561,8 +613,12 @@ class _BracketConfigView(discord.ui.View):
     @discord.ui.select(cls=discord.ui.ChannelSelect, channel_types=[discord.ChannelType.text],
                        placeholder="Best-of source — members forward renames here (optional)", row=1)
     async def source_channel_select(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
-        set_config(self.guild_id, "bracket_source_channel", select.values[0].id)
+        new_id = select.values[0].id
+        old_id = get_config(self.guild_id)["bracket_source_channel"]
+        set_config(self.guild_id, "bracket_source_channel", new_id)
         await interaction.response.edit_message(content=self._render(), view=self)
+        if new_id != old_id:
+            await _post_source_instructions(interaction.guild, new_id)
 
     @discord.ui.button(label="No best-of", style=discord.ButtonStyle.secondary, emoji="🚫", row=2)
     async def clear_source_btn(self, interaction: discord.Interaction, button: discord.ui.Button):

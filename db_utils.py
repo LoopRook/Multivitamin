@@ -65,6 +65,17 @@ CREATE TABLE IF NOT EXISTS picks_history (
 )
 """
 
+_CREATE_FORWARD_NOMINATIONS = """
+CREATE TABLE IF NOT EXISTS forward_nominations (
+    guild_id    INTEGER NOT NULL,
+    channel_id  INTEGER NOT NULL,
+    quote       TEXT    NOT NULL,
+    message_id  INTEGER NOT NULL,   -- the first forward's message id (for reference)
+    created_at  TEXT    NOT NULL,
+    PRIMARY KEY (guild_id, channel_id, quote)
+)
+"""
+
 _CREATE_RENAME_POSTS = """
 CREATE TABLE IF NOT EXISTS rename_posts (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -207,6 +218,7 @@ def init_db() -> None:
         conn.execute(_CREATE_BOT_ADMINS)
         conn.execute(_CREATE_HISTORY)
         conn.execute(_CREATE_RENAME_POSTS)
+        conn.execute(_CREATE_FORWARD_NOMINATIONS)
         conn.execute(_CREATE_BRACKETS)
         conn.execute(_CREATE_BRACKET_ENTRIES)
         conn.execute(_CREATE_BRACKET_MATCHUPS)
@@ -426,6 +438,34 @@ def get_rename_posts_in_range(
             "WHERE guild_id=? AND posted_at >= ? AND posted_at <= ? ORDER BY posted_at",
             (guild_id, since, end_utc),
         ).fetchall()
+
+
+def get_rename_post_by_message_id(guild_id: int, message_id: int) -> sqlite3.Row | None:
+    """Look up a tracked rename post by the Discord message id (any tracked copy)."""
+    with db_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM rename_posts WHERE guild_id=? AND message_id=? LIMIT 1",
+            (guild_id, message_id),
+        ).fetchone()
+
+
+def record_forward_nomination(guild_id: int, channel_id: int, quote: str, message_id: int) -> bool:
+    """
+    Note that *quote* was forwarded into *channel_id*. Returns True if this is the
+    first forward of that rename into that channel, or False if it's a duplicate
+    (the (guild, channel, quote) primary key already exists).
+    """
+    with db_conn() as conn:
+        try:
+            conn.execute(
+                "INSERT INTO forward_nominations (guild_id, channel_id, quote, message_id, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (guild_id, channel_id, quote, message_id, datetime.now(timezone.utc).isoformat()),
+            )
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
 
 
 # Backwards-compatible alias — year brackets are just a range query.
