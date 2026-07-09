@@ -391,6 +391,31 @@ async def build_config(guild_id: int, client: discord.Client) -> str:
         f"Quote Time:          {c['quote_time'] or '4:00'}",
         f"Song Time:           {c['song_time'] or '10:00'}",
     ]
+
+    # Health check — surface setup gaps and missing permissions.
+    warnings = []
+    if not c["post_channel"]:
+        warnings.append("No Post Channel - renames aren't tracked for brackets (/config postchannel).")
+    if not c["bracket_channel"]:
+        warnings.append("No Bracket Channel - you can't run brackets (/bracket config).")
+    guild = client.get_guild(guild_id)
+    if guild is not None and guild.me is not None:
+        p = guild.me.guild_permissions
+        if not p.manage_guild:
+            warnings.append("Missing 'Manage Server' - daily and bracket renames will fail.")
+        missing = [n for n, ok in (
+            ("Attach Files", p.attach_files), ("Embed Links", p.embed_links),
+            ("Add Reactions", p.add_reactions), ("Read Message History", p.read_message_history),
+        ) if not ok]
+        if missing:
+            warnings.append("Missing perms: " + ", ".join(missing) + " - cards/polls may fail.")
+
+    lines.append("")
+    if warnings:
+        lines.append("Warnings:")
+        lines.extend(f"  ! {w}" for w in warnings)
+    else:
+        lines.append("Health:              OK - no configuration warnings.")
     return "\n".join(lines)
 
 

@@ -10,7 +10,7 @@ from discord import app_commands
 
 from db_utils import (
     init_db, set_config, get_config,
-    cancel_bracket, get_active_bracket,
+    cancel_bracket, get_active_bracket, get_bracket_history,
     add_bot_admin, remove_bot_admin, get_bot_admins, is_bot_admin,
     add_season, get_seasons, remove_season,
     add_custom_feature, get_custom_features,
@@ -97,7 +97,8 @@ _SETUP_TEXT = (
     "**Bracket:**\n"
     "   `/bracket config` — guided: bracket channel + optional best-of source channel\n"
     "   `/bracket start` — guided: pick scope · size · voting · pacing, then launch\n"
-    "   `/bracket test` · `/bracket forceadvance` · `/bracket status` · `/bracket cancel`\n\n"
+    "   `/bracket test` · `/bracket forceadvance` · `/bracket status` · `/bracket cancel`\n"
+    "   `/bracket history` — past champions (anyone can use)\n\n"
     "**Seasons:** `/season` — guided panel to add/list/remove named date windows\n\n"
     "**Admins** (Manage Server): `/admin add` · `/admin remove` · `/admin list`\n\n"
     "**Other:** `/showconfig` · `/preview` · `/contributors` · `/mystats`\n\n"
@@ -138,6 +139,7 @@ def build_help_embed(is_admin: bool = False, is_manager: bool = False) -> discor
         value=(
             "`/rename` — trigger a rename now\n"
             "`/mystats` — your submission counts & last picks\n"
+            "`/bracket history` — past bracket champions (hall of champions)\n"
             "`/help` — show this list\n"
             "*Plus any per-feature commands this server has made (e.g. `/meme`, `/song`).*"
         ),
@@ -201,7 +203,7 @@ def build_help_embed(is_admin: bool = False, is_manager: bool = False) -> discor
     embed.add_field(
         name="ℹ️ Info & Preview (Admin)",
         value=(
-            "`/showconfig` — current settings\n"
+            "`/showconfig` — current settings + health warnings\n"
             "`/contributors <quote|icon>` — submission leaderboard\n"
             "`/preview <rename|command>` — dry-run a rename or a feature, here only\n"
             "`/setup` — quick setup guide"
@@ -769,6 +771,26 @@ async def bracket_forceadvance(interaction: discord.Interaction):
 @admin_only()
 async def bracket_status(interaction: discord.Interaction):
     await interaction.response.send_message(get_bracket_status_text(interaction.guild_id), ephemeral=True)
+
+
+@bracket_group.command(name="history", description="Past bracket champions for this server")
+async def bracket_history(interaction: discord.Interaction):
+    rows = get_bracket_history(interaction.guild_id)
+    if not rows:
+        await interaction.response.send_message(
+            "🏆 No completed brackets yet — run one with `/bracket start`.", ephemeral=True)
+        return
+    lines = ["🏆 **Hall of Champions**"]
+    for r in rows:
+        label = r["label"] or str(r["year"])
+        date  = (r["created_at"] or "")[:10]
+        champ = r["champion_quote"]
+        if champ:
+            who = f" — *{r['champion_user']}*" if r["champion_user"] else ""
+            lines.append(f'• **{label}** ({date}): "{champ}"{who}')
+        else:
+            lines.append(f"• **{label}** ({date}): *champion not recorded*")
+    await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
 
 @bracket_group.command(name="cancel", description="Delete the active bracket")
