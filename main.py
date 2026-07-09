@@ -47,6 +47,8 @@ logging.getLogger("discord.client").setLevel(logging.ERROR)
 
 log = logging.getLogger(__name__)
 
+__version__ = "1.0.0"
+
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 # ── Shared config tables ──────────────────────────────────────────────────────
@@ -75,35 +77,21 @@ def _valid_hhmm(t: str) -> bool:
     except Exception:
         return False
 
-_SETUP_TEXT = (
-    "**Bot Setup Guide** — all commands are slash (`/`) commands.\n\n"
-    "**Channels** (each takes an optional channel; defaults to where you run it):\n"
-    "   `/config postchannel` — official rename cards (tracked for brackets)\n"
-    "   `/config quotechannel` · `/config iconchannel`\n"
-    "   *(The bracket channel + best-of source live in `/bracket config`.)*\n\n"
-    "**Features:** `/config feature <quote|cooldown> <on/off>`\n"
-    "   *(Bracket tracking is always on once a Post Channel is set.)*\n\n"
-    "**Scheduling:**\n"
-    "   `/config timezone <tz>` — e.g. `US/Eastern`, `Europe/London`\n"
-    "   `/config scheduletime quote <H:MM>` — the daily rename time\n\n"
-    "**Daily features** (make your own 'X of the day' — meme, critter, song…):\n"
-    "   Each feature has a **command** (e.g. `meme`) → a per-server `/meme` that posts it.\n"
-    "   `/daily setup` — guided step-by-step (easiest)\n"
-    "   `/daily add <name> <command> <type> <source> <destination> <time> …` — one-shot\n"
-    "   `/daily list` · `/daily toggle <command>` · `/daily remove <command>`\n"
-    "   `/daily edit <command> [destination] [time] …` — change one field without re-adding\n"
-    "   `/daily access <command> <admin|everyone|role> [role]` — who can run it\n"
-    "   `/preview <command>` — dry-run it here (like `/preview rename`)\n\n"
-    "**Bracket:**\n"
-    "   `/bracket config` — guided: bracket channel + optional best-of source channel\n"
-    "   `/bracket start` — guided: pick scope · size · voting · pacing, then launch\n"
-    "   `/bracket test` · `/bracket forceadvance` · `/bracket status` · `/bracket cancel`\n"
-    "   `/bracket history` — past champions (anyone can use)\n\n"
-    "**Seasons:** `/season` — guided panel to add/list/remove named date windows\n\n"
-    "**Admins** (Manage Server): `/admin add` · `/admin remove` · `/admin list`\n\n"
-    "**Other:** `/showconfig` · `/preview` · `/contributors` · `/mystats`\n\n"
-    "**See every command:** `/help`"
+_SETUP_INTRO = (
+    "🛠️ **Quick setup** — pick your core channels and timezone below (each saves as you go).\n"
+    "Then set up the rest:\n"
+    "• `/bracket config` — bracket channel + optional best-of channel\n"
+    "• `/daily setup` — your own 'X of the day' posts (meme, song, …)\n"
+    "• `/config scheduletime quote <H:MM>` — the daily rename time\n"
+    "• `/help` — every command"
 )
+
+# Curated timezones for the /setup dropdown; anything else via `/config timezone`.
+_COMMON_TIMEZONES = [
+    "US/Eastern", "US/Central", "US/Mountain", "US/Pacific", "America/Sao_Paulo",
+    "Europe/London", "Europe/Paris", "Europe/Berlin", "Europe/Moscow", "Asia/Kolkata",
+    "Asia/Shanghai", "Asia/Tokyo", "Australia/Sydney", "Pacific/Auckland", "UTC",
+]
 
 _WELCOME_TEXT = (
     "👋 **Thanks for adding me!**\n"
@@ -1294,11 +1282,77 @@ async def help_cmd(interaction: discord.Interaction):
     await interaction.response.send_message(embed=build_help_embed(is_admin, is_manager), ephemeral=True)
 
 
-@client.tree.command(name="setup", description="Show the setup guide")
+class _CoreSetupView(discord.ui.View):
+    """Guided first-run setup: the core channels + timezone, saved as you pick."""
+    def __init__(self, author_id: int, guild_id: int):
+        super().__init__(timeout=300)
+        self.author_id = author_id
+        self.guild_id  = guild_id
+        cur_tz = get_config(guild_id)["timezone"] or "US/Eastern"
+        self.tz_select.options = [
+            discord.SelectOption(label=z, value=z, default=(z == cur_tz)) for z in _COMMON_TIMEZONES
+        ]
+
+    def _render(self) -> str:
+        cfg = get_config(self.guild_id)
+        def m(cid): return f"<#{cid}>" if cid else "*not set*"
+        return (
+            f"{_SETUP_INTRO}\n\n"
+            f"• **Quote channel:** {m(cfg['quote_channel'])}\n"
+            f"• **Icon channel:** {m(cfg['icon_channel'])}\n"
+            f"• **Post channel:** {m(cfg['post_channel'])}  *(turns on bracket tracking)*\n"
+            f"• **Timezone:** {cfg['timezone'] or 'US/Eastern'}"
+        )
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                "This setup panel isn't yours — run `/setup` yourself.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.select(cls=discord.ui.ChannelSelect, channel_types=[discord.ChannelType.text],
+                       placeholder="Quote channel — where members post quotes", row=0)
+    async def quote_select(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
+        set_config(self.guild_id, "quote_channel", select.values[0].id)
+        await interaction.response.edit_message(content=self._render(), view=self)
+
+    @discord.ui.select(cls=discord.ui.ChannelSelect, channel_types=[discord.ChannelType.text],
+                       placeholder="Icon channel — where members post icon images", row=1)
+    async def icon_select(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
+        set_config(self.guild_id, "icon_channel", select.values[0].id)
+        await interaction.response.edit_message(content=self._render(), view=self)
+
+    @discord.ui.select(cls=discord.ui.ChannelSelect, channel_types=[discord.ChannelType.text],
+                       placeholder="Post channel — where daily rename cards post (tracked for brackets)", row=2)
+    async def post_select(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
+        set_config(self.guild_id, "post_channel", select.values[0].id)
+        await interaction.response.edit_message(content=self._render(), view=self)
+
+    @discord.ui.select(placeholder="Timezone",
+                       options=[discord.SelectOption(label="US/Eastern", value="US/Eastern")], row=3)
+    async def tz_select(self, interaction: discord.Interaction, select: discord.ui.Select):
+        set_config(self.guild_id, "timezone", select.values[0])
+        await interaction.response.edit_message(content=self._render(), view=self)
+
+    @discord.ui.button(label="Done", style=discord.ButtonStyle.success, emoji="✅", row=4)
+    async def done_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for c in self.children:
+            c.disabled = True
+        await interaction.response.edit_message(
+            content=(self._render() + "\n\n✅ **Saved.** Next: `/bracket config` · `/daily setup` · "
+                     "`/config scheduletime quote <H:MM>`. Run `/showconfig` to check for warnings, "
+                     "or `/help` for everything."),
+            view=self)
+        self.stop()
+
+
+@client.tree.command(name="setup", description="Guided setup — core channels & timezone")
 @app_commands.guild_only()
 @admin_only()
 async def setup_cmd(interaction: discord.Interaction):
-    await interaction.response.send_message(_SETUP_TEXT, ephemeral=True)
+    view = _CoreSetupView(interaction.user.id, interaction.guild_id)
+    await interaction.response.send_message(view._render(), view=view, ephemeral=True)
 
 
 @client.tree.command(name="showconfig", description="Show this server's current settings")
