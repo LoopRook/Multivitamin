@@ -35,8 +35,8 @@ def test_all_views_instantiate(gid):
     feat = db_utils.get_custom_feature_by_command(gid, "critter")
     main._ScheduleView(1, gid, feature=feat)
     main._ResetConfirmView(1, gid)
-    main._CreateChannelsModal(gid)          # 3 channel-name inputs
-    main._BracketChannelsModal(gid)         # bracket + best-of name inputs
+    main._CreateChannelsModal(gid)          # quote/icon/post/best-of name inputs
+    main._BracketChannelModal(gid)          # bracket channel name input
     assert "schedule" in {c.name for c in main.daily_group.walk_commands()}
     assert "reset" in {c.name for c in main.admin_group.walk_commands()}
 
