@@ -14,6 +14,7 @@ _VALID_CONFIG_FIELDS = frozenset({
     "timezone", "quote_time", "song_time", "last_quote_date", "last_song_date",
     "bracket_channel", "bracket_size", "bracket_voting_hours", "voting_enabled_at",
     "bracket_pacing", "bracket_source_channel", "pre_bracket_name",
+    "quote_interval_days", "quote_weekdays",
 })
 
 _CREATE_CONFIG = """
@@ -39,7 +40,9 @@ CREATE TABLE IF NOT EXISTS server_config (
     voting_enabled_at     TEXT,
     bracket_pacing        TEXT    DEFAULT 'round',
     bracket_source_channel INTEGER,
-    pre_bracket_name      TEXT
+    pre_bracket_name      TEXT,
+    quote_interval_days   INTEGER DEFAULT 1,  -- rename cadence: every N days (interval mode)
+    quote_weekdays        TEXT                -- comma list of weekday nums 0=Mon..6=Sun (weekday mode; overrides interval)
 )
 """
 
@@ -135,7 +138,9 @@ CREATE TABLE IF NOT EXISTS custom_features (
     created_at     TEXT    NOT NULL,
     command        TEXT,               -- optional per-guild slash-command slug (null = none)
     run_access     TEXT DEFAULT 'admin',  -- who may run /<command>: 'admin' | 'everyone' | 'roles'
-    run_roles      TEXT                -- comma-separated role IDs (when run_access='roles')
+    run_roles      TEXT,               -- comma-separated role IDs (when run_access='roles')
+    interval_days  INTEGER DEFAULT 1,  -- cadence: every N days (interval mode)
+    weekdays       TEXT                -- comma list of weekday nums 0=Mon..6=Sun (weekday mode; overrides interval)
 )
 """
 
@@ -187,6 +192,8 @@ _CONFIG_MIGRATIONS = [
     ("song_migrated",        "INTEGER DEFAULT 0"),
     ("bracket_source_channel", "INTEGER"),
     ("pre_bracket_name",       "TEXT"),
+    ("quote_interval_days",    "INTEGER DEFAULT 1"),
+    ("quote_weekdays",         "TEXT"),
 ]
 
 _RENAME_POSTS_MIGRATIONS = [
@@ -204,9 +211,11 @@ _BRACKET_MIGRATIONS = [
 
 # custom_features already ships in live DBs, so new columns must be ALTER-added.
 _CUSTOM_FEATURES_MIGRATIONS = [
-    ("command",    "TEXT"),
-    ("run_access", "TEXT DEFAULT 'admin'"),
-    ("run_roles",  "TEXT"),
+    ("command",       "TEXT"),
+    ("run_access",    "TEXT DEFAULT 'admin'"),
+    ("run_roles",     "TEXT"),
+    ("interval_days", "INTEGER DEFAULT 1"),
+    ("weekdays",      "TEXT"),
 ]
 
 
@@ -779,6 +788,21 @@ def set_custom_feature_enabled(guild_id: int, name: str, enabled: bool) -> bool:
         )
         conn.commit()
         return cur.rowcount > 0
+
+
+def get_custom_feature_by_id(feature_id: int) -> sqlite3.Row | None:
+    with db_conn() as conn:
+        return conn.execute("SELECT * FROM custom_features WHERE id=?", (feature_id,)).fetchone()
+
+
+def set_custom_feature_schedule(feature_id: int, interval_days: int, weekdays: str | None) -> None:
+    """Set a feature's cadence: interval_days (every N days) and/or weekdays (overrides). Handles NULL weekdays."""
+    with db_conn() as conn:
+        conn.execute(
+            "UPDATE custom_features SET interval_days=?, weekdays=? WHERE id=?",
+            (interval_days, weekdays, feature_id),
+        )
+        conn.commit()
 
 
 def set_custom_feature_run_date(feature_id: int, date: str) -> None:

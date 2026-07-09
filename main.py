@@ -17,6 +17,7 @@ from db_utils import (
     remove_custom_feature, set_custom_feature_enabled, count_custom_features,
     get_custom_feature_by_command, set_custom_feature_access, update_custom_feature,
     get_rename_post_by_message_id, record_forward_nomination,
+    get_custom_feature_by_id, set_custom_feature_schedule,
 )
 from bot_features import (
     process_rename,
@@ -82,7 +83,7 @@ _SETUP_INTRO = (
     "Then set up the rest:\n"
     "• `/bracket config` — bracket channel + optional best-of channel\n"
     "• `/daily setup` — your own 'X of the day' posts (meme, song, …)\n"
-    "• `/config scheduletime quote <H:MM>` — the daily rename time\n"
+    "• `/config schedule` — rename time & how often (daily, every N days, or weekdays)\n"
     "• `/help` — every command"
 )
 
@@ -152,7 +153,7 @@ def build_help_embed(is_admin: bool = False, is_manager: bool = False) -> discor
             "`/config feature <quote|cooldown> <on/off>`\n"
             "*(Bracket tracking is always on once a Post Channel is set.)*\n"
             "`/config timezone <tz>` — IANA name, e.g. `US/Eastern`\n"
-            "`/config scheduletime quote <H:MM>` — the daily rename time"
+            "`/config schedule` — **guided**: rename time & frequency (daily, every N days, or weekdays)"
         ),
         inline=False,
     )
@@ -165,6 +166,7 @@ def build_help_embed(is_admin: bool = False, is_manager: bool = False) -> discor
             "types: `media` (memes/gifs/images), `link`, `music`, `text`\n"
             "`/daily list` · `/daily toggle <command> <on/off>` · `/daily remove <command>`\n"
             "`/daily edit <command> [name] [type] [source] [destination] [time] [emoji]`\n"
+            "`/daily schedule <command>` — **guided**: cadence (every N days or weekdays) & time\n"
             "`/daily access <command> <admin|everyone|role> [role]` — who can run it\n"
             "`/preview <command>` — dry-run it (like `/preview rename`)"
         ),
@@ -533,6 +535,156 @@ async def config_scheduletime(interaction: discord.Interaction,
     tz_name = cfg["timezone"] or "US/Eastern"
     await interaction.response.send_message(
         f"✅ Quote (rename) time set to `{time}` ({tz_name}).", ephemeral=True)
+
+
+# ── /config schedule — guided rename time + frequency ─────────────────────────
+
+_INTERVAL_CHOICES = [(1, "Daily"), (2, "Every 2 days"), (3, "Every 3 days"),
+                     (5, "Every 5 days"), (7, "Every 7 days"),
+                     (14, "Every 14 days"), (30, "Every 30 days")]
+_WEEKDAY_CHOICES = [("0", "Monday"), ("1", "Tuesday"), ("2", "Wednesday"), ("3", "Thursday"),
+                    ("4", "Friday"), ("5", "Saturday"), ("6", "Sunday")]
+_WEEKDAY_ABBR = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+
+class _ScheduleTimeModal(discord.ui.Modal, title="Set the rename time"):
+    time_in = discord.ui.TextInput(label="Time (24-hour H:MM, server timezone)",
+                                   placeholder="8:00", max_length=5)
+
+    def __init__(self, view: "_ScheduleView"):
+        super().__init__()
+        self._view = view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not _valid_hhmm(self.time_in.value):
+            await interaction.response.send_message(
+                "⚠️ Time must be `H:MM` (24-hour), e.g. `8:00`.", ephemeral=True)
+            return
+        self._view._save_time(self.time_in.value.strip())
+        await interaction.response.edit_message(content=self._view._render(), view=self._view)
+
+
+class _ScheduleView(discord.ui.View):
+    """
+    Guided schedule: cadence (every N days OR specific weekdays) + time. Targets
+    the server rename by default, or a custom feature when *feature* is given.
+    """
+    def __init__(self, author_id: int, guild_id: int, feature=None):
+        super().__init__(timeout=300)
+        self.author_id   = author_id
+        self.guild_id    = guild_id
+        self.feature_id  = feature["id"] if feature else None
+        self.target_name = feature["name"] if feature else "the server rename"
+        if feature:
+            wd = (feature["weekdays"] or "").strip()
+            self.interval = feature["interval_days"] or 1
+        else:
+            cfg = get_config(guild_id)
+            wd = (cfg["quote_weekdays"] or "").strip()
+            self.interval = cfg["quote_interval_days"] or 1
+        self.mode     = "weekly" if wd else "interval"
+        self.weekdays = {int(x) for x in wd.split(",") if x.strip().isdigit()} if wd else set()
+
+        self.mode_select.options = [
+            discord.SelectOption(label="Every N days", value="interval", default=(self.mode == "interval")),
+            discord.SelectOption(label="Specific weekdays", value="weekly", default=(self.mode == "weekly")),
+        ]
+        self.interval_select.options = [
+            discord.SelectOption(label=lbl, value=str(n), default=(n == self.interval))
+            for n, lbl in _INTERVAL_CHOICES
+        ]
+        self.weekday_select.options = [
+            discord.SelectOption(label=lbl, value=val, default=(int(val) in self.weekdays))
+            for val, lbl in _WEEKDAY_CHOICES
+        ]
+
+    def _current_time(self) -> str:
+        if self.feature_id:
+            f = get_custom_feature_by_id(self.feature_id)
+            return f["post_time"] if f else "?"
+        return get_config(self.guild_id)["quote_time"] or "4:00"
+
+    def _save_time(self, t: str) -> None:
+        if self.feature_id:
+            update_custom_feature(self.feature_id, post_time=t)
+        else:
+            set_config(self.guild_id, "quote_time", t)
+
+    def _save_cadence(self) -> None:
+        wd = ",".join(str(d) for d in sorted(self.weekdays)) if self.mode == "weekly" else None
+        if self.feature_id:
+            set_custom_feature_schedule(self.feature_id, self.interval, wd)
+        elif self.mode == "weekly":
+            set_config(self.guild_id, "quote_weekdays", wd)
+        else:
+            set_config(self.guild_id, "quote_weekdays", None)
+            set_config(self.guild_id, "quote_interval_days", self.interval)
+
+    def _render(self) -> str:
+        tz = get_config(self.guild_id)["timezone"] or "US/Eastern"
+        if self.mode == "weekly":
+            days = ", ".join(_WEEKDAY_ABBR[d] for d in sorted(self.weekdays)) if self.weekdays \
+                else "*(pick weekday(s) below)*"
+            cad = f"Weekly on {days}"
+        else:
+            cad = "Daily" if self.interval <= 1 else f"Every {self.interval} days"
+        return (
+            f"🗓️ **Schedule — {self.target_name}**\n"
+            f"• Frequency: **{cad}**\n"
+            f"• Time: **{self._current_time()}** ({tz})\n\n"
+            "Pick a **mode**, set the matching option below, optionally set the time, then **Save**. "
+            "*(Weekday mode is how you get 'every Sunday'.)*"
+        )
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                "This panel isn't yours — run `/config schedule` yourself.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.select(placeholder="Mode — every N days, or specific weekdays",
+                       options=[discord.SelectOption(label="Every N days", value="interval")], row=0)
+    async def mode_select(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.mode = select.values[0]
+        await interaction.response.edit_message(content=self._render(), view=self)
+
+    @discord.ui.select(placeholder="Every N days (interval mode)",
+                       options=[discord.SelectOption(label="Daily", value="1")], row=1)
+    async def interval_select(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.interval = int(select.values[0])
+        self.mode = "interval"
+        await interaction.response.edit_message(content=self._render(), view=self)
+
+    @discord.ui.select(placeholder="Weekdays (weekday mode)", min_values=1, max_values=7,
+                       options=[discord.SelectOption(label="Sunday", value="6")], row=2)
+    async def weekday_select(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.weekdays = {int(v) for v in select.values}
+        self.mode = "weekly"
+        await interaction.response.edit_message(content=self._render(), view=self)
+
+    @discord.ui.button(label="Set time", emoji="🕐", style=discord.ButtonStyle.secondary, row=3)
+    async def time_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(_ScheduleTimeModal(self))
+
+    @discord.ui.button(label="Save", emoji="✅", style=discord.ButtonStyle.success, row=3)
+    async def save_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.mode == "weekly" and not self.weekdays:
+            await interaction.response.send_message(
+                "⚠️ Pick at least one weekday, or switch the mode to 'Every N days'.", ephemeral=True)
+            return
+        self._save_cadence()
+        for c in self.children:
+            c.disabled = True
+        await interaction.response.edit_message(content=self._render() + "\n\n✅ **Saved.**", view=self)
+        self.stop()
+
+
+@config_group.command(name="schedule", description="Set how often & when the server renames (every N days or weekdays)")
+@admin_only()
+async def config_schedule(interaction: discord.Interaction):
+    view = _ScheduleView(interaction.user.id, interaction.guild_id)
+    await interaction.response.send_message(view._render(), view=view, ephemeral=True)
 
 
 client.tree.add_command(config_group)
@@ -908,6 +1060,16 @@ daily_group = app_commands.Group(name="daily", description="Custom 'X of the day
 _ACCESS_LABELS = {"admin": "admin", "everyone": "all", "roles": "roles"}
 
 
+def _feature_cadence(f) -> str:
+    """Compact cadence label for /daily list."""
+    wd = (f["weekdays"] or "").strip()
+    if wd:
+        days = [_WEEKDAY_ABBR[int(x)] for x in wd.split(",") if x.strip().isdigit() and 0 <= int(x) <= 6]
+        return ", ".join(days) if days else "daily"
+    n = f["interval_days"] or 1
+    return "daily" if n <= 1 else f"every {n}d"
+
+
 def _feature_summary(f) -> str:
     src  = f"<#{f['source_channel']}>"
     dst  = f"<#{f['post_channel']}>"
@@ -916,7 +1078,7 @@ def _feature_summary(f) -> str:
     cmd  = f"`/{f['command']}`" if f["command"] else "`(no command)`"
     acc  = _ACCESS_LABELS.get(f['run_access'] or 'admin', 'admin')
     return (f"{flag} {cmd} — {emo}**{f['name']}** · `{f['content_type']}` · "
-            f"{src} → {dst} · {f['post_time']} · run: {acc}")
+            f"{src} → {dst} · {f['post_time']} ({_feature_cadence(f)}) · run: {acc}")
 
 
 def _resolve_command_slug(guild_id: int, raw: Optional[str], current_name: Optional[str] = None,
@@ -1156,6 +1318,20 @@ async def daily_edit(interaction: discord.Interaction, command: str,
         f"✅ Updated `/{updated['command']}`.\n{_feature_summary(updated)}", ephemeral=True)
 
 
+@daily_group.command(name="schedule", description="Set a feature's cadence (every N days or weekdays) & time")
+@app_commands.describe(command="The feature's command slug")
+@app_commands.autocomplete(command=_feature_slug_autocomplete)
+@admin_only()
+async def daily_schedule(interaction: discord.Interaction, command: str):
+    feat = get_custom_feature_by_command(interaction.guild_id, command.strip().lower())
+    if not feat:
+        await interaction.response.send_message(
+            f"⚠️ No feature with command `/{command}`. See `/daily list`.", ephemeral=True)
+        return
+    view = _ScheduleView(interaction.user.id, interaction.guild_id, feature=feat)
+    await interaction.response.send_message(view._render(), view=view, ephemeral=True)
+
+
 @daily_group.command(name="list", description="List this server's custom daily features")
 @admin_only()
 async def daily_list(interaction: discord.Interaction):
@@ -1341,7 +1517,7 @@ class _CoreSetupView(discord.ui.View):
             c.disabled = True
         await interaction.response.edit_message(
             content=(self._render() + "\n\n✅ **Saved.** Next: `/bracket config` · `/daily setup` · "
-                     "`/config scheduletime quote <H:MM>`. Run `/showconfig` to check for warnings, "
+                     "`/config schedule` (time & frequency). Run `/showconfig` to check for warnings, "
                      "or `/help` for everything."),
             view=self)
         self.stop()

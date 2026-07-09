@@ -25,6 +25,12 @@ def test_all_views_instantiate(gid):
     main._BracketStartView(1, gid)
     main._SeasonView(1, gid)
     main._CoreSetupView(1, gid)
+    main._ScheduleView(1, gid)
+    # feature-targeted schedule view
+    db_utils.add_custom_feature(gid, "Critter", None, "media", 1, 2, "9:00", command="critter")
+    feat = db_utils.get_custom_feature_by_command(gid, "critter")
+    main._ScheduleView(1, gid, feature=feat)
+    assert "schedule" in {c.name for c in main.daily_group.walk_commands()}
 
 
 def test_help_embed_within_field_limits():

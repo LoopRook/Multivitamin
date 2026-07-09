@@ -37,6 +37,19 @@ def test_rename_post_lookup(gid):
     assert db_utils.get_rename_post_by_message_id(gid, 111) is None
 
 
+def test_custom_feature_schedule(gid):
+    assert db_utils.add_custom_feature(gid, "Meme of the Day", None, "media", 1, 2, "12:00", command="meme")
+    feat = db_utils.get_custom_feature_by_command(gid, "meme")
+    assert feat["interval_days"] == 1 and not feat["weekdays"]  # daily by default
+
+    db_utils.set_custom_feature_schedule(feat["id"], 1, "6")  # every Sunday
+    assert db_utils.get_custom_feature_by_id(feat["id"])["weekdays"] == "6"
+
+    db_utils.set_custom_feature_schedule(feat["id"], 3, None)  # every 3 days (clears weekdays)
+    f3 = db_utils.get_custom_feature_by_id(feat["id"])
+    assert f3["weekdays"] is None and f3["interval_days"] == 3
+
+
 def test_bracket_champion_history_excludes_tests(gid):
     bid = db_utils.create_bracket(gid, 2026, 8, 24, label="2026", pacing="round")
     db_utils.complete_bracket(bid)
