@@ -135,7 +135,7 @@ async def _get_total_reactions(client: discord.Client, channel_id: int, message_
         if not channel:
             return 0
         msg = await channel.fetch_message(message_id)
-        return sum(r.count for r in msg.reactions)
+        return sum(r.count - (1 if r.me else 0) for r in msg.reactions)
     except Exception as e:
         log.warning("Could not fetch reactions (msg %s): %s", message_id, e)
         return 0
@@ -178,7 +178,9 @@ async def _scored_from_forwards(
             if original is None:
                 continue
             quote, user = original
-            count = sum(r.count for r in msg.reactions)
+            # Count human reactions only — the bot's own ℹ️/🔁 confirmation
+            # reactions must not add to a forward's score.
+            count = sum(r.count - (1 if r.me else 0) for r in msg.reactions)
             scored.append((count, quote, user))
     except discord.HTTPException as e:
         log.warning("Could not scan bracket source channel %s: %s", source_channel_id, e)
