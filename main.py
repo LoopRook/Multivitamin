@@ -89,10 +89,8 @@ _WELCOME_TEXT = (
     "👋 **Thanks for adding me!**\n"
     "I rename your server daily from community-submitted quotes, run reaction-seeded bracket "
     "championships, and can post any 'X of the day' you like — meme, critter, song, and more.\n\n"
-    "**Get started:** run `/setup` for the full guide, or `/help` to see every command.\n"
-    "Most servers begin with `/config postchannel` and `/config quotechannel`, then "
-    "`/bracket config` to set the bracket channel and (optionally) a best-of channel members "
-    "forward their favorite renames into.\n"
+    "**Get started:** run **`/setup`** — a quick step-by-step that sets your channels, timezone, "
+    "and rename schedule. Then `/help` shows every command.\n"
     "*(Slash commands can take a few minutes to appear right after inviting.)*"
 )
 
@@ -134,7 +132,7 @@ def build_help_embed(is_admin: bool = False, is_manager: bool = False) -> discor
             "`/config quotechannel` — quote submissions\n"
             "`/config iconchannel` — icon images\n"
             "`/config postchannel` — official rename cards (tracked for brackets)\n"
-            "*(Bracket channel + best-of source are set in `/bracket config`.)*"
+            "*(Best-of channel is set in `/setup`; the bracket channel is picked in `/bracket start`.)*"
         ),
         inline=False,
     )
@@ -166,8 +164,7 @@ def build_help_embed(is_admin: bool = False, is_manager: bool = False) -> discor
     embed.add_field(
         name="🏆 Bracket (Admin)",
         value=(
-            "`/bracket config` — **guided**: bracket channel + optional best-of source\n"
-            "`/bracket start` — **guided**: pick scope · size · voting · pacing → launch\n"
+            "`/bracket start` — **guided**: pick where it posts · scope · size · voting · pacing · source → launch\n"
             "`/bracket test` — test bracket with random scores\n"
             "`/bracket forceadvance` · `/bracket status` · `/bracket cancel`"
         ),
@@ -776,56 +773,6 @@ class _BracketChannelModal(discord.ui.Modal, title="Create bracket channel"):
         await _channels_reply(interaction, made, reused, None, guild)
 
 
-class _BracketConfigView(discord.ui.View):
-    """Persistent bracket setup: the channel where matchups & results post.
-
-    (The best-of source channel is set in /setup and chosen per-bracket in /bracket start.)
-    """
-    def __init__(self, author_id: int, guild_id: int):
-        super().__init__(timeout=300)
-        self.author_id = author_id
-        self.guild_id  = guild_id
-
-    def _render(self) -> str:
-        cfg = get_config(self.guild_id)
-        bc  = f"<#{cfg['bracket_channel']}>" if cfg["bracket_channel"] else "*not set*"
-        src = f"<#{cfg['bracket_source_channel']}>" if cfg["bracket_source_channel"] else "*not set*"
-        return (
-            "🏆 **Bracket channel**\n"
-            f"• Matchups & results post to: {bc}\n\n"
-            "Pick it below, or **🏗️ Create channel** to make one. Hit **✅ Done** when finished.\n"
-            f"*(Best-of source: {src} — set it in `/setup`; pick best-of vs all-renames per bracket in `/bracket start`.)*"
-        )
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message(
-                "This panel isn't yours — run `/bracket config` yourself.", ephemeral=True)
-            return False
-        return True
-
-    @discord.ui.select(cls=discord.ui.ChannelSelect, channel_types=[discord.ChannelType.text],
-                       placeholder="Bracket channel — where matchups & results post", row=0)
-    async def bracket_channel_select(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
-        set_config(self.guild_id, "bracket_channel", select.values[0].id)
-        await interaction.response.edit_message(content=self._render(), view=self)
-
-    @discord.ui.button(label="Create channel", style=discord.ButtonStyle.primary, emoji="🏗️", row=1)
-    async def create_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(_BracketChannelModal(self.guild_id))
-
-    @discord.ui.button(label="Done", style=discord.ButtonStyle.success, emoji="✅", row=1)
-    async def done_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        for c in self.children:
-            c.disabled = True
-        cfg = get_config(self.guild_id)
-        bc  = f"<#{cfg['bracket_channel']}>" if cfg["bracket_channel"] else "*not set*"
-        await interaction.response.edit_message(
-            content=(f"🏁 **Bracket channel saved** → {bc}\n\nStart a bracket any time with `/bracket start`."),
-            view=self)
-        self.stop()
-
-
 _VOTING_CHOICES = [(6, "6 hours"), (12, "12 hours"), (24, "24 hours (1 day)"),
                    (48, "48 hours (2 days)"), (72, "72 hours (3 days)"), (168, "168 hours (1 week)")]
 
@@ -838,7 +785,7 @@ def _fmt_duration(hours: int) -> str:
 
 
 class _BracketStartView(discord.ui.View):
-    """Per-run bracket launcher — scope, size, voting window & pacing, pre-filled to last-used."""
+    """Per-run bracket launcher — where it posts, scope, size, voting, pacing & source."""
     def __init__(self, author_id: int, guild_id: int):
         super().__init__(timeout=300)
         self.author_id = author_id
@@ -848,40 +795,18 @@ class _BracketStartView(discord.ui.View):
         self.size   = int(cfg["bracket_size"] or 8)
         self.voting = int(cfg["bracket_voting_hours"] or 24)
         self.pacing = cfg["bracket_pacing"] or "round"
-
-        scope_opts = [discord.SelectOption(
-            label=f"This year ({datetime.now().year})", value="year", default=True)]
-        for s in get_seasons(guild_id)[:24]:
-            scope_opts.append(discord.SelectOption(label=f'Season: {s["name"]}'[:100],
-                                                   value=f'season:{s["name"]}'[:100]))
-        self.scope_select.options = scope_opts
-
-        self.size_select.options = [
-            discord.SelectOption(label=f"{n} names", value=str(n), default=(n == self.size))
-            for n in (4, 8, 16, 32)
-        ]
-        self.voting_select.options = [
-            discord.SelectOption(label=lbl, value=str(v), default=(v == self.voting))
-            for v, lbl in _VOTING_CHOICES
-        ]
-        self.pacing_select.options = [
-            discord.SelectOption(label="Round — all matchups at once", value="round",
-                                 default=(self.pacing == "round")),
-            discord.SelectOption(label="Daily — one matchup per day", value="daily",
-                                 default=(self.pacing == "daily")),
-        ]
-        # Source for this bracket: the configured best-of channel, or the firehose
-        # (all tracked renames). Forced to firehose when no best-of is set.
         self._has_bestof  = bool(cfg["bracket_source_channel"])
         self.use_firehose = not self._has_bestof
+        self._refresh_options()
+        self.pacing_btn.label    = f"Pacing: {self.pacing}"
         self.source_btn.label    = self._source_label()
         self.source_btn.disabled = not self._has_bestof
 
     def _source_label(self) -> str:
-        return "Source: all renames" if self.use_firehose else "Source: best-of channel"
+        return "Source: all renames" if self.use_firehose else "Source: best-of"
 
     def _refresh_options(self) -> None:
-        """Rebuild every dropdown's options with the current selection as default (so picks stick on re-render)."""
+        """Rebuild the dropdowns' options with the current selection as default (so picks stick on re-render)."""
         scope_opts = [discord.SelectOption(label=f"This year ({datetime.now().year})", value="year",
                                            default=(self.scope == "year"))]
         for s in get_seasons(self.guild_id)[:24]:
@@ -893,19 +818,18 @@ class _BracketStartView(discord.ui.View):
                                                          default=(n == self.size)) for n in (4, 8, 16, 32)]
         self.voting_select.options = [discord.SelectOption(label=lbl, value=str(v), default=(v == self.voting))
                                       for v, lbl in _VOTING_CHOICES]
-        self.pacing_select.options = [
-            discord.SelectOption(label="Round — all matchups at once", value="round", default=(self.pacing == "round")),
-            discord.SelectOption(label="Daily — one matchup per day", value="daily", default=(self.pacing == "daily")),
-        ]
 
     def _content(self) -> str:
+        cfg      = get_config(self.guild_id)
         rounds   = self.size.bit_length() - 1           # log2(size) for powers of 2
         matchups = self.size - 1                         # single-elimination
         total_h  = (matchups if self.pacing == "daily" else rounds) * self.voting
         scope_label = f"this year ({datetime.now().year})" if self.scope == "year" else self.scope.split(":", 1)[1]
-        src = "best-of channel (forwarded nominations)" if not self.use_firehose else "all tracked renames"
+        src  = "best-of channel (forwarded nominations)" if not self.use_firehose else "all tracked renames"
+        chan = f"<#{cfg['bracket_channel']}>" if cfg["bracket_channel"] else "⚠️ *pick or create one below*"
         return (
-            "🏆 **Start a bracket** — adjust any setting, then 🚀 **Launch**. *(Pre-filled to your last run.)*\n"
+            "🏆 **Start a bracket** — set the options, then 🚀 **Launch**. *(Pre-filled to your last run.)*\n"
+            f"• **Posts to** — where matchups & results appear: {chan}\n"
             f"• **Scope** — which renames compete: **{scope_label}**\n"
             f"• **Size** — how many names enter: **{self.size}**\n"
             f"• **Voting** — how long each matchup's poll stays open: **{self.voting}h**\n"
@@ -927,28 +851,34 @@ class _BracketStartView(discord.ui.View):
         self._refresh_options()
         await interaction.response.edit_message(content=self._content(), view=self)
 
+    @discord.ui.select(cls=discord.ui.ChannelSelect, channel_types=[discord.ChannelType.text],
+                       placeholder="Posts to — where matchups & results appear", row=0)
+    async def channel_select(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
+        set_config(self.guild_id, "bracket_channel", select.values[0].id)
+        await self._refresh(interaction)
+
     @discord.ui.select(placeholder="Scope — this year or a season",
-                       options=[discord.SelectOption(label="This year", value="year")], row=0)
+                       options=[discord.SelectOption(label="This year", value="year")], row=1)
     async def scope_select(self, interaction: discord.Interaction, select: discord.ui.Select):
         self.scope = select.values[0]
         await self._refresh(interaction)
 
     @discord.ui.select(placeholder="Size — how many names",
-                       options=[discord.SelectOption(label="8 names", value="8")], row=1)
+                       options=[discord.SelectOption(label="8 names", value="8")], row=2)
     async def size_select(self, interaction: discord.Interaction, select: discord.ui.Select):
         self.size = int(select.values[0])
         await self._refresh(interaction)
 
     @discord.ui.select(placeholder="Voting window per matchup",
-                       options=[discord.SelectOption(label="24 hours", value="24")], row=2)
+                       options=[discord.SelectOption(label="24 hours", value="24")], row=3)
     async def voting_select(self, interaction: discord.Interaction, select: discord.ui.Select):
         self.voting = int(select.values[0])
         await self._refresh(interaction)
 
-    @discord.ui.select(placeholder="Pacing — all at once or one per day",
-                       options=[discord.SelectOption(label="Round", value="round")], row=3)
-    async def pacing_select(self, interaction: discord.Interaction, select: discord.ui.Select):
-        self.pacing = select.values[0]
+    @discord.ui.button(label="Pacing", style=discord.ButtonStyle.secondary, emoji="🗓️", row=4)
+    async def pacing_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.pacing = "daily" if self.pacing == "round" else "round"
+        button.label = f"Pacing: {self.pacing}"
         await self._refresh(interaction)
 
     @discord.ui.button(label="Source", style=discord.ButtonStyle.secondary, emoji="🔀", row=4)
@@ -958,8 +888,17 @@ class _BracketStartView(discord.ui.View):
         button.label = self._source_label()
         await self._refresh(interaction)
 
-    @discord.ui.button(label="Launch bracket", style=discord.ButtonStyle.success, emoji="🚀", row=4)
+    @discord.ui.button(label="Create channel", style=discord.ButtonStyle.primary, emoji="🏗️", row=4)
+    async def create_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(_BracketChannelModal(self.guild_id))
+
+    @discord.ui.button(label="Launch", style=discord.ButtonStyle.success, emoji="🚀", row=4)
     async def launch_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not get_config(self.guild_id)["bracket_channel"]:
+            await interaction.response.send_message(
+                "⚠️ Pick or **🏗️ Create** a bracket channel first (top dropdown) — that's where matchups post.",
+                ephemeral=True)
+            return
         for c in self.children:
             c.disabled = True
         scope_label = "this year" if self.scope == "year" else self.scope.split(":", 1)[1]
@@ -986,14 +925,7 @@ class _BracketStartView(discord.ui.View):
         await interaction.followup.send(msg, ephemeral=True)
 
 
-@bracket_group.command(name="config", description="Set the bracket channel (where matchups & results post)")
-@admin_only()
-async def bracket_config(interaction: discord.Interaction):
-    view = _BracketConfigView(interaction.user.id, interaction.guild_id)
-    await interaction.response.send_message(view._render(), view=view, ephemeral=True)
-
-
-@bracket_group.command(name="start", description="Start a bracket — pick scope, size, voting & pacing")
+@bracket_group.command(name="start", description="Start a bracket — pick where it posts, scope, size, voting, pacing & source")
 @admin_only()
 async def bracket_start(interaction: discord.Interaction):
     view = _BracketStartView(interaction.user.id, interaction.guild_id)
@@ -1768,7 +1700,7 @@ class _SetupWizardView(discord.ui.View):
             body = ("🎉 **Setup complete!**\n"
                     f"• Quote {m(cfg['quote_channel'])} · Icon {m(cfg['icon_channel'])} · Post {m(cfg['post_channel'])}\n"
                     f"• Renames **{self._cadence_text()}** at **{self.pending_time}** ({self.pending_tz})\n\n"
-                    "Optional next steps: `/bracket config` (name brackets) · `/daily setup` "
+                    "Optional next steps: `/bracket start` (run a name bracket) · `/daily setup` "
                     "(an 'X of the day') · `/showconfig` to review · `/help` for everything.")
         return "🛠️ **Server setup**\n\n" + body
 
