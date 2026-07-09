@@ -17,7 +17,7 @@ from db_utils import (
     remove_custom_feature, set_custom_feature_enabled, count_custom_features,
     get_custom_feature_by_command, set_custom_feature_access, update_custom_feature,
     get_rename_post_by_message_id, record_forward_nomination,
-    get_custom_feature_by_id, set_custom_feature_schedule,
+    set_custom_feature_schedule,
 )
 from bot_features import (
     process_rename,
@@ -596,7 +596,8 @@ class _ScheduleTimeModal(discord.ui.Modal, title="Set the rename time"):
             await interaction.response.send_message(
                 "⚠️ Time must be `H:MM` (24-hour), e.g. `8:00`.", ephemeral=True)
             return
-        self._view._save_time(self.time_in.value.strip())
+        # Draft only — applied when the user presses Save on the panel.
+        self._view.pending_time = self.time_in.value.strip()
         await interaction.response.edit_message(content=self._view._render(), view=self._view)
 
 
@@ -614,10 +615,12 @@ class _ScheduleView(discord.ui.View):
         if feature:
             wd = (feature["weekdays"] or "").strip()
             self.interval = feature["interval_days"] or 1
+            self.pending_time = feature["post_time"]
         else:
             cfg = get_config(guild_id)
             wd = (cfg["quote_weekdays"] or "").strip()
             self.interval = cfg["quote_interval_days"] or 1
+            self.pending_time = cfg["quote_time"] or "4:00"
         self.mode     = "weekly" if wd else "interval"
         self.weekdays = {int(x) for x in wd.split(",") if x.strip().isdigit()} if wd else set()
 
@@ -633,12 +636,6 @@ class _ScheduleView(discord.ui.View):
             discord.SelectOption(label=lbl, value=val, default=(int(val) in self.weekdays))
             for val, lbl in _WEEKDAY_CHOICES
         ]
-
-    def _current_time(self) -> str:
-        if self.feature_id:
-            f = get_custom_feature_by_id(self.feature_id)
-            return f["post_time"] if f else "?"
-        return get_config(self.guild_id)["quote_time"] or "4:00"
 
     def _save_time(self, t: str) -> None:
         if self.feature_id:
@@ -656,19 +653,20 @@ class _ScheduleView(discord.ui.View):
             set_config(self.guild_id, "quote_weekdays", None)
             set_config(self.guild_id, "quote_interval_days", self.interval)
 
-    def _render(self) -> str:
-        tz = get_config(self.guild_id)["timezone"] or "US/Eastern"
+    def _cadence_text(self) -> str:
         if self.mode == "weekly":
             days = ", ".join(_WEEKDAY_ABBR[d] for d in sorted(self.weekdays)) if self.weekdays \
                 else "*(pick weekday(s) below)*"
-            cad = f"Weekly on {days}"
-        else:
-            cad = "Daily" if self.interval <= 1 else f"Every {self.interval} days"
+            return f"Weekly on {days}"
+        return "Daily" if self.interval <= 1 else f"Every {self.interval} days"
+
+    def _render(self) -> str:
+        tz = get_config(self.guild_id)["timezone"] or "US/Eastern"
         return (
-            f"🗓️ **Schedule — {self.target_name}**\n"
-            f"• Frequency: **{cad}**\n"
-            f"• Time: **{self._current_time()}** ({tz})\n\n"
-            "Pick a **mode**, set the matching option below, optionally set the time, then **Save**. "
+            f"🗓️ **Schedule — {self.target_name}**  *(draft — nothing changes until you press ✅ Save)*\n"
+            f"• Frequency: **{self._cadence_text()}**\n"
+            f"• Time: **{self.pending_time}** ({tz})\n\n"
+            "Set the **mode** and its option below (and the time, if you like), then press **✅ Save** to apply. "
             "*(Weekday mode is how you get 'every Sunday'.)*"
         )
 
@@ -710,9 +708,14 @@ class _ScheduleView(discord.ui.View):
                 "⚠️ Pick at least one weekday, or switch the mode to 'Every N days'.", ephemeral=True)
             return
         self._save_cadence()
+        self._save_time(self.pending_time)
         for c in self.children:
             c.disabled = True
-        await interaction.response.edit_message(content=self._render() + "\n\n✅ **Saved.**", view=self)
+        tz = get_config(self.guild_id)["timezone"] or "US/Eastern"
+        await interaction.response.edit_message(
+            content=(f"✅ **Saved** — {self.target_name} now runs **{self._cadence_text()}** "
+                     f"at **{self.pending_time}** ({tz})."),
+            view=self)
         self.stop()
 
 
