@@ -24,14 +24,19 @@ def test_all_views_instantiate(gid):
     main._BracketConfigView(1, gid)
     main._BracketStartView(1, gid)
     main._SeasonView(1, gid)
-    main._CoreSetupView(1, gid)
+    wiz = main._SetupWizardView(1, gid)     # stepped wizard
+    for s in range(len(main._WIZARD_STEPS)):  # every step must build within the 5-row budget
+        wiz.step = s
+        wiz._rebuild()
+    main._WizardTimeModal(wiz)
     main._ScheduleView(1, gid)
     # feature-targeted schedule view
     db_utils.add_custom_feature(gid, "Critter", None, "media", 1, 2, "9:00", command="critter")
     feat = db_utils.get_custom_feature_by_command(gid, "critter")
     main._ScheduleView(1, gid, feature=feat)
     main._ResetConfirmView(1, gid)
-    main._CreateChannelsModal(main._CoreSetupView(1, gid))  # builds 5 text inputs
+    main._CreateChannelsModal(gid)          # 3 channel-name inputs
+    main._BracketChannelsModal(gid)         # bracket + best-of name inputs
     assert "schedule" in {c.name for c in main.daily_group.walk_commands()}
     assert "reset" in {c.name for c in main.admin_group.walk_commands()}
 
