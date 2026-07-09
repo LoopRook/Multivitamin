@@ -81,6 +81,23 @@ def _bracket_col(bracket, col: str):
         return None
 
 
+def _effective_cfg(cfg, bracket) -> dict:
+    """
+    A config mapping with voting hours & pacing pinned to the bracket's snapshot,
+    so a bracket runs with the settings chosen at launch even if the server's live
+    config is edited mid-bracket. Legacy brackets (columns NULL) fall back to the
+    live config value. All other config keys pass through unchanged.
+    """
+    d = dict(cfg)
+    vh = _bracket_col(bracket, "voting_hours")
+    if vh:
+        d["bracket_voting_hours"] = vh
+    pc = _bracket_col(bracket, "pacing")
+    if pc:
+        d["bracket_pacing"] = pc
+    return d
+
+
 def _bracket_label(bracket) -> str:
     """Display label for a bracket: explicit label, else the year, else 'Bracket'."""
     label = _bracket_col(bracket, "label")
@@ -476,11 +493,11 @@ async def start_test_bracket(guild_id: int, client: discord.Client) -> tuple[boo
     cfg = get_config(guild_id)
 
     if get_active_bracket(guild_id):
-        return False, "⚠️ There's already an active bracket. Run `!cancelbracket` first if it's a test."
+        return False, "⚠️ There's already an active bracket. Run `/bracket cancel` first if it's a test."
 
     bracket_channel = client.get_channel(cfg["bracket_channel"])
     if not bracket_channel:
-        return False, "⚠️ No bracket channel configured. Run `!setbracketchannel` first."
+        return False, "⚠️ No bracket channel configured. Set one with `/bracket config` first."
 
     quote_channel = client.get_channel(cfg["quote_channel"])
     if not quote_channel:
@@ -529,7 +546,10 @@ async def start_test_bracket(guild_id: int, client: discord.Client) -> tuple[boo
     nominees = scored[:actual_size]
     total_rounds = int(math.log2(actual_size))
 
-    bracket_id = create_bracket(guild_id, 0, actual_size, voting_hours, label="TEST")
+    bracket_id = create_bracket(
+        guild_id, 0, actual_size, voting_hours, label="TEST",
+        pacing=cfg["bracket_pacing"] or "round",
+    )
     entry_ids  = []
     for seed, (score, quote, user) in enumerate(nominees, start=1):
         eid = create_bracket_entry(bracket_id, seed, quote, user, score)
@@ -537,7 +557,7 @@ async def start_test_bracket(guild_id: int, client: discord.Client) -> tuple[boo
 
     lines = [
         f"🧪 **TEST BRACKET — {actual_size} names** *(random scores, not a real bracket)*",
-        f"{total_rounds} round(s) · {voting_hours}h per matchup · use `!forcebracketadvance` to skip the wait\n",
+        f"{total_rounds} round(s) · {voting_hours}h per matchup · use `/bracket forceadvance` to skip the wait\n",
     ]
     for seed, (score, quote, user) in enumerate(nominees, start=1):
         lines.append(f'  **#{seed}** "{quote}" — *{user}* · {score} reactions (random)')
@@ -584,13 +604,14 @@ async def start_test_bracket(guild_id: int, client: discord.Client) -> tuple[boo
         mid = create_bracket_matchup(bracket_id, 1, match_num, a_id, b_id)
         matchup_rows.append((mid, a_id, b_id))
 
-    tz = _guild_tz(cfg)
-    await _post_round(bracket_id, 1, matchup_rows, bracket_channel, cfg, tz, client, [])
+    tz  = _guild_tz(cfg)
+    eff = _effective_cfg(cfg, get_active_bracket(guild_id))
+    await _post_round(bracket_id, 1, matchup_rows, bracket_channel, eff, tz, client, [])
 
     return True, (
         "✅ Test bracket started!\n"
-        "Vote in the polls, then use `!forcebracketadvance` to skip the wait.\n"
-        "Run `!cancelbracket` when done to clean up."
+        "Vote in the polls, then use `/bracket forceadvance` to skip the wait.\n"
+        "Run `/bracket cancel` when done to clean up."
     )
 
 
@@ -610,8 +631,9 @@ async def force_bracket_advance(guild_id: int, client: discord.Client) -> tuple[
     if not bracket_channel:
         return False, "⚠️ Bracket channel not found."
 
+    eff       = _effective_cfg(cfg, bracket)
     round_num = bracket["current_round"]
-    pacing    = _bracket_pacing(cfg)
+    pacing    = _bracket_pacing(eff)
     matchups  = get_active_round_matchups(bracket["id"], round_num)
 
     # Daily pacing posts one matchup at a time, so only the matchup currently
@@ -685,7 +707,7 @@ async def force_bracket_advance(guild_id: int, client: discord.Client) -> tuple[
             await _post_daily_matchup(
                 bracket["id"], nxt["id"], nxt["entry_a_id"], nxt["entry_b_id"],
                 nxt["match_num"], len(fresh),
-                bracket_channel, cfg, tz, client, rename_posts, label,
+                bracket_channel, eff, tz, client, rename_posts, label,
             )
             return True, f"✅ Resolved matchup — posted Match {nxt['match_num'] + 1} of {len(fresh)}."
 
@@ -711,7 +733,7 @@ async def force_bracket_advance(guild_id: int, client: discord.Client) -> tuple[
     await bracket_channel.send(f"\n⚔️ **{label} begins!**")
 
     rename_posts = _rename_posts_for_bracket(guild_id, bracket, cfg, tz)
-    await _post_round(bracket["id"], new_round, matchup_rows, bracket_channel, cfg, tz, client, rename_posts)
+    await _post_round(bracket["id"], new_round, matchup_rows, bracket_channel, eff, tz, client, rename_posts)
     return True, f"✅ Advanced to round {new_round}."
 
 
@@ -721,12 +743,17 @@ async def _start_range_bracket(
     guild_id: int, client: discord.Client,
     range_start_utc: str, range_end_utc: str,
     label: str, year_value: int, scope_desc: str,
+    size: int | None = None, voting_hours: int | None = None, pacing: str | None = None,
 ) -> tuple[bool, str]:
     """
     Shared seeding + launch for real brackets over an arbitrary date window.
     *label* is the display name ('2026', 'Halloween 2026'); *year_value* is stored
     in the bracket's year column (must be > 0 so it isn't treated as a test bracket);
     *scope_desc* appears in the "no posts found" and tally messages.
+
+    *size*/*voting_hours*/*pacing* are the per-run choices from the start panel;
+    each falls back to the server's stored config when not supplied. They are
+    snapshotted onto the bracket row so the run is locked to them.
     """
     cfg = get_config(guild_id)
 
@@ -735,10 +762,11 @@ async def _start_range_bracket(
 
     bracket_channel = client.get_channel(cfg["bracket_channel"])
     if not bracket_channel:
-        return False, "⚠️ No bracket channel configured. Run `!setbracketchannel` in your desired channel first."
+        return False, "⚠️ No bracket channel configured. Set one with `/bracket config` first."
 
-    bracket_size = cfg["bracket_size"]  or 8
-    voting_hours = cfg["bracket_voting_hours"] or 24
+    bracket_size = size         or cfg["bracket_size"]         or 8
+    voting_hours = voting_hours or cfg["bracket_voting_hours"] or 24
+    pacing       = pacing       or cfg["bracket_pacing"]       or "round"
 
     if not math.log2(bracket_size).is_integer():
         return False, f"⚠️ Bracket size must be a power of 2 (4, 8, 16, 32). Currently: {bracket_size}."
@@ -760,7 +788,7 @@ async def _start_range_bracket(
         if not client.get_channel(source_channel_id):
             return False, (
                 "⚠️ The configured bracket source channel isn't accessible. "
-                "Re-set it with `/bracket source` or clear it to use all tracked renames."
+                "Re-set it (or clear it) in `/bracket config`."
             )
         scored = await _scored_from_forwards(client, source_channel_id, posts)
         if not scored:
@@ -806,6 +834,7 @@ async def _start_range_bracket(
     bracket_id = create_bracket(
         guild_id, year_value, actual_size, voting_hours,
         label=label, range_start=range_start_utc, range_end=range_end_utc,
+        pacing=pacing,
     )
     entry_ids  = []
     for seed, (quote, (score, user)) in enumerate(nominees, start=1):
@@ -827,12 +856,17 @@ async def _start_range_bracket(
         mid = create_bracket_matchup(bracket_id, 1, match_num, a_id, b_id)
         matchup_rows.append((mid, a_id, b_id))
 
-    await _post_round(bracket_id, 1, matchup_rows, bracket_channel, cfg, tz, client, list(posts))
+    # Post the first round using the settings snapshotted onto the bracket row.
+    eff = _effective_cfg(cfg, get_active_bracket(guild_id))
+    await _post_round(bracket_id, 1, matchup_rows, bracket_channel, eff, tz, client, list(posts))
 
     return True, f"✅ {label} bracket started! {actual_size} nominees, {len(pairs)} first-round matchup(s)."
 
 
-async def start_bracket(guild_id: int, client: discord.Client, year: int) -> tuple[bool, str]:
+async def start_bracket(
+    guild_id: int, client: discord.Client, year: int,
+    size: int | None = None, voting_hours: int | None = None, pacing: str | None = None,
+) -> tuple[bool, str]:
     """Seed and launch a real bracket for a calendar *year*, seeded by reaction counts."""
     cfg = get_config(guild_id)
     tz  = _guild_tz(cfg)
@@ -840,16 +874,20 @@ async def start_bracket(guild_id: int, client: discord.Client, year: int) -> tup
     return await _start_range_bracket(
         guild_id, client, year_start, year_end,
         label=str(year), year_value=year, scope_desc=str(year),
+        size=size, voting_hours=voting_hours, pacing=pacing,
     )
 
 
-async def start_season_bracket(guild_id: int, client: discord.Client, season_name: str) -> tuple[bool, str]:
+async def start_season_bracket(
+    guild_id: int, client: discord.Client, season_name: str,
+    size: int | None = None, voting_hours: int | None = None, pacing: str | None = None,
+) -> tuple[bool, str]:
     """Seed and launch a bracket from a named season's date window."""
     season = get_season(guild_id, season_name)
     if not season:
         return False, (
             f'⚠️ No season named "{season_name}". '
-            f"Create one with `!addseason <start> <end> <name>` or see `!listseasons`."
+            f"Create one with `/season` (Add season)."
         )
     # Display the season's real name (preserves original casing) and derive the
     # stored year from the window start so it's never mistaken for a test bracket.
@@ -861,6 +899,7 @@ async def start_season_bracket(guild_id: int, client: discord.Client, season_nam
     return await _start_range_bracket(
         guild_id, client, season["start_at"], season["end_at"],
         label=name, year_value=max(year_value, 1), scope_desc=f'season "{name}"',
+        size=size, voting_hours=voting_hours, pacing=pacing,
     )
 
 
@@ -871,6 +910,7 @@ async def check_bracket_advancement(guild_id: int, client: discord.Client) -> No
         return
 
     cfg             = get_config(guild_id)
+    eff             = _effective_cfg(cfg, bracket)
     bracket_channel = client.get_channel(cfg["bracket_channel"])
     if not bracket_channel:
         return
@@ -933,7 +973,7 @@ async def check_bracket_advancement(guild_id: int, client: discord.Client) -> No
     # Daily pacing: post the next unposted matchup now that this poll has
     # closed, rather than waiting for the whole round.  Only fall through to
     # advancing once every matchup in the round has been posted and completed.
-    if _bracket_pacing(cfg) == "daily":
+    if _bracket_pacing(eff) == "daily":
         fresh    = get_active_round_matchups(bracket["id"], round_num)
         unposted = [m for m in fresh if not m["message_id"]]
         if unposted:
@@ -944,7 +984,7 @@ async def check_bracket_advancement(guild_id: int, client: discord.Client) -> No
             await _post_daily_matchup(
                 bracket["id"], nxt["id"], nxt["entry_a_id"], nxt["entry_b_id"],
                 nxt["match_num"], len(fresh),
-                bracket_channel, cfg, tz, client, rename_posts, label,
+                bracket_channel, eff, tz, client, rename_posts, label,
             )
             log.info("[%s] Daily pacing: posted Match %d.", guild_id, nxt["match_num"] + 1)
             return
@@ -975,7 +1015,7 @@ async def check_bracket_advancement(guild_id: int, client: discord.Client) -> No
     await bracket_channel.send(f"\n⚔️ **{label} begins!**")
 
     rename_posts = _rename_posts_for_bracket(guild_id, bracket, cfg, tz)
-    await _post_round(bracket["id"], new_round, matchup_rows, bracket_channel, cfg, tz, client, rename_posts)
+    await _post_round(bracket["id"], new_round, matchup_rows, bracket_channel, eff, tz, client, rename_posts)
     log.info("[%s] Advanced to round %d.", guild_id, new_round)
 
 
@@ -984,7 +1024,7 @@ def get_bracket_status_text(guild_id: int) -> str:
     if not bracket:
         return "No active bracket."
     cfg          = get_config(guild_id)
-    pacing       = _bracket_pacing(cfg)
+    pacing       = _bracket_pacing(_effective_cfg(cfg, bracket))
     total_rounds = int(math.log2(bracket["size"]))
     label        = _round_label(bracket["current_round"], total_rounds)
     matchups     = get_active_round_matchups(bracket["id"], bracket["current_round"])

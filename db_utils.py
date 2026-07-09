@@ -90,7 +90,8 @@ CREATE TABLE IF NOT EXISTS brackets (
     created_at    TEXT    NOT NULL,
     label         TEXT,             -- display name, e.g. '2026', 'Halloween 2026', 'TEST'
     range_start   TEXT,             -- ISO UTC start of the seeding window (NULL for test)
-    range_end     TEXT              -- ISO UTC end of the seeding window (NULL for test)
+    range_end     TEXT,             -- ISO UTC end of the seeding window (NULL for test)
+    pacing        TEXT              -- 'round'|'daily' snapshot at launch (NULL for legacy → falls back to live config)
 )
 """
 
@@ -181,6 +182,7 @@ _BRACKET_MIGRATIONS = [
     ("label",       "TEXT"),
     ("range_start", "TEXT"),
     ("range_end",   "TEXT"),
+    ("pacing",      "TEXT"),
 ]
 
 # custom_features already ships in live DBs, so new columns must be ALTER-added.
@@ -436,13 +438,14 @@ def get_rename_posts_for_year(
 def create_bracket(
     guild_id: int, year: int, size: int, voting_hours: int,
     label: str | None = None, range_start: str | None = None, range_end: str | None = None,
+    pacing: str | None = None,
 ) -> int:
     with db_conn() as conn:
         cur = conn.execute(
-            "INSERT INTO brackets (guild_id, year, size, voting_hours, created_at, label, range_start, range_end) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO brackets (guild_id, year, size, voting_hours, created_at, label, range_start, range_end, pacing) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (guild_id, year, size, voting_hours, datetime.now(timezone.utc).isoformat(),
-             label, range_start, range_end),
+             label, range_start, range_end, pacing),
         )
         conn.commit()
         return cur.lastrowid
