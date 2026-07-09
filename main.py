@@ -11,7 +11,7 @@ from discord import app_commands
 from db_utils import (
     init_db, set_config, get_config,
     cancel_bracket, get_active_bracket, get_bracket_history,
-    add_bot_admin, remove_bot_admin, get_bot_admins, is_bot_admin,
+    add_bot_admin, remove_bot_admin, get_bot_admins, is_bot_admin, reset_guild,
     add_season, get_seasons, remove_season,
     add_custom_feature, get_custom_features,
     remove_custom_feature, set_custom_feature_enabled, count_custom_features,
@@ -206,7 +206,8 @@ def build_help_embed(is_admin: bool = False, is_manager: bool = False) -> discor
             value=(
                 "`/admin add <user>` — grant bot-admin access\n"
                 "`/admin remove <user>` — revoke bot-admin access\n"
-                "`/admin list` — list current bot-admins"
+                "`/admin list` — list current bot-admins\n"
+                "`/admin reset` — ⚠️ wipe ALL this server's data (irreversible; testing/cleanup)"
             ),
             inline=False,
         )
@@ -1444,6 +1445,57 @@ async def admin_list(interaction: discord.Interaction):
         member = interaction.guild.get_member(uid)
         lines.append(f"• {member.display_name if member else f'User {uid}'} (`{uid}`)")
     await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
+
+class _ResetConfirmView(discord.ui.View):
+    """Two-step confirmation for the destructive /admin reset."""
+    def __init__(self, author_id: int, guild_id: int):
+        super().__init__(timeout=60)
+        self.author_id = author_id
+        self.guild_id  = guild_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                "This confirmation isn't yours.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Yes, wipe EVERYTHING", style=discord.ButtonStyle.danger, emoji="⚠️")
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        reset_guild(self.guild_id)
+        await sync_guild_feature_commands(self.guild_id)  # remove the wiped features' /commands
+        for c in self.children:
+            c.disabled = True
+        await interaction.response.edit_message(
+            content=("🗑️ **Done.** Every bit of this server's data was wiped — it's back to a fresh "
+                     "install. Run `/setup` to reconfigure."),
+            view=self)
+        self.stop()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for c in self.children:
+            c.disabled = True
+        await interaction.response.edit_message(content="✅ Cancelled — nothing was changed.", view=self)
+        self.stop()
+
+
+@admin_group.command(name="reset", description="⚠️ Wipe ALL of this server's bot data (irreversible)")
+@manager_only()
+async def admin_reset(interaction: discord.Interaction):
+    view = _ResetConfirmView(interaction.user.id, interaction.guild_id)
+    await interaction.response.send_message(
+        "⚠️ **DANGER — full reset**\n"
+        "This **permanently deletes everything** this bot stores for this server:\n"
+        "• all `/config` settings, schedule & channels\n"
+        "• every custom `/daily` feature (and its slash command)\n"
+        "• all brackets, seasons & bracket history\n"
+        "• all tracked rename posts, forward nominations & pick history\n"
+        "• the bot-admin roster\n\n"
+        "**This cannot be undone.** The server returns to a fresh state (like a new install).\n"
+        "*(Mainly a testing/cleanup tool — most servers never need this.)*",
+        view=view, ephemeral=True)
 
 
 client.tree.add_command(admin_group)

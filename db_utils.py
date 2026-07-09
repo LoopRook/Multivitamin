@@ -617,6 +617,25 @@ def cancel_bracket(bracket_id: int) -> None:
         conn.commit()
 
 
+def reset_guild(guild_id: int) -> None:
+    """
+    Delete ALL of a guild's data across every table (irreversible). Returns the
+    server to a fresh state — used by /admin reset for testing/cleanup.
+    """
+    with db_conn() as conn:
+        # bracket_entries/matchups are keyed by bracket_id, so clear them first.
+        conn.execute(
+            "DELETE FROM bracket_matchups WHERE bracket_id IN (SELECT id FROM brackets WHERE guild_id=?)",
+            (guild_id,))
+        conn.execute(
+            "DELETE FROM bracket_entries WHERE bracket_id IN (SELECT id FROM brackets WHERE guild_id=?)",
+            (guild_id,))
+        for table in ("brackets", "rename_posts", "forward_nominations", "seasons",
+                      "custom_features", "picks_history", "bot_admins", "server_config"):
+            conn.execute(f"DELETE FROM {table} WHERE guild_id=?", (guild_id,))
+        conn.commit()
+
+
 # ── seasons ───────────────────────────────────────────────────────────────────
 # A season is a named date range per guild. Brackets can be seeded from a season's
 # window (e.g. monthly or holiday competitions) instead of a whole calendar year.
