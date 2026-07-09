@@ -103,7 +103,9 @@ CREATE TABLE IF NOT EXISTS brackets (
     label         TEXT,             -- display name, e.g. '2026', 'Halloween 2026', 'TEST'
     range_start   TEXT,             -- ISO UTC start of the seeding window (NULL for test)
     range_end     TEXT,             -- ISO UTC end of the seeding window (NULL for test)
-    pacing        TEXT              -- 'round'|'daily' snapshot at launch (NULL for legacy → falls back to live config)
+    pacing        TEXT,             -- 'round'|'daily' snapshot at launch (NULL for legacy → falls back to live config)
+    champion_quote TEXT,            -- winning entry, recorded at crowning (for /bracket history)
+    champion_user  TEXT             -- who submitted the winning entry
 )
 """
 
@@ -196,6 +198,8 @@ _BRACKET_MIGRATIONS = [
     ("range_start", "TEXT"),
     ("range_end",   "TEXT"),
     ("pacing",      "TEXT"),
+    ("champion_quote", "TEXT"),
+    ("champion_user",  "TEXT"),
 ]
 
 # custom_features already ships in live DBs, so new columns must be ALTER-added.
@@ -573,6 +577,26 @@ def complete_bracket(bracket_id: int) -> None:
     with db_conn() as conn:
         conn.execute("UPDATE brackets SET status='complete' WHERE id=?", (bracket_id,))
         conn.commit()
+
+
+def set_bracket_champion(bracket_id: int, quote: str, quote_user: str | None) -> None:
+    """Record a completed bracket's winner, for /bracket history."""
+    with db_conn() as conn:
+        conn.execute(
+            "UPDATE brackets SET champion_quote=?, champion_user=? WHERE id=?",
+            (quote, quote_user, bracket_id),
+        )
+        conn.commit()
+
+
+def get_bracket_history(guild_id: int, limit: int = 15) -> list[sqlite3.Row]:
+    """Completed real brackets (newest first) with their champions. Excludes test brackets."""
+    with db_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM brackets WHERE guild_id=? AND status='complete' AND year != 0 "
+            "ORDER BY created_at DESC LIMIT ?",
+            (guild_id, limit),
+        ).fetchall()
 
 
 def cancel_bracket(bracket_id: int) -> None:

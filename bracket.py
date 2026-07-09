@@ -24,7 +24,7 @@ from db_utils import (
     create_bracket_matchup, update_matchup_posted,
     get_active_round_matchups, set_matchup_winner,
     get_round_winners_ordered, advance_bracket_round, complete_bracket,
-    get_season,
+    set_bracket_champion, get_season,
 )
 
 log = logging.getLogger(__name__)
@@ -389,6 +389,10 @@ async def _crown_champion(
     the test card cache until after this returns.
     """
     import io
+
+    # Record the winner for /bracket history (real brackets only).
+    if bracket["year"] != 0:
+        set_bracket_champion(bracket["id"], champion["quote"], champion["quote_user"])
 
     renamed = False
     if bracket["year"] != 0:
