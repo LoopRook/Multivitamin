@@ -12,7 +12,7 @@ FWD = discord.MessageReferenceType.forward
 
 def test_command_surface():
     bnames = {c.name for c in main.bracket_group.walk_commands()}
-    assert bnames == {"config", "start", "test", "forceadvance", "status", "cancel", "history"}
+    assert bnames == {"start", "test", "forceadvance", "status", "cancel", "history"}  # no /bracket config
     top = {c.name for c in main.client.tree.get_commands()}
     assert {"setup", "season", "showconfig", "help", "rename", "mystats", "preview", "contributors"} <= top
     # removed commands must be gone
@@ -21,7 +21,6 @@ def test_command_surface():
 
 def test_all_views_instantiate(gid):
     # Instantiating a View enforces Discord's 5-action-row budget.
-    main._BracketConfigView(1, gid)
     main._BracketStartView(1, gid)
     main._SeasonView(1, gid)
     wiz = main._SetupWizardView(1, gid)     # stepped wizard
