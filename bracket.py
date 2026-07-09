@@ -316,27 +316,47 @@ async def _rotate_round_pacing_name(
 async def _crown_champion(
     client: discord.Client, guild_id: int,
     bracket_channel: discord.TextChannel, bracket, champion,
+    rename_posts: list | None = None,
 ) -> None:
     """
     Announce the bracket champion and set the server name to the winning quote.
     Real brackets rename the server; test brackets (year==0) never touch it.
     (Under daily pacing the name may already be the champion from the final
     matchup's rename — _rename_guild is idempotent, so this won't double-edit.)
+
+    The winning card image is attached when available (from the rename posts for
+    real brackets, or the in-memory card cache for tests). Callers must not evict
+    the test card cache until after this returns.
     """
+    import io
+
     renamed = False
     if bracket["year"] != 0:
         renamed = await _rename_guild(client, guild_id, champion["quote"])
         if renamed:
             log.info('[%s] Server name is the bracket champion: "%s"', guild_id, champion["quote"])
 
+    card_file = None
+    try:
+        card = await _get_card_bytes(champion, bracket["id"], client, rename_posts or [])
+        if card:
+            card_file = discord.File(io.BytesIO(card), filename="champion.png")
+    except Exception as e:
+        log.warning("[%s] Could not build champion card image: %s", guild_id, e)
+
     tail = "\n\n👑 *The server name is now the winning entry!*" if renamed else ""
-    await bracket_channel.send(
+    content = (
         f"\n🎊🏆🎊 **{_bracket_label(bracket)} SERVER NAME CHAMPION** 🎊🏆🎊\n\n"
         f'**"{champion["quote"]}"**\n'
         f'*submitted by {champion["quote_user"] or "Unknown"} · '
         f'{champion["season_reactions"]} reactions this season*\n\n'
         f"Congratulations! 🎉{tail}"
     )
+    try:
+        await bracket_channel.send(content, file=card_file) if card_file else \
+            await bracket_channel.send(content)
+    except discord.HTTPException as e:
+        log.error("[%s] Failed to post champion announcement: %s", guild_id, e)
 
 
 async def _get_card_bytes(
@@ -796,8 +816,9 @@ async def force_bracket_advance(guild_id: int, client: discord.Client) -> tuple[
     if len(winners) == 1:
         champion = get_bracket_entry(winners[0])
         complete_bracket(bracket["id"])
+        rename_posts = _rename_posts_for_bracket(guild_id, bracket, cfg, tz)
+        await _crown_champion(client, guild_id, bracket_channel, bracket, champion, rename_posts)
         _test_card_cache.pop(bracket["id"], None)
-        await _crown_champion(client, guild_id, bracket_channel, bracket, champion)
         return True, "🏆 Bracket complete!"
 
     new_round    = advance_bracket_round(bracket["id"])
@@ -1096,8 +1117,9 @@ async def check_bracket_advancement(guild_id: int, client: discord.Client) -> No
     if len(winners) == 1:
         champion = get_bracket_entry(winners[0])
         complete_bracket(bracket["id"])
+        rename_posts = _rename_posts_for_bracket(guild_id, bracket, cfg, tz)
+        await _crown_champion(client, guild_id, bracket_channel, bracket, champion, rename_posts)
         _test_card_cache.pop(bracket["id"], None)
-        await _crown_champion(client, guild_id, bracket_channel, bracket, champion)
         log.info("[%s] Bracket complete. Champion: %s", guild_id, champion["quote"])
         return
 
