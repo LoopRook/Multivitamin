@@ -623,7 +623,10 @@ class _ScheduleView(discord.ui.View):
             self.pending_time = cfg["quote_time"] or "4:00"
         self.mode     = "weekly" if wd else "interval"
         self.weekdays = {int(x) for x in wd.split(",") if x.strip().isdigit()} if wd else set()
+        self._refresh_options()
 
+    def _refresh_options(self) -> None:
+        """Rebuild each dropdown's options so the current draft selection stays shown."""
         self.mode_select.options = [
             discord.SelectOption(label="Every N days", value="interval", default=(self.mode == "interval")),
             discord.SelectOption(label="Specific weekdays", value="weekly", default=(self.mode == "weekly")),
@@ -681,6 +684,7 @@ class _ScheduleView(discord.ui.View):
                        options=[discord.SelectOption(label="Every N days", value="interval")], row=0)
     async def mode_select(self, interaction: discord.Interaction, select: discord.ui.Select):
         self.mode = select.values[0]
+        self._refresh_options()
         await interaction.response.edit_message(content=self._render(), view=self)
 
     @discord.ui.select(placeholder="Every N days (interval mode)",
@@ -688,6 +692,7 @@ class _ScheduleView(discord.ui.View):
     async def interval_select(self, interaction: discord.Interaction, select: discord.ui.Select):
         self.interval = int(select.values[0])
         self.mode = "interval"
+        self._refresh_options()
         await interaction.response.edit_message(content=self._render(), view=self)
 
     @discord.ui.select(placeholder="Weekdays (weekday mode)", min_values=1, max_values=7,
@@ -695,6 +700,7 @@ class _ScheduleView(discord.ui.View):
     async def weekday_select(self, interaction: discord.Interaction, select: discord.ui.Select):
         self.weekdays = {int(v) for v in select.values}
         self.mode = "weekly"
+        self._refresh_options()
         await interaction.response.edit_message(content=self._render(), view=self)
 
     @discord.ui.button(label="Set time", emoji="🕐", style=discord.ButtonStyle.secondary, row=3)
