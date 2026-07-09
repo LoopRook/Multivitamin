@@ -31,6 +31,7 @@ def test_all_views_instantiate(gid):
     feat = db_utils.get_custom_feature_by_command(gid, "critter")
     main._ScheduleView(1, gid, feature=feat)
     main._ResetConfirmView(1, gid)
+    main._CreateChannelsModal(main._CoreSetupView(1, gid))  # builds 5 text inputs
     assert "schedule" in {c.name for c in main.daily_group.walk_commands()}
     assert "reset" in {c.name for c in main.admin_group.walk_commands()}
 
@@ -44,6 +45,12 @@ def test_help_embed_within_field_limits():
 
 def test_version_string():
     assert isinstance(main.__version__, str) and main.__version__
+
+
+def test_normalize_channel_name():
+    assert main._normalize_channel_name("  #Best Of ") == "best-of"
+    assert main._normalize_channel_name("Renames") == "renames"
+    assert main._normalize_channel_name("") == ""
 
 
 def test_try_dm_delivery():

@@ -13,10 +13,10 @@ All commands are **slash (`/`) commands**. The bot is multi-server, uses no `Adm
 One-click invite (you need **Manage Server** on the target server):
 
 ```
-https://discord.com/oauth2/authorize?client_id=1374255006433415248&scope=bot+applications.commands&permissions=562949953539296
+https://discord.com/oauth2/authorize?client_id=1374255006433415248&scope=bot+applications.commands&permissions=562949953539312
 ```
 
-Scopes: `bot` + `applications.commands`. The permission integer `562949953539296` grants exactly: View Channels, Send Messages, Embed Links, Attach Files, Add Reactions, Read Message History, Send Polls, **View Audit Log** (to DM whoever adds the bot a private setup guide), and **Manage Server** (needed to rename the server). Prefer the Dev Portal's **OAuth2 → URL Generator** to (re)generate this by ticking those boxes. *(View Audit Log is optional — without it, onboarding falls back to a channel message instead of a DM.)*
+Scopes: `bot` + `applications.commands`. The permission integer `562949953539312` grants exactly: View Channels, Send Messages, Embed Links, Attach Files, Add Reactions, Read Message History, Send Polls, **View Audit Log** (to DM whoever adds the bot a private setup guide), **Manage Channels** (so `/setup` can create your channels for you), and **Manage Server** (needed to rename the server). Prefer the Dev Portal's **OAuth2 → URL Generator** to (re)generate this by ticking those boxes. *(View Audit Log and Manage Channels are optional conveniences — without them, onboarding falls back to a channel message, and `/setup` requires you to pick existing channels instead of creating them.)*
 
 > Slash commands can take a few minutes to appear after inviting (Discord propagates global commands gradually).
 
