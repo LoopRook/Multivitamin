@@ -238,6 +238,81 @@ async def _dramatic_coin_flip(channel: discord.TextChannel, name_a: str, name_b:
     return winner
 
 
+async def _rename_guild(client: discord.Client, guild_id: int, name: str) -> bool:
+    """
+    Set the server name (truncated to Discord's 100-char cap). Idempotent — a
+    no-op that returns True if the name is already set (so we never waste one of
+    Discord's scarce guild-rename calls, ~2 per 10 min). Returns False on failure.
+    """
+    from image_utils import truncate_to_100_chars
+    guild = client.get_guild(guild_id)
+    if not guild:
+        return False
+    new_name = truncate_to_100_chars(name)
+    if guild.name == new_name:
+        return True
+    try:
+        await guild.edit(name=new_name)
+        log.info('[%s] Server renamed to: "%s"', guild_id, name)
+        return True
+    except discord.HTTPException as e:
+        log.error("[%s] Failed to rename server: %s", guild_id, e)
+        return False
+
+
+_MIN_ROTATE_MINUTES = 10  # keep guild renames spaced out (Discord ~2 / 10 min cap)
+
+
+async def _rotate_round_pacing_name(
+    client: discord.Client, guild_id: int, bracket, eff,
+) -> None:
+    """
+    Round pacing: give each entry competing in the active round an equal slice of
+    that round's voting window as the server name (so a round's winners each hold
+    the name for the same amount of time over the following window). Stateless and
+    idempotent — called every scheduler tick; `_rename_guild` only actually edits
+    when the current slice changes. Skipped when slices would be shorter than
+    ~10 min (e.g. a large round with a very short voting window), to stay under
+    Discord's guild-rename rate limit; the name simply holds until the champion in
+    that edge case.
+
+    Only **winners** ever drive the server name: round 1's combatants are the
+    seeded nominees (not winners of a prior round), so rotation begins at round 2
+    (whose entries are round 1's winners).
+    """
+    if bracket["current_round"] <= 1:
+        return
+
+    matchups = [
+        m for m in get_active_round_matchups(bracket["id"], bracket["current_round"])
+        if m["ends_at"]
+    ]
+    if not matchups:
+        return
+    voting_hours = eff["bracket_voting_hours"] or 24
+    try:
+        ends_at = max(datetime.fromisoformat(m["ends_at"]) for m in matchups)
+    except ValueError:
+        return
+    start = ends_at - timedelta(hours=voting_hours)
+
+    entry_ids: list[int] = []
+    for m in sorted(matchups, key=lambda x: x["match_num"]):
+        entry_ids += [m["entry_a_id"], m["entry_b_id"]]
+    n = len(entry_ids)
+    if n == 0 or (voting_hours * 60) / n < _MIN_ROTATE_MINUTES:
+        return
+
+    now = datetime.now(pytz.utc)
+    if now < start:
+        return
+    slot_seconds = (voting_hours * 3600) / n
+    idx = max(0, min(int((now - start).total_seconds() // slot_seconds), n - 1))
+    entry = get_bracket_entry(entry_ids[idx])
+    if entry:
+        await _rename_guild(client, guild_id, entry["quote"])
+
+
 async def _crown_champion(
     client: discord.Client, guild_id: int,
     bracket_channel: discord.TextChannel, bracket, champion,
@@ -245,18 +320,14 @@ async def _crown_champion(
     """
     Announce the bracket champion and set the server name to the winning quote.
     Real brackets rename the server; test brackets (year==0) never touch it.
+    (Under daily pacing the name may already be the champion from the final
+    matchup's rename — _rename_guild is idempotent, so this won't double-edit.)
     """
-    from image_utils import truncate_to_100_chars
-
     renamed = False
-    guild   = client.get_guild(guild_id)
-    if guild and bracket["year"] != 0:
-        try:
-            await guild.edit(name=truncate_to_100_chars(champion["quote"]))
-            renamed = True
-            log.info('[%s] Server renamed to bracket champion: "%s"', guild_id, champion["quote"])
-        except discord.HTTPException as e:
-            log.error("[%s] Failed to rename server to champion: %s", guild_id, e)
+    if bracket["year"] != 0:
+        renamed = await _rename_guild(client, guild_id, champion["quote"])
+        if renamed:
+            log.info('[%s] Server name is the bracket champion: "%s"', guild_id, champion["quote"])
 
     tail = "\n\n👑 *The server name is now the winning entry!*" if renamed else ""
     await bracket_channel.send(
@@ -649,6 +720,7 @@ async def force_bracket_advance(guild_id: int, client: discord.Client) -> tuple[
 
     await bracket_channel.send(f"⚡ Force-advancing round {round_num}...")
 
+    last_winner_id = None
     for m in pending:
         entry_a = get_bracket_entry(m["entry_a_id"])
         entry_b = get_bracket_entry(m["entry_b_id"])
@@ -691,8 +763,16 @@ async def force_bracket_advance(guild_id: int, client: discord.Client) -> tuple[
             winner_id = m["entry_a_id"] if result == "a" else m["entry_b_id"]
 
         set_matchup_winner(m["id"], winner_id)
+        last_winner_id = winner_id
 
     tz = _guild_tz(cfg)
+
+    # Daily pacing: the server name tracks the day's matchup winner (see
+    # check_bracket_advancement). Round pacing stays frozen until the champion.
+    if pacing == "daily" and last_winner_id is not None and bracket["year"] != 0:
+        _dw = get_bracket_entry(last_winner_id)
+        if _dw and await _rename_guild(client, guild_id, _dw["quote"]):
+            await bracket_channel.send(f'🏷️ Server renamed to the latest winner: **"{_dw["quote"]}"**')
 
     # Daily pacing: if matchups in this round remain unposted, post the next one
     # instead of advancing — force-advance just skips the current poll's wait.
@@ -922,10 +1002,18 @@ async def check_bracket_advancement(guild_id: int, client: discord.Client) -> No
     if not matchups:
         return
 
+    # Round pacing: rotate the server name through the current round's combatants,
+    # each getting an equal slice of the voting window. (Daily pacing renames on
+    # each matchup's close instead, below.) Runs every tick, before the expiry
+    # check, so the name keeps cycling while voting is still open.
+    if _bracket_pacing(eff) == "round" and bracket["year"] != 0:
+        await _rotate_round_pacing_name(client, guild_id, bracket, eff)
+
     if not any(m["status"] == "active" and m["ends_at"] and m["ends_at"] <= now_utc for m in matchups):
         return
 
-    all_complete = True
+    all_complete   = True
+    last_winner_id = None
     for m in matchups:
         if m["status"] == "complete":
             continue
@@ -967,8 +1055,19 @@ async def check_bracket_advancement(guild_id: int, client: discord.Client) -> No
             winner_id = m["entry_a_id"] if result == "a" else m["entry_b_id"]
 
         set_matchup_winner(m["id"], winner_id)
+        last_winner_id = winner_id
 
     tz = _guild_tz(cfg)
+
+    # Daily pacing: the server name tracks each day's matchup winner — rename to
+    # the matchup that just resolved. (Round pacing keeps the name frozen until
+    # the champion: many matchups resolve at once and guild renames are limited
+    # to ~2 / 10 min.) The final matchup sets the champion's name here; the crown
+    # step below is idempotent, so it won't double-edit.
+    if _bracket_pacing(eff) == "daily" and last_winner_id is not None and bracket["year"] != 0:
+        _dw = get_bracket_entry(last_winner_id)
+        if _dw and await _rename_guild(client, guild_id, _dw["quote"]):
+            await bracket_channel.send(f'🏷️ Server renamed to the latest winner: **"{_dw["quote"]}"**')
 
     # Daily pacing: post the next unposted matchup now that this poll has
     # closed, rather than waiting for the whole round.  Only fall through to

@@ -408,10 +408,12 @@ async def process_rename(
         log.warning("[%s] Guild not found — skipping rename.", guild_id)
         return
 
-    # While a bracket is running, the server name is frozen — the bracket winner
-    # sets it. Renames resume once the bracket completes. Previews are exempt.
+    # While a bracket is running, the daily quote-rename is suspended — the
+    # bracket drives the server name instead (each matchup winner under daily
+    # pacing; the champion under round pacing). Renames resume once the bracket
+    # completes. Previews are exempt.
     if not preview and get_active_bracket(guild_id):
-        log.info("[%s] Active bracket — skipping rename (server name frozen until winner).", guild_id)
+        log.info("[%s] Active bracket — daily rename suspended (bracket controls the name).", guild_id)
         return
 
     # Fetch today's cooldown counts per category if cooldown is enabled.
