@@ -24,8 +24,9 @@ from db_utils import (
     create_bracket_matchup, update_matchup_posted,
     get_active_round_matchups, set_matchup_winner,
     get_round_winners_ordered, advance_bracket_round, complete_bracket,
-    get_season,
+    set_bracket_champion, set_bracket_entry_icon, get_season,
 )
+import credits
 
 log = logging.getLogger(__name__)
 
@@ -81,6 +82,46 @@ def _bracket_col(bracket, col: str):
         return None
 
 
+# Rows predating the credit columns (and test fakes) simply don't have them.
+_col = _bracket_col
+
+
+async def _send_lines(channel, lines: list[str]) -> None:
+    """
+    Send *lines* as one message, or several if they exceed Discord's 2000-char
+    cap. Seed lists get long — 32 entries with credits is ~5k chars, and a
+    single oversized send would 400 mid-launch, stranding a half-created
+    bracket. Every line is kept (the seed list is the bracket's record).
+    """
+    batch: list[str] = []
+    used = 0
+    for line in lines:
+        if used + len(line) + 1 > 1900 and batch:
+            await channel.send("\n".join(batch))
+            batch, used = [], 0
+        batch.append(line)
+        used += len(line) + 1
+    if batch:
+        await channel.send("\n".join(batch))
+
+
+def _effective_cfg(cfg, bracket) -> dict:
+    """
+    A config mapping with voting hours & pacing pinned to the bracket's snapshot,
+    so a bracket runs with the settings chosen at launch even if the server's live
+    config is edited mid-bracket. Legacy brackets (columns NULL) fall back to the
+    live config value. All other config keys pass through unchanged.
+    """
+    d = dict(cfg)
+    vh = _bracket_col(bracket, "voting_hours")
+    if vh:
+        d["bracket_voting_hours"] = vh
+    pc = _bracket_col(bracket, "pacing")
+    if pc:
+        d["bracket_pacing"] = pc
+    return d
+
+
 def _bracket_label(bracket) -> str:
     """Display label for a bracket: explicit label, else the year, else 'Bracket'."""
     label = _bracket_col(bracket, "label")
@@ -118,10 +159,54 @@ async def _get_total_reactions(client: discord.Client, channel_id: int, message_
         if not channel:
             return 0
         msg = await channel.fetch_message(message_id)
-        return sum(r.count for r in msg.reactions)
+        return sum(r.count - (1 if r.me else 0) for r in msg.reactions)
     except Exception as e:
         log.warning("Could not fetch reactions (msg %s): %s", message_id, e)
         return 0
+
+
+async def _scored_from_forwards(
+    client: discord.Client, source_channel_id: int, posts_in_window: list,
+) -> list[tuple[int, str, str | None]]:
+    """
+    Seed candidates from a curated "best of" channel that members populate with
+    Discord **native forwards** of rename cards.
+
+    A native forward carries a `message.reference` whose `type` is
+    `MessageReferenceType.forward` and whose `message_id` points at the ORIGINAL
+    posted card. We only count forwards whose original matches a rename post
+    inside the bracket's seeding window (`posts_in_window`), so the year/season
+    window and the tracking floor still apply. Screenshots or re-uploads have no
+    such reference and are silently ignored — members must use the Forward button.
+
+    Returns (reaction_count, post_row) tuples scored by the reactions on the
+    *forwarded* message; the row carries the quote and both credits. Dedup-by-
+    quote happens in the caller.
+    """
+    by_msg = {p["message_id"]: p for p in posts_in_window}
+    if not by_msg:
+        return []
+
+    channel = client.get_channel(source_channel_id)
+    if not channel:
+        return []
+
+    scored: list[tuple[int, object]] = []
+    try:
+        async for msg in channel.history(limit=None):
+            ref = msg.reference
+            if not ref or getattr(ref, "type", None) != discord.MessageReferenceType.forward:
+                continue
+            original = by_msg.get(ref.message_id)
+            if original is None:
+                continue
+            # Count human reactions only — the bot's own ℹ️/🔁 confirmation
+            # reactions must not add to a forward's score.
+            count = sum(r.count - (1 if r.me else 0) for r in msg.reactions)
+            scored.append((count, original))
+    except discord.HTTPException as e:
+        log.warning("Could not scan bracket source channel %s: %s", source_channel_id, e)
+    return scored
 
 
 async def _get_fresh_image_url(client: discord.Client, channel_id: int, message_id: int) -> str | None:
@@ -177,34 +262,207 @@ async def _dramatic_coin_flip(channel: discord.TextChannel, name_a: str, name_b:
     return winner
 
 
+# Guilds we've already warned this run about a missing Manage Server permission,
+# so a bracket that renames often doesn't spam the notice. Reset at bracket start.
+_rename_forbidden_warned: set[int] = set()
+
+
+async def _warn_rename_forbidden(client: discord.Client, guild_id: int) -> None:
+    """Tell admins (once per bracket) that renames are being skipped for lack of perms."""
+    if guild_id in _rename_forbidden_warned:
+        return
+    _rename_forbidden_warned.add(guild_id)
+    log.warning("[%s] Missing Manage Server — bracket renames are being skipped.", guild_id)
+    cfg = get_config(guild_id)
+    channel = client.get_channel(cfg["bracket_channel"]) if cfg["bracket_channel"] else None
+    if channel:
+        try:
+            await channel.send(
+                "⚠️ I can't rename the server — I'm missing the **Manage Server** permission, "
+                "so bracket renames are being skipped. Grant it and the name will update from the "
+                "next result onward."
+            )
+        except discord.HTTPException:
+            pass
+
+
+async def _rename_guild(client: discord.Client, guild_id: int, name: str) -> bool:
+    """
+    Set the server name (truncated to Discord's 100-char cap). Idempotent — a
+    no-op that returns True if the name is already set (so we never waste one of
+    Discord's scarce guild-rename calls, ~2 per 10 min). Returns False on failure.
+    On a missing-permission error, warns the bracket channel once (see above).
+    """
+    from image_utils import truncate_to_100_chars
+    guild = client.get_guild(guild_id)
+    if not guild:
+        return False
+    new_name = truncate_to_100_chars(name)
+    if guild.name == new_name:
+        return True
+    try:
+        await guild.edit(name=new_name)
+        log.info('[%s] Server renamed to: "%s"', guild_id, name)
+        return True
+    except discord.Forbidden:
+        await _warn_rename_forbidden(client, guild_id)
+        return False
+    except discord.HTTPException as e:
+        log.error("[%s] Failed to rename server: %s", guild_id, e)
+        return False
+
+
+async def _drive_server_name(
+    client: discord.Client, guild_id: int, bracket, name: str,
+    bracket_channel: discord.TextChannel | None = None,
+) -> bool:
+    """
+    Point the server name at *name* for a real bracket. For a **test** bracket
+    (year==0) the real server is never touched — instead we log and (if given a
+    channel) post what it *would* rename to, so the behavior is visible when
+    testing. Returns True only when the real server was actually renamed.
+    """
+    if bracket["year"] == 0:
+        log.info('[%s] TEST bracket — would rename server to: "%s"', guild_id, name)
+        if bracket_channel:
+            try:
+                await bracket_channel.send(f'🏷️ *(test — real server unchanged)* would rename to: **"{name}"**')
+            except discord.HTTPException:
+                pass
+        return False
+    return await _rename_guild(client, guild_id, name)
+
+
+async def restore_pre_bracket_name(client: discord.Client, guild_id: int) -> str | None:
+    """Restore the server name saved when the bracket started (used on cancel). Returns the name if applied."""
+    cfg  = get_config(guild_id)
+    name = cfg["pre_bracket_name"]
+    if name and await _rename_guild(client, guild_id, name):
+        return name
+    return None
+
+
+_MIN_ROTATE_MINUTES = 10  # keep guild renames spaced out (Discord ~2 / 10 min cap)
+
+
+async def _rotate_round_pacing_name(
+    client: discord.Client, guild_id: int, bracket, eff,
+) -> None:
+    """
+    Round pacing: give each entry competing in the active round an equal slice of
+    that round's voting window as the server name (so a round's winners each hold
+    the name for the same amount of time over the following window). Stateless and
+    idempotent — called every scheduler tick; `_rename_guild` only actually edits
+    when the current slice changes. Skipped when slices would be shorter than
+    ~10 min (e.g. a large round with a very short voting window), to stay under
+    Discord's guild-rename rate limit; the name simply holds until the champion in
+    that edge case.
+
+    Only **winners** ever drive the server name: round 1's combatants are the
+    seeded nominees (not winners of a prior round), so rotation begins at round 2
+    (whose entries are round 1's winners).
+    """
+    if bracket["current_round"] <= 1:
+        return
+
+    matchups = [
+        m for m in get_active_round_matchups(bracket["id"], bracket["current_round"])
+        if m["ends_at"]
+    ]
+    if not matchups:
+        return
+    voting_hours = eff["bracket_voting_hours"] or 24
+    try:
+        ends_at = max(datetime.fromisoformat(m["ends_at"]) for m in matchups)
+    except ValueError:
+        return
+    start = ends_at - timedelta(hours=voting_hours)
+
+    entry_ids: list[int] = []
+    for m in sorted(matchups, key=lambda x: x["match_num"]):
+        entry_ids += [m["entry_a_id"], m["entry_b_id"]]
+    n = len(entry_ids)
+    if n == 0 or (voting_hours * 60) / n < _MIN_ROTATE_MINUTES:
+        return
+
+    now = datetime.now(pytz.utc)
+    if now < start:
+        return
+    slot_seconds = (voting_hours * 3600) / n
+    idx = max(0, min(int((now - start).total_seconds() // slot_seconds), n - 1))
+    entry = get_bracket_entry(entry_ids[idx])
+    if entry:
+        await _rename_guild(client, guild_id, entry["quote"])
+
+
 async def _crown_champion(
     client: discord.Client, guild_id: int,
     bracket_channel: discord.TextChannel, bracket, champion,
+    rename_posts: list | None = None,
 ) -> None:
     """
     Announce the bracket champion and set the server name to the winning quote.
     Real brackets rename the server; test brackets (year==0) never touch it.
+    (Under daily pacing the name may already be the champion from the final
+    matchup's rename — _rename_guild is idempotent, so this won't double-edit.)
+
+    The winning card image is attached when available (from the rename posts for
+    real brackets, or the in-memory card cache for tests). Callers must not evict
+    the test card cache until after this returns.
     """
-    from image_utils import truncate_to_100_chars
+    import io
+
+    # Record the winner for /bracket history (real brackets only).
+    if bracket["year"] != 0:
+        set_bracket_champion(bracket["id"], champion["quote"], champion["quote_user"],
+                             _col(champion, "quote_uid"))
 
     renamed = False
-    guild   = client.get_guild(guild_id)
-    if guild and bracket["year"] != 0:
-        try:
-            await guild.edit(name=truncate_to_100_chars(champion["quote"]))
-            renamed = True
-            log.info('[%s] Server renamed to bracket champion: "%s"', guild_id, champion["quote"])
-        except discord.HTTPException as e:
-            log.error("[%s] Failed to rename server to champion: %s", guild_id, e)
+    if bracket["year"] != 0:
+        renamed = await _rename_guild(client, guild_id, champion["quote"])
+        if renamed:
+            log.info('[%s] Server name is the bracket champion: "%s"', guild_id, champion["quote"])
+    else:
+        log.info('[%s] TEST bracket — would rename server to champion: "%s"', guild_id, champion["quote"])
 
-    tail = "\n\n👑 *The server name is now the winning entry!*" if renamed else ""
-    await bracket_channel.send(
+    card_file = None
+    try:
+        card = await _get_card_bytes(champion, bracket["id"], client, rename_posts or [])
+        if card:
+            card_file = discord.File(io.BytesIO(card), filename="champion.png")
+    except Exception as e:
+        log.warning("[%s] Could not build champion card image: %s", guild_id, e)
+
+    if renamed:
+        tail = "\n\n👑 *The server name is now the winning entry!*"
+    elif bracket["year"] == 0:
+        tail = "\n\n🧪 *(test bracket — the real server name was not changed)*"
+    else:
+        tail = ""
+    # The one place mentions actually ping — winning the bracket is worth a ping.
+    # The client default is AllowedMentions.none(), so this send must opt in,
+    # and only user pings: quote text can never smuggle an @everyone through.
+    _cfg = get_config(guild_id)
+    who = credits.credit_line(
+        client, guild_id, _cfg,
+        quote_user=champion["quote_user"], quote_uid=_col(champion, "quote_uid"),
+        icon_user=_col(champion, "icon_user"), icon_uid=_col(champion, "icon_uid"),
+    )
+    mentions = (discord.AllowedMentions(everyone=False, roles=False, users=True)
+                if credits.mentions_on(_cfg) else discord.AllowedMentions.none())
+    content = (
         f"\n🎊🏆🎊 **{_bracket_label(bracket)} SERVER NAME CHAMPION** 🎊🏆🎊\n\n"
         f'**"{champion["quote"]}"**\n'
-        f'*submitted by {champion["quote_user"] or "Unknown"} · '
-        f'{champion["season_reactions"]} reactions this season*\n\n'
+        f'*{who} · {champion["season_reactions"]} reactions this season*\n\n'
         f"Congratulations! 🎉{tail}"
     )
+    try:
+        if card_file:
+            await bracket_channel.send(content, file=card_file, allowed_mentions=mentions)
+        else:
+            await bracket_channel.send(content, allowed_mentions=mentions)
+    except discord.HTTPException as e:
+        log.error("[%s] Failed to post champion announcement: %s", guild_id, e)
 
 
 async def _get_card_bytes(
@@ -242,7 +500,8 @@ async def _get_card_bytes(
     return None
 
 
-def _build_matchup_embeds(match_num: int, entry_a, entry_b, bytes_a, bytes_b):
+def _build_matchup_embeds(match_num: int, entry_a, entry_b, bytes_a, bytes_b,
+                          client: discord.Client, guild_id: int, cfg):
     """
     Build the (embeds, files) for one matchup's two cards, labeled
     "Match N — Option A/B".  Images are attached via the attachment:// scheme
@@ -255,11 +514,17 @@ def _build_matchup_embeds(match_num: int, entry_a, entry_b, bytes_a, bytes_b):
         ("A", entry_a, bytes_a, discord.Color.blue()),
         ("B", entry_b, bytes_b, discord.Color.red()),
     ):
+        # Mentions inside an embed render as a name but never ping — safe here.
+        who = credits.credit_line(
+            client, guild_id, cfg,
+            quote_user=entry["quote_user"], quote_uid=_col(entry, "quote_uid"),
+            icon_user=_col(entry, "icon_user"), icon_uid=_col(entry, "icon_uid"),
+        )
         embed = discord.Embed(
             title=f"Match {match_num + 1} — Option {side}  ·  #{entry['seed']} seed",
             description=(
                 f'**"{entry["quote"]}"**\n'
-                f'*submitted by {entry["quote_user"] or "Unknown"}*\n'
+                f'*{who}*\n'
                 f'{entry["season_reactions"]} reactions this season'
             ),
             color=color,
@@ -301,7 +566,8 @@ async def _post_matchup(
         _get_card_bytes(entry_a, bracket_id, client, rename_posts),
         _get_card_bytes(entry_b, bracket_id, client, rename_posts),
     )
-    embeds, files = _build_matchup_embeds(match_num, entry_a, entry_b, bytes_a, bytes_b)
+    embeds, files = _build_matchup_embeds(match_num, entry_a, entry_b, bytes_a, bytes_b,
+                                          client, channel.guild.id, cfg)
 
     header = (
         f"─────────────────────────\n"
@@ -432,11 +698,14 @@ async def start_test_bracket(guild_id: int, client: discord.Client) -> tuple[boo
     cfg = get_config(guild_id)
 
     if get_active_bracket(guild_id):
-        return False, "⚠️ There's already an active bracket. Run `!cancelbracket` first if it's a test."
+        return False, "⚠️ There's already an active bracket. Run `/bracket cancel` first if it's a test."
 
     bracket_channel = client.get_channel(cfg["bracket_channel"])
     if not bracket_channel:
-        return False, "⚠️ No bracket channel configured. Run `!setbracketchannel` first."
+        return False, (
+            "⚠️ No bracket channel yet. Open `/bracket start` and pick (or 🏗️ create) "
+            "one from the top dropdown — that saves it — then run `/bracket test`."
+        )
 
     quote_channel = client.get_channel(cfg["quote_channel"])
     if not quote_channel:
@@ -469,7 +738,7 @@ async def start_test_bracket(guild_id: int, client: discord.Client) -> tuple[boo
 
     # Random scores simulate a real season of voting
     scored = sorted(
-        [(random.randint(1, 50), quote, name) for _, (quote, name, _) in pool.items()],
+        [(random.randint(1, 50), quote, name, uid) for uid, (quote, name, _) in pool.items()],
         reverse=True,
     )
 
@@ -485,19 +754,23 @@ async def start_test_bracket(guild_id: int, client: discord.Client) -> tuple[boo
     nominees = scored[:actual_size]
     total_rounds = int(math.log2(actual_size))
 
-    bracket_id = create_bracket(guild_id, 0, actual_size, voting_hours, label="TEST")
+    bracket_id = create_bracket(
+        guild_id, 0, actual_size, voting_hours, label="TEST",
+        pacing=cfg["bracket_pacing"] or "round",
+    )
     entry_ids  = []
-    for seed, (score, quote, user) in enumerate(nominees, start=1):
-        eid = create_bracket_entry(bracket_id, seed, quote, user, score)
+    for seed, (score, quote, user, uid) in enumerate(nominees, start=1):
+        eid = create_bracket_entry(bracket_id, seed, quote, user, score, quote_uid=uid)
         entry_ids.append(eid)
 
     lines = [
         f"🧪 **TEST BRACKET — {actual_size} names** *(random scores, not a real bracket)*",
-        f"{total_rounds} round(s) · {voting_hours}h per matchup · use `!forcebracketadvance` to skip the wait\n",
+        f"{total_rounds} round(s) · {voting_hours}h per matchup · use `/bracket forceadvance` to skip the wait\n",
     ]
-    for seed, (score, quote, user) in enumerate(nominees, start=1):
-        lines.append(f'  **#{seed}** "{quote}" — *{user}* · {score} reactions (random)')
-    await bracket_channel.send("\n".join(lines))
+    for seed, (score, quote, user, uid) in enumerate(nominees, start=1):
+        who = credits.resolve_name(client, guild_id, uid, user, credits.style_of(cfg))
+        lines.append(f'  **#{seed}** "{quote}" — *{who}* · {score} reactions (random)')
+    await _send_lines(bracket_channel, lines)
 
     # Generate card images for each nominee upfront and store the bytes in
     # _test_card_cache so _get_card_bytes can serve them in every round —
@@ -507,16 +780,21 @@ async def start_test_bracket(guild_id: int, client: discord.Client) -> tuple[boo
 
     icon_channel = client.get_channel(cfg["icon_channel"])
 
-    async def _make_test_card(entry_id: int, quote: str, user: str) -> None:
+    style = credits.style_of(cfg)
+
+    async def _make_test_card(entry_id: int, quote: str, user: str, uid: int | None) -> None:
         from bot_features import get_random_icon
         from image_utils import generate_card
         import aiohttp
         _TIMEOUT = aiohttp.ClientTimeout(total=15)
 
-        icon_url, icon_user, _ = await get_random_icon(icon_channel)
+        icon_url, icon_user, icon_uid = await get_random_icon(icon_channel)
         if not icon_url:
             log.warning("Test card: no icon available for entry %s", entry_id)
             return
+        # The icon is only chosen now, after seeding, so the entry's icon credit
+        # has to be backfilled for the matchup embeds to show it.
+        set_bracket_entry_icon(entry_id, icon_user, icon_uid)
         try:
             async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
                 async with session.get(icon_url) as resp:
@@ -525,12 +803,17 @@ async def start_test_bracket(guild_id: int, client: discord.Client) -> tuple[boo
         except Exception as e:
             log.warning("Test card: failed to download icon: %s", e)
             return
-        card = await generate_card(quote, user, icon_user or "Unknown", icon_bytes)
+        card = await generate_card(
+            quote,
+            credits.resolve_name(client, guild_id, uid, user, style),
+            credits.resolve_name(client, guild_id, icon_uid, icon_user, style),
+            icon_bytes,
+        )
         if card:
             card_bytes_map[entry_id] = card.read()
 
-    for eid, (score, quote, user) in zip(entry_ids, nominees):
-        await _make_test_card(eid, quote, user)
+    for eid, (score, quote, user, uid) in zip(entry_ids, nominees):
+        await _make_test_card(eid, quote, user, uid)
 
     _test_card_cache[bracket_id] = card_bytes_map
 
@@ -540,13 +823,14 @@ async def start_test_bracket(guild_id: int, client: discord.Client) -> tuple[boo
         mid = create_bracket_matchup(bracket_id, 1, match_num, a_id, b_id)
         matchup_rows.append((mid, a_id, b_id))
 
-    tz = _guild_tz(cfg)
-    await _post_round(bracket_id, 1, matchup_rows, bracket_channel, cfg, tz, client, [])
+    tz  = _guild_tz(cfg)
+    eff = _effective_cfg(cfg, get_active_bracket(guild_id))
+    await _post_round(bracket_id, 1, matchup_rows, bracket_channel, eff, tz, client, [])
 
     return True, (
         "✅ Test bracket started!\n"
-        "Vote in the polls, then use `!forcebracketadvance` to skip the wait.\n"
-        "Run `!cancelbracket` when done to clean up."
+        "Vote in the polls, then use `/bracket forceadvance` to skip the wait.\n"
+        "Run `/bracket cancel` when done to clean up."
     )
 
 
@@ -566,8 +850,9 @@ async def force_bracket_advance(guild_id: int, client: discord.Client) -> tuple[
     if not bracket_channel:
         return False, "⚠️ Bracket channel not found."
 
+    eff       = _effective_cfg(cfg, bracket)
     round_num = bracket["current_round"]
-    pacing    = _bracket_pacing(cfg)
+    pacing    = _bracket_pacing(eff)
     matchups  = get_active_round_matchups(bracket["id"], round_num)
 
     # Daily pacing posts one matchup at a time, so only the matchup currently
@@ -583,6 +868,7 @@ async def force_bracket_advance(guild_id: int, client: discord.Client) -> tuple[
 
     await bracket_channel.send(f"⚡ Force-advancing round {round_num}...")
 
+    last_winner_id = None
     for m in pending:
         entry_a = get_bracket_entry(m["entry_a_id"])
         entry_b = get_bracket_entry(m["entry_b_id"])
@@ -625,8 +911,16 @@ async def force_bracket_advance(guild_id: int, client: discord.Client) -> tuple[
             winner_id = m["entry_a_id"] if result == "a" else m["entry_b_id"]
 
         set_matchup_winner(m["id"], winner_id)
+        last_winner_id = winner_id
 
     tz = _guild_tz(cfg)
+
+    # Daily pacing: the server name tracks the day's matchup winner (see
+    # check_bracket_advancement). Round pacing stays frozen until the champion.
+    if pacing == "daily" and last_winner_id is not None:
+        _dw = get_bracket_entry(last_winner_id)
+        if _dw and await _drive_server_name(client, guild_id, bracket, _dw["quote"], bracket_channel):
+            await bracket_channel.send(f'🏷️ Server renamed to the latest winner: **"{_dw["quote"]}"**')
 
     # Daily pacing: if matchups in this round remain unposted, post the next one
     # instead of advancing — force-advance just skips the current poll's wait.
@@ -641,7 +935,7 @@ async def force_bracket_advance(guild_id: int, client: discord.Client) -> tuple[
             await _post_daily_matchup(
                 bracket["id"], nxt["id"], nxt["entry_a_id"], nxt["entry_b_id"],
                 nxt["match_num"], len(fresh),
-                bracket_channel, cfg, tz, client, rename_posts, label,
+                bracket_channel, eff, tz, client, rename_posts, label,
             )
             return True, f"✅ Resolved matchup — posted Match {nxt['match_num'] + 1} of {len(fresh)}."
 
@@ -650,8 +944,9 @@ async def force_bracket_advance(guild_id: int, client: discord.Client) -> tuple[
     if len(winners) == 1:
         champion = get_bracket_entry(winners[0])
         complete_bracket(bracket["id"])
+        rename_posts = _rename_posts_for_bracket(guild_id, bracket, cfg, tz)
+        await _crown_champion(client, guild_id, bracket_channel, bracket, champion, rename_posts)
         _test_card_cache.pop(bracket["id"], None)
-        await _crown_champion(client, guild_id, bracket_channel, bracket, champion)
         return True, "🏆 Bracket complete!"
 
     new_round    = advance_bracket_round(bracket["id"])
@@ -667,7 +962,7 @@ async def force_bracket_advance(guild_id: int, client: discord.Client) -> tuple[
     await bracket_channel.send(f"\n⚔️ **{label} begins!**")
 
     rename_posts = _rename_posts_for_bracket(guild_id, bracket, cfg, tz)
-    await _post_round(bracket["id"], new_round, matchup_rows, bracket_channel, cfg, tz, client, rename_posts)
+    await _post_round(bracket["id"], new_round, matchup_rows, bracket_channel, eff, tz, client, rename_posts)
     return True, f"✅ Advanced to round {new_round}."
 
 
@@ -677,12 +972,18 @@ async def _start_range_bracket(
     guild_id: int, client: discord.Client,
     range_start_utc: str, range_end_utc: str,
     label: str, year_value: int, scope_desc: str,
+    size: int | None = None, voting_hours: int | None = None, pacing: str | None = None,
+    force_firehose: bool = False,
 ) -> tuple[bool, str]:
     """
     Shared seeding + launch for real brackets over an arbitrary date window.
     *label* is the display name ('2026', 'Halloween 2026'); *year_value* is stored
     in the bracket's year column (must be > 0 so it isn't treated as a test bracket);
     *scope_desc* appears in the "no posts found" and tally messages.
+
+    *size*/*voting_hours*/*pacing* are the per-run choices from the start panel;
+    each falls back to the server's stored config when not supplied. They are
+    snapshotted onto the bracket row so the run is locked to them.
     """
     cfg = get_config(guild_id)
 
@@ -691,10 +992,21 @@ async def _start_range_bracket(
 
     bracket_channel = client.get_channel(cfg["bracket_channel"])
     if not bracket_channel:
-        return False, "⚠️ No bracket channel configured. Run `!setbracketchannel` in your desired channel first."
+        return False, (
+            "⚠️ No bracket channel yet. Pick (or 🏗️ create) one from the top dropdown "
+            "in `/bracket start`."
+        )
 
-    bracket_size = cfg["bracket_size"]  or 8
-    voting_hours = cfg["bracket_voting_hours"] or 24
+    # Remember the current server name so /bracket cancel can restore it, and let
+    # this bracket warn afresh if it can't rename (missing Manage Server).
+    _rename_forbidden_warned.discard(guild_id)
+    _pre = client.get_guild(guild_id)
+    if _pre:
+        set_config(guild_id, "pre_bracket_name", _pre.name)
+
+    bracket_size = size         or cfg["bracket_size"]         or 8
+    voting_hours = voting_hours or cfg["bracket_voting_hours"] or 24
+    pacing       = pacing       or cfg["bracket_pacing"]       or "round"
 
     if not math.log2(bracket_size).is_integer():
         return False, f"⚠️ Bracket size must be a power of 2 (4, 8, 16, 32). Currently: {bracket_size}."
@@ -705,21 +1017,47 @@ async def _start_range_bracket(
     if not posts:
         return False, (
             f"⚠️ No rename posts found for {scope_desc}. "
-            f"Renames are tracked automatically once a post channel is set (`!setpostchannel`)."
+            f"Renames are tracked automatically once a post channel is set (see `/setup`)."
         )
 
-    await bracket_channel.send(f"⏳ Tallying reactions from {len(posts)} rename posts for {scope_desc}...")
+    # If a curated "best of" source channel is configured, seed from the renames
+    # members forwarded there (scored by reactions on the forwards). Otherwise,
+    # seed from every tracked rename in the window (scored by reactions in place).
+    # Per-bracket choice from the start panel: force_firehose ignores the best-of
+    # channel and seeds from every tracked rename in the window instead.
+    source_channel_id = None if force_firehose else cfg["bracket_source_channel"]
+    if source_channel_id:
+        if not client.get_channel(source_channel_id):
+            return False, (
+                "⚠️ The configured best-of source channel isn't accessible. "
+                "Re-set it (or clear it) in `/setup`, or pick 🔀 **Source: all renames** "
+                "in `/bracket start` to skip it."
+            )
+        scored = await _scored_from_forwards(client, source_channel_id, posts)
+        if not scored:
+            return False, (
+                f"⚠️ No forwarded renames found for {scope_desc}. Members nominate "
+                f"names by **forwarding** rename cards (Discord's Forward button) into the "
+                f"source channel — screenshots and re-uploads don't count."
+            )
+        await bracket_channel.send(
+            f"⏳ Tallying reactions from {len(scored)} forwarded rename(s) for {scope_desc}..."
+        )
+    else:
+        await bracket_channel.send(
+            f"⏳ Tallying reactions from {len(posts)} rename posts for {scope_desc}..."
+        )
+        scored = []
+        for post in posts:
+            count = await _get_total_reactions(client, post["channel_id"], post["message_id"])
+            scored.append((count, post))
 
-    scored: list[tuple[int, str, str | None]] = []
-    for post in posts:
-        count = await _get_total_reactions(client, post["channel_id"], post["message_id"])
-        scored.append((count, post["quote"], post["quote_user"]))
-
-    # Deduplicate — keep highest score per unique quote
-    best: dict[str, tuple[int, str | None]] = {}
-    for count, quote, user in scored:
+    # Deduplicate — keep the highest-scoring post per unique quote
+    best: dict[str, tuple[int, object]] = {}
+    for count, post in scored:
+        quote = post["quote"]
         if quote not in best or count > best[quote][0]:
-            best[quote] = (count, user)
+            best[quote] = (count, post)
 
     ranked = sorted(best.items(), key=lambda x: x[1][0], reverse=True)
 
@@ -740,10 +1078,15 @@ async def _start_range_bracket(
     bracket_id = create_bracket(
         guild_id, year_value, actual_size, voting_hours,
         label=label, range_start=range_start_utc, range_end=range_end_utc,
+        pacing=pacing,
     )
     entry_ids  = []
-    for seed, (quote, (score, user)) in enumerate(nominees, start=1):
-        eid = create_bracket_entry(bracket_id, seed, quote, user, score)
+    for seed, (quote, (score, post)) in enumerate(nominees, start=1):
+        eid = create_bracket_entry(
+            bracket_id, seed, quote, post["quote_user"], score,
+            quote_uid=_col(post, "quote_uid"),
+            icon_user=_col(post, "icon_user"), icon_uid=_col(post, "icon_uid"),
+        )
         entry_ids.append(eid)
 
     total_rounds = int(math.log2(actual_size))
@@ -751,9 +1094,16 @@ async def _start_range_bracket(
         f"🏆 **{label} Server Name Championship — {actual_size}-name bracket!**",
         f"Seeded by total reactions · {total_rounds} round(s) · {voting_hours}h per matchup\n",
     ]
-    for seed, (quote, (score, user)) in enumerate(nominees, start=1):
-        lines.append(f'  **#{seed}** "{quote}" — *{user or "Unknown"}* · {score} reactions')
-    await bracket_channel.send("\n".join(lines))
+    for seed, (quote, (score, post)) in enumerate(nominees, start=1):
+        # No mentions here — a seed list would ping every nominee at once.
+        who = credits.credit_line(
+            client, guild_id, cfg,
+            quote_user=post["quote_user"], quote_uid=_col(post, "quote_uid"),
+            icon_user=_col(post, "icon_user"), icon_uid=_col(post, "icon_uid"),
+            prefix="", mention=False,
+        )
+        lines.append(f'  **#{seed}** "{quote}" — *{who}* · {score} reactions')
+    await _send_lines(bracket_channel, lines)
 
     pairs = _first_round_pairs(entry_ids)
     matchup_rows = []
@@ -761,12 +1111,18 @@ async def _start_range_bracket(
         mid = create_bracket_matchup(bracket_id, 1, match_num, a_id, b_id)
         matchup_rows.append((mid, a_id, b_id))
 
-    await _post_round(bracket_id, 1, matchup_rows, bracket_channel, cfg, tz, client, list(posts))
+    # Post the first round using the settings snapshotted onto the bracket row.
+    eff = _effective_cfg(cfg, get_active_bracket(guild_id))
+    await _post_round(bracket_id, 1, matchup_rows, bracket_channel, eff, tz, client, list(posts))
 
     return True, f"✅ {label} bracket started! {actual_size} nominees, {len(pairs)} first-round matchup(s)."
 
 
-async def start_bracket(guild_id: int, client: discord.Client, year: int) -> tuple[bool, str]:
+async def start_bracket(
+    guild_id: int, client: discord.Client, year: int,
+    size: int | None = None, voting_hours: int | None = None, pacing: str | None = None,
+    force_firehose: bool = False,
+) -> tuple[bool, str]:
     """Seed and launch a real bracket for a calendar *year*, seeded by reaction counts."""
     cfg = get_config(guild_id)
     tz  = _guild_tz(cfg)
@@ -774,16 +1130,21 @@ async def start_bracket(guild_id: int, client: discord.Client, year: int) -> tup
     return await _start_range_bracket(
         guild_id, client, year_start, year_end,
         label=str(year), year_value=year, scope_desc=str(year),
+        size=size, voting_hours=voting_hours, pacing=pacing, force_firehose=force_firehose,
     )
 
 
-async def start_season_bracket(guild_id: int, client: discord.Client, season_name: str) -> tuple[bool, str]:
+async def start_season_bracket(
+    guild_id: int, client: discord.Client, season_name: str,
+    size: int | None = None, voting_hours: int | None = None, pacing: str | None = None,
+    force_firehose: bool = False,
+) -> tuple[bool, str]:
     """Seed and launch a bracket from a named season's date window."""
     season = get_season(guild_id, season_name)
     if not season:
         return False, (
             f'⚠️ No season named "{season_name}". '
-            f"Create one with `!addseason <start> <end> <name>` or see `!listseasons`."
+            f"Create one with `/season` (Add season)."
         )
     # Display the season's real name (preserves original casing) and derive the
     # stored year from the window start so it's never mistaken for a test bracket.
@@ -795,6 +1156,7 @@ async def start_season_bracket(guild_id: int, client: discord.Client, season_nam
     return await _start_range_bracket(
         guild_id, client, season["start_at"], season["end_at"],
         label=name, year_value=max(year_value, 1), scope_desc=f'season "{name}"',
+        size=size, voting_hours=voting_hours, pacing=pacing, force_firehose=force_firehose,
     )
 
 
@@ -805,6 +1167,7 @@ async def check_bracket_advancement(guild_id: int, client: discord.Client) -> No
         return
 
     cfg             = get_config(guild_id)
+    eff             = _effective_cfg(cfg, bracket)
     bracket_channel = client.get_channel(cfg["bracket_channel"])
     if not bracket_channel:
         return
@@ -816,10 +1179,18 @@ async def check_bracket_advancement(guild_id: int, client: discord.Client) -> No
     if not matchups:
         return
 
+    # Round pacing: rotate the server name through the current round's combatants,
+    # each getting an equal slice of the voting window. (Daily pacing renames on
+    # each matchup's close instead, below.) Runs every tick, before the expiry
+    # check, so the name keeps cycling while voting is still open.
+    if _bracket_pacing(eff) == "round" and bracket["year"] != 0:
+        await _rotate_round_pacing_name(client, guild_id, bracket, eff)
+
     if not any(m["status"] == "active" and m["ends_at"] and m["ends_at"] <= now_utc for m in matchups):
         return
 
-    all_complete = True
+    all_complete   = True
+    last_winner_id = None
     for m in matchups:
         if m["status"] == "complete":
             continue
@@ -861,13 +1232,24 @@ async def check_bracket_advancement(guild_id: int, client: discord.Client) -> No
             winner_id = m["entry_a_id"] if result == "a" else m["entry_b_id"]
 
         set_matchup_winner(m["id"], winner_id)
+        last_winner_id = winner_id
 
     tz = _guild_tz(cfg)
+
+    # Daily pacing: the server name tracks each day's matchup winner — rename to
+    # the matchup that just resolved. (Round pacing keeps the name frozen until
+    # the champion: many matchups resolve at once and guild renames are limited
+    # to ~2 / 10 min.) The final matchup sets the champion's name here; the crown
+    # step below is idempotent, so it won't double-edit.
+    if _bracket_pacing(eff) == "daily" and last_winner_id is not None:
+        _dw = get_bracket_entry(last_winner_id)
+        if _dw and await _drive_server_name(client, guild_id, bracket, _dw["quote"], bracket_channel):
+            await bracket_channel.send(f'🏷️ Server renamed to the latest winner: **"{_dw["quote"]}"**')
 
     # Daily pacing: post the next unposted matchup now that this poll has
     # closed, rather than waiting for the whole round.  Only fall through to
     # advancing once every matchup in the round has been posted and completed.
-    if _bracket_pacing(cfg) == "daily":
+    if _bracket_pacing(eff) == "daily":
         fresh    = get_active_round_matchups(bracket["id"], round_num)
         unposted = [m for m in fresh if not m["message_id"]]
         if unposted:
@@ -878,7 +1260,7 @@ async def check_bracket_advancement(guild_id: int, client: discord.Client) -> No
             await _post_daily_matchup(
                 bracket["id"], nxt["id"], nxt["entry_a_id"], nxt["entry_b_id"],
                 nxt["match_num"], len(fresh),
-                bracket_channel, cfg, tz, client, rename_posts, label,
+                bracket_channel, eff, tz, client, rename_posts, label,
             )
             log.info("[%s] Daily pacing: posted Match %d.", guild_id, nxt["match_num"] + 1)
             return
@@ -891,8 +1273,9 @@ async def check_bracket_advancement(guild_id: int, client: discord.Client) -> No
     if len(winners) == 1:
         champion = get_bracket_entry(winners[0])
         complete_bracket(bracket["id"])
+        rename_posts = _rename_posts_for_bracket(guild_id, bracket, cfg, tz)
+        await _crown_champion(client, guild_id, bracket_channel, bracket, champion, rename_posts)
         _test_card_cache.pop(bracket["id"], None)
-        await _crown_champion(client, guild_id, bracket_channel, bracket, champion)
         log.info("[%s] Bracket complete. Champion: %s", guild_id, champion["quote"])
         return
 
@@ -909,7 +1292,7 @@ async def check_bracket_advancement(guild_id: int, client: discord.Client) -> No
     await bracket_channel.send(f"\n⚔️ **{label} begins!**")
 
     rename_posts = _rename_posts_for_bracket(guild_id, bracket, cfg, tz)
-    await _post_round(bracket["id"], new_round, matchup_rows, bracket_channel, cfg, tz, client, rename_posts)
+    await _post_round(bracket["id"], new_round, matchup_rows, bracket_channel, eff, tz, client, rename_posts)
     log.info("[%s] Advanced to round %d.", guild_id, new_round)
 
 
@@ -918,7 +1301,7 @@ def get_bracket_status_text(guild_id: int) -> str:
     if not bracket:
         return "No active bracket."
     cfg          = get_config(guild_id)
-    pacing       = _bracket_pacing(cfg)
+    pacing       = _bracket_pacing(_effective_cfg(cfg, bracket))
     total_rounds = int(math.log2(bracket["size"]))
     label        = _round_label(bracket["current_round"], total_rounds)
     matchups     = get_active_round_matchups(bracket["id"], bracket["current_round"])

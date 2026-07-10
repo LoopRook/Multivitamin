@@ -1,4 +1,7 @@
-discord.py
-pytz
-aiohttp
-Pillow
+# Pinned so an unattended public deploy can't break on an upstream release.
+# discord.py is pinned exactly — the poll/app_commands APIs this bot relies on
+# are version-sensitive. Bump deliberately and re-test after any change.
+discord.py==2.7.1
+pytz>=2024.1
+aiohttp>=3.9,<4
+Pillow>=10,<12

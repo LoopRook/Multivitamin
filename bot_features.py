@@ -11,8 +11,10 @@ import pytz
 from db_utils import (
     get_config, set_config, log_pick, get_user_last_picks,
     get_today_pick_counts, store_rename_post, get_active_bracket,
+    get_custom_features, set_custom_feature_run_date,
 )
 from image_utils import generate_card, truncate_to_100_chars
+import credits
 
 log = logging.getLogger(__name__)
 
@@ -22,6 +24,8 @@ _MUSIC_PATTERN = re.compile(
     r"https?://(?:www\.)?(?:youtube\.com|youtu\.be|soundcloud\.com|spotify\.com)/\S+",
     re.IGNORECASE,
 )
+
+_URL_PATTERN = re.compile(r"https?://\S+", re.IGNORECASE)
 
 
 def is_music_link(line: str) -> bool:
@@ -38,6 +42,85 @@ def _guild_tz(cfg) -> pytz.BaseTzInfo:
 def _normalize_time(t: str) -> str:
     h, m = t.strip().split(":")
     return f"{int(h):02d}:{int(m):02d}"
+
+
+_FIRST_RUN_GRACE_MIN = 60
+
+
+def _fire_action(scheduled: str, cur_time: str, last_date: str | None, today: str) -> str:
+    """
+    Whether a scheduled job should run on this tick: 'fire', 'stamp' or 'skip'.
+
+    The scheduled time is a *threshold*, not an instant. Matching the minute
+    exactly (cur_time == scheduled) meant a slow tick, a restart or a paused
+    container across that one minute skipped the whole day silently. The
+    last-run date is what prevents a double fire, so firing late is safe.
+
+    First run (no last date) is special-cased both ways: reaching the slot on
+    time (within the grace window) fires normally — a weekly cadence must not
+    swallow its very first slot — but a guild configured hours *after* today's
+    slot gets 'stamp' instead of a surprise immediate post: record the date and
+    start fresh at the next scheduled time.
+
+    Times are zero-padded HH:MM, so string comparison is chronological.
+    """
+    if last_date == today:
+        return "skip"           # already ran today
+    if cur_time < scheduled:
+        return "skip"           # not time yet
+    if last_date:
+        return "fire"
+    sh, sm = scheduled.split(":")
+    ch, cm = cur_time.split(":")
+    minutes_late = (int(ch) * 60 + int(cm)) - (int(sh) * 60 + int(sm))
+    return "fire" if minutes_late <= _FIRST_RUN_GRACE_MIN else "stamp"
+
+
+# Discord allows ~2 guild-name edits per 10 minutes. discord.py doesn't error
+# past that — it silently sleeps until the limit clears, which would hang an
+# on-demand /rename for up to 10 minutes. We track our own budget so the
+# command can refuse up front with a real wait time instead.
+_RENAME_LIMIT = 2
+_RENAME_WINDOW = timedelta(minutes=10)
+_rename_times: dict[int, list[datetime]] = {}
+
+
+def _record_guild_rename(guild_id: int) -> None:
+    now = datetime.now(pytz.utc)
+    kept = [t for t in _rename_times.get(guild_id, []) if now - t < _RENAME_WINDOW]
+    kept.append(now)
+    _rename_times[guild_id] = kept
+
+
+def rename_cooldown_remaining(guild_id: int) -> int:
+    """Minutes until another server rename is allowed (0 = allowed now)."""
+    now = datetime.now(pytz.utc)
+    kept = [t for t in _rename_times.get(guild_id, []) if now - t < _RENAME_WINDOW]
+    _rename_times[guild_id] = kept
+    if len(kept) < _RENAME_LIMIT:
+        return 0
+    free_at = min(kept) + _RENAME_WINDOW
+    seconds = (free_at - now).total_seconds()
+    return max(1, int(seconds // 60) + (1 if seconds % 60 else 0))
+
+
+def pack_lines(lines: list[str], limit: int = 1900) -> str:
+    """
+    Join *lines* into a single message that stays under Discord's 2000-char
+    cap, dropping overflow lines with a "+N more" tail. For single-response
+    replies (ephemeral interactions) where splitting into several messages
+    isn't worth the ceremony — unbounded lists must not 400 the whole reply.
+    """
+    out, used, dropped = [], 0, 0
+    for i, line in enumerate(lines):
+        if used + len(line) + 1 > limit:
+            dropped = len(lines) - i
+            break
+        out.append(line)
+        used += len(line) + 1
+    if dropped:
+        out.append(f"*…and {dropped} more*")
+    return "\n".join(out)
 
 
 def _today_since_utc(tz: pytz.BaseTzInfo) -> str:
@@ -155,39 +238,82 @@ async def get_random_icon(
     return url, name, chosen_uid
 
 
-async def get_random_song(
+def _extract_candidate(msg, content_type: str) -> dict | None:
+    """
+    First qualifying candidate in a message for a custom-feature content type,
+    or None. Returns a dict describing what to repost:
+      {"kind": "attachment", "url", "filename", "size"}  (media uploads)
+      {"kind": "text", "content"}                        (media links / link / music / text)
+    Pure and side-effect free so it can be unit-tested on fake messages.
+    """
+    if content_type == "media":
+        # Prefer an uploaded file (image/gif/video); fall back to a media link.
+        for att in msg.attachments:
+            return {"kind": "attachment", "url": att.url,
+                    "filename": att.filename or "daily", "size": att.size or 0}
+        for line in msg.content.splitlines():
+            s = line.strip()
+            if _URL_PATTERN.search(s):
+                return {"kind": "text", "content": s}
+        return None
+    if content_type == "link":
+        for line in msg.content.splitlines():
+            s = line.strip()
+            if _URL_PATTERN.search(s):
+                return {"kind": "text", "content": s}
+        return None
+    if content_type == "music":
+        for line in msg.content.splitlines():
+            s = line.strip()
+            if s and is_music_link(s):
+                return {"kind": "text", "content": s}
+        return None
+    # text
+    for line in msg.content.splitlines():
+        s = line.strip()
+        if s and not s.startswith("!"):
+            return {"kind": "text", "content": s}
+    return None
+
+
+async def get_random_content(
     channel,
+    content_type: str,
     cooldown_counts: dict[int, int] | None = None,
-) -> tuple[str | None, str | None, int | None]:
+) -> tuple[dict | None, str | None, int | None]:
+    """
+    Fair pick (one candidate per contributor, cooldown-weighted) for a custom
+    daily feature. Returns (candidate_dict, display_name, user_id) — see
+    _extract_candidate for the candidate shape. Scans all-time history.
+    """
     if channel is None:
         return None, None, None
-    pool: dict[int, tuple[str, str, int]] = {}
+    pool: dict[int, tuple[dict, str, int]] = {}
     scanned = 0
     async for msg in channel.history(limit=None, oldest_first=False):
         scanned += 1
         if msg.author.bot:
             continue
+        cand = _extract_candidate(msg, content_type)
+        if cand is None:
+            continue
         uid = msg.author.id
-        for line in msg.content.strip().splitlines():
-            stripped = line.strip()
-            if not stripped or not is_music_link(stripped):
-                continue
-            cur, name, count = pool.get(uid, (None, msg.author.display_name, 0))
-            count += 1
-            if random.randint(1, count) == 1:
-                pool[uid] = (stripped, msg.author.display_name, count)
-            else:
-                pool[uid] = (cur, name, count)
+        cur, name, count = pool.get(uid, (None, msg.author.display_name, 0))
+        count += 1
+        if random.randint(1, count) == 1:
+            pool[uid] = (cand, msg.author.display_name, count)
+        else:
+            pool[uid] = (cur, name, count)
     if not pool:
-        log.info("[song] scanned %d messages → 0 contributors", scanned)
+        log.info("[custom:%s] scanned %d messages → 0 contributors", content_type, scanned)
         return None, None, None
     chosen_uid = _weighted_choice(pool, cooldown_counts or {})
-    link, name, count = pool[chosen_uid]
+    cand, name, count = pool[chosen_uid]
     log.info(
-        "[song] scanned %d messages → %d contributors → picked %r from %s (%d submissions)",
-        scanned, len(pool), link, name, count,
+        "[custom:%s] scanned %d messages → %d contributors → picked from %s (%d submissions)",
+        content_type, scanned, len(pool), name, count,
     )
-    return link, name, chosen_uid
+    return cand, name, chosen_uid
 
 
 
@@ -298,7 +424,20 @@ async def build_contributors(guild_id: int, client: discord.Client, category: st
     lines = [f"📊 **{label} contributors**"]
     for name, count in sorted_entries:
         lines.append(f"  {name} — **{count}** submission{'s' if count != 1 else ''}")
-    return "\n".join(lines)
+    return pack_lines(lines)
+
+
+_WEEKDAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+
+def _cadence_desc(c) -> str:
+    """Human description of the rename cadence for /showconfig."""
+    wd = (c.get("quote_weekdays") or "").strip()
+    if wd:
+        days = [_WEEKDAY_NAMES[int(x)] for x in wd.split(",") if x.strip().isdigit() and 0 <= int(x) <= 6]
+        return ("Weekly on " + ", ".join(days)) if days else "Daily"
+    n = c.get("quote_interval_days") or 1
+    return "Daily" if n <= 1 else f"Every {n} days"
 
 
 async def build_config(guild_id: int, client: discord.Client) -> str:
@@ -332,9 +471,11 @@ async def build_config(guild_id: int, client: discord.Client) -> str:
         f"Music Channel:       {ch(c['music_channel'])}",
         f"Song Post Channel:   {ch(c['song_post_channel'])}",
         f"Bracket Channel:     {ch(c['bracket_channel'])}",
+        f"Bracket Source:      {ch(c.get('bracket_source_channel')) if c.get('bracket_source_channel') else 'All tracked renames'}",
         f"Quote Feature:       {'Enabled' if c['enable_daily_quote'] else 'Disabled'}",
         f"Song Feature:        {'Enabled' if c['enable_daily_song']  else 'Disabled'}",
         f"Cooldown:            {'Enabled' if c['enable_cooldown']    else 'Disabled'}",
+        f"On-Demand /rename:   {'Everyone' if c.get('rename_open', 1) else 'Admins only'}",
         f"Bracket Tracking:    {tracking}",
         f"Bracket Size:        {c['bracket_size'] or 8}",
         f"Bracket Vote Hours:  {c['bracket_voting_hours'] or 24}",
@@ -342,8 +483,34 @@ async def build_config(guild_id: int, client: discord.Client) -> str:
         f"Seasons Defined:     {season_count}",
         f"Timezone:            {c['timezone'] or 'US/Eastern'}",
         f"Quote Time:          {c['quote_time'] or '4:00'}",
+        f"Rename Cadence:      {_cadence_desc(c)}",
         f"Song Time:           {c['song_time'] or '10:00'}",
+        f"Credit Names:        {'Server nickname' if credits.style_of(c) == 'nickname' else '@username'}",
+        f"Credit Tagging:      {'On (mentions)' if credits.mentions_on(c) else 'Off (plain text)'}",
     ]
+
+    # Health check — surface setup gaps and missing permissions.
+    warnings = []
+    if not c["post_channel"]:
+        warnings.append("No Post Channel - renames aren't tracked for brackets (set one in /setup).")
+    guild = client.get_guild(guild_id)
+    if guild is not None and guild.me is not None:
+        p = guild.me.guild_permissions
+        if not p.manage_guild:
+            warnings.append("Missing 'Manage Server' - daily and bracket renames will fail.")
+        missing = [n for n, ok in (
+            ("Attach Files", p.attach_files), ("Embed Links", p.embed_links),
+            ("Add Reactions", p.add_reactions), ("Read Message History", p.read_message_history),
+        ) if not ok]
+        if missing:
+            warnings.append("Missing perms: " + ", ".join(missing) + " - cards/polls may fail.")
+
+    lines.append("")
+    if warnings:
+        lines.append("Warnings:")
+        lines.extend(f"  ! {w}" for w in warnings)
+    else:
+        lines.append("Health:              OK - no configuration warnings.")
     return "\n".join(lines)
 
 
@@ -361,10 +528,12 @@ async def process_rename(
         log.warning("[%s] Guild not found — skipping rename.", guild_id)
         return
 
-    # While a bracket is running, the server name is frozen — the bracket winner
-    # sets it. Renames resume once the bracket completes. Previews are exempt.
+    # While a bracket is running, the daily quote-rename is suspended — the
+    # bracket drives the server name instead (each matchup winner under daily
+    # pacing; the champion under round pacing). Renames resume once the bracket
+    # completes. Previews are exempt.
     if not preview and get_active_bracket(guild_id):
-        log.info("[%s] Active bracket — skipping rename (server name frozen until winner).", guild_id)
+        log.info("[%s] Active bracket — daily rename suspended (bracket controls the name).", guild_id)
         return
 
     # Fetch today's cooldown counts per category if cooldown is enabled.
@@ -400,22 +569,29 @@ async def process_rename(
         return
 
     if not preview:
+        renamed = False
         try:
             await guild.edit(name=truncate_to_100_chars(quote), icon=icon_bytes)
+            renamed = True
+            _record_guild_rename(guild_id)
             log.info('[%s] Server renamed to: "%s"', guild_id, quote)
         except discord.HTTPException as e:
             log.error("[%s] Failed to rename guild: %s", guild_id, e)
-        if quote_uid:
+        # Only count picks for a rename that actually happened — a failed edit
+        # must not burn the contributors' cooldown weighting or pad their stats.
+        if renamed and quote_uid:
             log_pick(guild_id, quote_uid, quote_user or "Unknown", "quote", quote)
-        if icon_uid:
+        if renamed and icon_uid:
             log_pick(guild_id, icon_uid, icon_user or "Unknown", "icon", image_url)
 
-    image_file = await generate_card(
-        quote,
-        quote_user or "Unknown",
-        icon_user  or "Unknown",
-        icon_bytes,
-    )
+    # Names on the card follow the guild's credit style, resolved live from the
+    # member (a stored snapshot goes stale when someone changes their nickname).
+    # Cards are images, so they can never carry a mention.
+    style = credits.style_of(cfg)
+    quote_name = credits.resolve_name(client, guild_id, quote_uid, quote_user, style)
+    icon_name  = credits.resolve_name(client, guild_id, icon_uid,  icon_user,  style)
+
+    image_file = await generate_card(quote, quote_name, icon_name, icon_bytes)
     if not image_file:
         return
 
@@ -424,7 +600,7 @@ async def process_rename(
             image_file.seek(0)
             try:
                 await override_post_channel.send(
-                    f"🔍 **Preview** — Quote by {quote_user}, icon by {icon_user}:\n> {quote}",
+                    f"🔍 **Preview** — Quote by {quote_name}, icon by {icon_name}:\n> {quote}",
                     file=discord.File(fp=image_file, filename="preview.png"),
                 )
             except discord.HTTPException as e:
@@ -449,106 +625,226 @@ async def process_rename(
             log.error("[%s] Failed to post card to channel %s: %s", guild_id, channel.id, e)
             continue
 
-        # Bracket tracking: record the official daily post so its reactions can
-        # seed a bracket later. Tracking is always on once a post channel is set;
-        # we only track the configured post_channel message (never !rename run in
-        # an arbitrary channel). voting_enabled_at is stamped once as a
-        # "tracking since" floor so brackets never count pre-tracking history.
-        is_official = post_chan_id and channel.id == post_chan_id
-        if is_official:
+        # Bracket tracking: record EVERY copy of the card we post so its reactions
+        # can seed a bracket later — and so a native Forward of any copy (e.g. the
+        # channel a user ran /rename in, not just the post channel) can be matched
+        # back to this rename via message_id. Tracking is on once a post channel is
+        # configured; dedup-by-quote at bracket time keeps duplicate copies from
+        # double-counting. voting_enabled_at is stamped once as a "tracking since"
+        # floor so brackets never count pre-tracking history.
+        if post_chan_id:
             # Grab the attachment URL as a cached snapshot.
             # (We always re-fetch fresh at bracket time since CDN URLs expire.)
             img_url = sent.attachments[0].url if sent.attachments else None
-            store_rename_post(guild_id, sent.id, sent.channel.id, quote, quote_user, quote_uid, img_url)
+            store_rename_post(guild_id, sent.id, sent.channel.id, quote, quote_user, quote_uid,
+                              img_url, icon_user=icon_user, icon_uid=icon_uid)
             if not cfg["voting_enabled_at"]:
                 set_config(guild_id, "voting_enabled_at", datetime.now(pytz.utc).isoformat())
 
 
-_is_song_searching: dict[int, bool] = {}
+# In-progress guard, keyed by (guild_id, feature_id), so a slow scan can't
+# overlap with itself. (Song-of-the-day is now just a custom feature.)
+_custom_running: set[tuple[int, int]] = set()
 
 
-async def process_daily_song(
+def _feature_fail(guild_id: int, name: str, msg: str) -> tuple[bool, str]:
+    log.warning("[%s] Custom feature '%s': %s", guild_id, name, msg)
+    return False, msg
+
+
+async def process_custom_daily(
     guild_id: int,
     client: discord.Client,
+    feature,
     override_post_channel=None,
     preview: bool = False,
-) -> None:
-    if not preview and _is_song_searching.get(guild_id):
-        log.warning("[%s] Song search already in progress — skipping.", guild_id)
-        cfg = get_config(guild_id)
-        ch  = override_post_channel or client.get_channel(cfg["song_post_channel"])
-        if ch:
-            await ch.send("⚠️ Song search is already running. Please wait for it to finish.")
-        return
+    on_demand: bool = False,
+) -> tuple[bool, str]:
+    """
+    Run one admin-defined "X of the day" feature: fairly pick a matching item
+    from its source channel and repost it to its post channel. Generalizes the
+    old song-of-the-day flow. *feature* is a custom_features Row.
 
-    if not preview:
-        _is_song_searching[guild_id] = True
+    Modes:
+      scheduled (default) — post to the feature's channel, log the pick.
+      preview=True        — post to override channel with a "🔍 Preview" tag, no log.
+      on_demand=True      — post to override channel (no tag), no log; for /<command>.
+
+    Returns (ok, detail): ok=True on a successful post; otherwise detail is a
+    short, user-facing reason (permissions, no content, etc.) so callers can
+    show the truth instead of a blanket "posted" message.
+    """
+    name    = feature["name"]
+    key     = (guild_id, feature["id"])
+    counts  = not preview and not on_demand   # only a scheduled/real run logs + guards
+    if counts and key in _custom_running:
+        return False, f"**{name}** is already running — try again in a moment."
+    if counts:
+        _custom_running.add(key)
     try:
-        cfg = get_config(guild_id)
+        cfg      = get_config(guild_id)
+        ctype    = feature["content_type"]
+        category = f"custom:{name.lower()}"
 
-        if cfg["enable_cooldown"] and not preview:
+        if cfg["enable_cooldown"] and counts:
             tz    = _guild_tz(cfg)
             since = _today_since_utc(tz)
-            s_cd  = get_today_pick_counts(guild_id, "song", since)
+            cd    = get_today_pick_counts(guild_id, category, since)
         else:
-            s_cd = {}
+            cd = {}
 
-        music_channel = client.get_channel(cfg["music_channel"])
-        post_channel  = override_post_channel or client.get_channel(cfg["song_post_channel"])
-
-        if not music_channel:
-            log.error("[%s] Music channel not configured or not found.", guild_id)
-            return
+        source       = client.get_channel(feature["source_channel"])
+        post_channel = override_post_channel or client.get_channel(feature["post_channel"])
+        if not source:
+            return _feature_fail(guild_id, name,
+                f"I can't see the **source** channel for **{name}** — was it deleted, "
+                f"or am I missing **View Channel** there?")
         if not post_channel:
-            log.error("[%s] Song post channel not configured or not found.", guild_id)
-            return
+            return _feature_fail(guild_id, name,
+                f"I can't see the **destination** channel for **{name}** — was it deleted, "
+                f"or am I missing **View Channel** there?")
 
-        song, user, user_id = await get_random_song(music_channel, cooldown_counts=s_cd)
-        if not song:
-            log.warning("[%s] No valid music link found in music channel.", guild_id)
-            await post_channel.send("⚠️ No valid music link found in music channel.")
-            return
+        # Scan the source channel (needs View Channel + Read Message History).
+        try:
+            cand, user, uid = await get_random_content(source, ctype, cooldown_counts=cd)
+        except discord.Forbidden:
+            return _feature_fail(guild_id, name,
+                f"I can't read {source.mention} — give me **View Channel** and "
+                f"**Read Message History** there.")
+        if not cand:
+            return _feature_fail(guild_id, name,
+                f"No eligible **{ctype}** content found in {source.mention} yet.")
 
-        prefix = "🔍 **Preview** — " if preview else ""
-        await post_channel.send(f"{prefix}🎵 **Song of the Day** (from {user}):\n{song}")
+        prefix  = "🔍 **Preview** — " if preview else ""
+        emoji   = (feature["emoji"] + " ") if feature["emoji"] else ""
+        caption = f"{prefix}{emoji}**{name}** (from {user}):"
 
-        if not preview and user_id:
-            log_pick(guild_id, user_id, user or "Unknown", "song", song)
-            log.info("[%s] Posted song of the day: %s", guild_id, song)
+        try:
+            if cand["kind"] == "attachment":
+                logged_item = cand["url"]
+                guild = client.get_guild(guild_id)
+                limit = getattr(guild, "filesize_limit", 8 * 1024 * 1024) if guild else 8 * 1024 * 1024
+                posted = False
+                if cand["size"] and cand["size"] <= limit:
+                    # Reupload the file so it embeds reliably and doesn't rely on the
+                    # source message's (expiring) CDN URL. On any non-permission error,
+                    # fall back to posting the URL (e.g. missing only Attach Files).
+                    try:
+                        async with aiohttp.ClientSession(timeout=_AIOHTTP_TIMEOUT) as session:
+                            async with session.get(cand["url"]) as resp:
+                                resp.raise_for_status()
+                                data = await resp.read()
+                        from io import BytesIO
+                        await post_channel.send(content=caption, file=discord.File(BytesIO(data), filename=cand["filename"]))
+                        posted = True
+                    except discord.Forbidden:
+                        raise
+                    except Exception as e:
+                        log.warning("[%s] Custom feature '%s': reupload failed (%s) — posting URL.", guild_id, name, e)
+                if not posted:
+                    await post_channel.send(f"{caption}\n{cand['url']}")
+            else:
+                logged_item = cand["content"]
+                await post_channel.send(f"{caption}\n{cand['content']}")
+        except discord.Forbidden:
+            extra = " and **Attach Files**" if ctype == "media" else ""
+            return _feature_fail(guild_id, name,
+                f"I can't post in {post_channel.mention} — give me **View Channel**, "
+                f"**Send Messages**{extra} there.")
+
+        if counts and uid:
+            log_pick(guild_id, uid, user or "Unknown", category, logged_item)
+        mode = " (preview)" if preview else (" (on-demand)" if on_demand else "")
+        log.info("[%s] Posted custom feature '%s'%s.", guild_id, name, mode)
+        return True, ""
     except Exception as e:
-        log.error("[%s] Song post failed: %s", guild_id, e)
+        log.error("[%s] Custom feature '%s' failed: %s", guild_id, name, e)
+        return False, "Something went wrong running that feature — check the bot logs."
     finally:
-        if not preview:
-            _is_song_searching[guild_id] = False
+        if counts:
+            _custom_running.discard(key)
 
 
 # ── Scheduling (per-guild times and timezones) ───────────────────────────────
 
+def _cadence_due(weekdays_csv, interval_days, last_date_str, now) -> bool:
+    """
+    Shared cadence gate (used by both the server rename and custom features). The
+    caller already matched the time-of-day and the once-per-day guard.
+      • Weekday mode — *weekdays_csv* is a comma list of weekday numbers
+        (0=Mon .. 6=Sun). Due when today's weekday is in the set (e.g. "6" = every
+        Sunday). Overrides the interval.
+      • Interval mode (default) — due when at least *interval_days* have passed
+        since *last_date_str* (1 = daily).
+    """
+    weekdays = (weekdays_csv or "").strip()
+    if weekdays:
+        allowed = {int(x) for x in weekdays.split(",") if x.strip().isdigit()}
+        return now.weekday() in allowed
+    interval = interval_days or 1
+    if interval <= 1:
+        return True
+    if not last_date_str:
+        return True
+    try:
+        last_date = datetime.strptime(last_date_str, "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return True
+    return (now.date() - last_date).days >= interval
+
+
+def _rename_due(cfg, now) -> bool:
+    """Server-rename cadence (weekday mode via quote_weekdays, else quote_interval_days)."""
+    return _cadence_due(cfg["quote_weekdays"], cfg["quote_interval_days"], cfg["last_quote_date"], now)
+
+
+def _feature_due(feat, now) -> bool:
+    """Custom-feature cadence (weekday mode via weekdays, else interval_days)."""
+    return _cadence_due(feat["weekdays"], feat["interval_days"], feat["last_run_date"], now)
+
+
 async def scheduler_loop(client: discord.Client) -> None:
     await client.wait_until_ready()
     log.info("⏰ Scheduler loop started (checking every 60 s)")
+    from bracket import check_bracket_advancement
     while not client.is_closed():
         await asyncio.sleep(60)
         now_utc = datetime.now(pytz.utc)
         for guild in client.guilds:
-            cfg  = get_config(guild.id)
-            tz   = _guild_tz(cfg)
-            now  = now_utc.astimezone(tz)
-            today    = now.strftime("%Y-%m-%d")
-            cur_time = now.strftime("%H:%M")
+            # Isolate each guild: one guild's failure must not abort the cycle
+            # for every other guild (critical for a multi-tenant public bot).
+            try:
+                cfg  = get_config(guild.id)
+                tz   = _guild_tz(cfg)
+                now  = now_utc.astimezone(tz)
+                today    = now.strftime("%Y-%m-%d")
+                cur_time = now.strftime("%H:%M")
 
-            if cfg["enable_daily_quote"]:
-                scheduled = _normalize_time(cfg["quote_time"] or "04:00")
-                if cur_time == scheduled and cfg["last_quote_date"] != today:
-                    set_config(guild.id, "last_quote_date", today)
-                    await process_rename(guild.id, client)
+                if cfg["enable_daily_quote"]:
+                    scheduled = _normalize_time(cfg["quote_time"] or "04:00")
+                    action = _fire_action(scheduled, cur_time, cfg["last_quote_date"], today)
+                    if action != "skip" and _rename_due(cfg, now):
+                        # Stamp before running: a job that keeps throwing must not
+                        # retry every 60s for the rest of the day.
+                        set_config(guild.id, "last_quote_date", today)
+                        if action == "fire":
+                            await process_rename(guild.id, client)
 
-            if cfg["enable_daily_song"]:
-                scheduled = _normalize_time(cfg["song_time"] or "10:00")
-                if cur_time == scheduled and cfg["last_song_date"] != today:
-                    set_config(guild.id, "last_song_date", today)
-                    await process_daily_song(guild.id, client)
+                # Admin-defined "X of the day" features (song-of-the-day is one).
+                for feat in get_custom_features(guild.id):
+                    if not feat["enabled"]:
+                        continue
+                    try:
+                        scheduled = _normalize_time(feat["post_time"])
+                    except Exception:
+                        continue
+                    action = _fire_action(scheduled, cur_time, feat["last_run_date"], today)
+                    if action != "skip" and _feature_due(feat, now):
+                        set_custom_feature_run_date(feat["id"], today)
+                        if action == "fire":
+                            await process_custom_daily(guild.id, client, feat)
 
-            # Check for bracket matchups that need tallying/advancing
-            from bracket import check_bracket_advancement
-            await check_bracket_advancement(guild.id, client)
+                # Check for bracket matchups that need tallying/advancing
+                await check_bracket_advancement(guild.id, client)
+            except Exception:
+                log.exception("[%s] Scheduler tick failed for guild — continuing.", guild.id)
