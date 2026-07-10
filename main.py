@@ -26,6 +26,7 @@ from bot_features import (
     build_mystats,
     build_contributors,
     build_config,
+    pack_lines,
 )
 from bracket import (
     start_bracket,
@@ -230,7 +231,11 @@ class QotdClient(discord.Client):
         # returns None for anyone not incidentally cached — and every contributor
         # credit would silently fall back to its stale stored name.
         intents.members = True
-        super().__init__(intents=intents)
+        # Quotes are member-written text the bot re-posts verbatim (seed lists,
+        # tallies, announcements). Default to pinging nobody so a quote containing
+        # @everyone or <@id> can't make the bot ping on someone's behalf; the one
+        # place that intentionally pings (champion credit) opts in per-send.
+        super().__init__(intents=intents, allowed_mentions=discord.AllowedMentions.none())
         self.tree = app_commands.CommandTree(self)
         self._scheduler_task = None
         self._feature_cmds_loaded = False
@@ -1120,7 +1125,7 @@ async def bracket_history(interaction: discord.Interaction):
             lines.append(f'• **{label}** ({date}): "{champ}"{who}')
         else:
             lines.append(f"• **{label}** ({date}): *champion not recorded*")
-    await interaction.response.send_message("\n".join(lines), ephemeral=True)
+    await interaction.response.send_message(pack_lines(lines), ephemeral=True)
 
 
 @bracket_group.command(name="cancel", description="Delete the active bracket")
@@ -1531,8 +1536,8 @@ async def feature_list(interaction: discord.Interaction):
         await interaction.response.send_message(
             "No custom features yet. Create one with `/feature add` or `/feature setup`.", ephemeral=True)
         return
-    lines = ["**Daily features** (run on demand with each `/command`):"] + [_feature_summary(f) for f in feats]
-    await interaction.response.send_message("\n".join(lines), ephemeral=True)
+    lines = ["**Custom features** (run on demand with each `/command`):"] + [_feature_summary(f) for f in feats]
+    await interaction.response.send_message(pack_lines(lines), ephemeral=True)
 
 
 @feature_group.command(name="remove", description="Delete a custom feature (by its command)")
@@ -1634,7 +1639,7 @@ async def admin_list(interaction: discord.Interaction):
     for uid in admin_ids:
         member = interaction.guild.get_member(uid)
         lines.append(f"• {member.display_name if member else f'User {uid}'} (`{uid}`)")
-    await interaction.response.send_message("\n".join(lines), ephemeral=True)
+    await interaction.response.send_message(pack_lines(lines), ephemeral=True)
 
 
 class _ResetConfirmView(discord.ui.View):

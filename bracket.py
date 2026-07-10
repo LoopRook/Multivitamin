@@ -86,6 +86,25 @@ def _bracket_col(bracket, col: str):
 _col = _bracket_col
 
 
+async def _send_lines(channel, lines: list[str]) -> None:
+    """
+    Send *lines* as one message, or several if they exceed Discord's 2000-char
+    cap. Seed lists get long — 32 entries with credits is ~5k chars, and a
+    single oversized send would 400 mid-launch, stranding a half-created
+    bracket. Every line is kept (the seed list is the bracket's record).
+    """
+    batch: list[str] = []
+    used = 0
+    for line in lines:
+        if used + len(line) + 1 > 1900 and batch:
+            await channel.send("\n".join(batch))
+            batch, used = [], 0
+        batch.append(line)
+        used += len(line) + 1
+    if batch:
+        await channel.send("\n".join(batch))
+
+
 def _effective_cfg(cfg, bracket) -> dict:
     """
     A config mapping with voting hours & pacing pinned to the bracket's snapshot,
@@ -421,11 +440,16 @@ async def _crown_champion(
     else:
         tail = ""
     # The one place mentions actually ping — winning the bracket is worth a ping.
+    # The client default is AllowedMentions.none(), so this send must opt in,
+    # and only user pings: quote text can never smuggle an @everyone through.
+    _cfg = get_config(guild_id)
     who = credits.credit_line(
-        client, guild_id, get_config(guild_id),
+        client, guild_id, _cfg,
         quote_user=champion["quote_user"], quote_uid=_col(champion, "quote_uid"),
         icon_user=_col(champion, "icon_user"), icon_uid=_col(champion, "icon_uid"),
     )
+    mentions = (discord.AllowedMentions(everyone=False, roles=False, users=True)
+                if credits.mentions_on(_cfg) else discord.AllowedMentions.none())
     content = (
         f"\n🎊🏆🎊 **{_bracket_label(bracket)} SERVER NAME CHAMPION** 🎊🏆🎊\n\n"
         f'**"{champion["quote"]}"**\n'
@@ -433,8 +457,10 @@ async def _crown_champion(
         f"Congratulations! 🎉{tail}"
     )
     try:
-        await bracket_channel.send(content, file=card_file) if card_file else \
-            await bracket_channel.send(content)
+        if card_file:
+            await bracket_channel.send(content, file=card_file, allowed_mentions=mentions)
+        else:
+            await bracket_channel.send(content, allowed_mentions=mentions)
     except discord.HTTPException as e:
         log.error("[%s] Failed to post champion announcement: %s", guild_id, e)
 
@@ -744,7 +770,7 @@ async def start_test_bracket(guild_id: int, client: discord.Client) -> tuple[boo
     for seed, (score, quote, user, uid) in enumerate(nominees, start=1):
         who = credits.resolve_name(client, guild_id, uid, user, credits.style_of(cfg))
         lines.append(f'  **#{seed}** "{quote}" — *{who}* · {score} reactions (random)')
-    await bracket_channel.send("\n".join(lines))
+    await _send_lines(bracket_channel, lines)
 
     # Generate card images for each nominee upfront and store the bytes in
     # _test_card_cache so _get_card_bytes can serve them in every round —
@@ -1077,7 +1103,7 @@ async def _start_range_bracket(
             prefix="", mention=False,
         )
         lines.append(f'  **#{seed}** "{quote}" — *{who}* · {score} reactions')
-    await bracket_channel.send("\n".join(lines))
+    await _send_lines(bracket_channel, lines)
 
     pairs = _first_round_pairs(entry_ids)
     matchup_rows = []
