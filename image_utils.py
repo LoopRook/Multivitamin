@@ -175,6 +175,16 @@ def _fit_width(draw, text, font, max_w):
     return (text + "…") if text else ""
 
 
+def _fit_name(draw, name, max_w, base=18, floor=14):
+    """Shrink a credit name to fit *max_w* (down to *floor* px), then ellipsis if still too long."""
+    for size in range(base, floor - 1, -1):
+        font = _text_font(size, 500, name)
+        if draw.textlength(name, font=font) <= max_w:
+            return font, name
+    font = _text_font(floor, 500, name)
+    return font, _fit_width(draw, name, font, max_w)
+
+
 _LABEL_TRACKING = 1   # letter-spacing (px) for the uppercase QUOTE/ICON labels
 
 
@@ -243,8 +253,7 @@ async def generate_card(
         col_w = (tw - 16) // 2
         for label, name, cx in (("QUOTE", quote_user, tx), ("ICON", icon_user, tx + col_w + 16)):
             _draw_tracked(draw, (cx, 344), label, lab_font, label_col, _LABEL_TRACKING)
-            nfont = _text_font(18, 500, name or "Unknown")
-            shown = _fit_width(draw, name or "Unknown", nfont, col_w)
+            nfont, shown = _fit_name(draw, name or "Unknown", col_w)
             draw.text((cx, 362), shown, font=nfont, fill=(236, 231, 223))
 
         # Year-progress bar: dating element, playhead at today.
