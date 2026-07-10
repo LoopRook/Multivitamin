@@ -107,3 +107,31 @@ def test_pack_lines_drops_overflow_with_a_tail():
     packed = bot_features.pack_lines(lines)
     assert len(packed) <= 2000
     assert "more*" in packed.splitlines()[-1]
+
+
+# ── rename budget: refuse up front instead of hanging on Discord's 429 ────────
+
+def test_rename_cooldown_free_then_limited_then_free_again():
+    from datetime import timedelta
+    import pytz
+    gid = 777001
+    bot_features._rename_times.pop(gid, None)
+    assert bot_features.rename_cooldown_remaining(gid) == 0
+
+    now = datetime.now(pytz.utc)
+    bot_features._rename_times[gid] = [now - timedelta(minutes=1), now]   # 2 in-window
+    wait = bot_features.rename_cooldown_remaining(gid)
+    assert 1 <= wait <= 10                                                # blocked, real ETA
+
+    bot_features._rename_times[gid] = [now - timedelta(minutes=11), now]  # oldest expired
+    assert bot_features.rename_cooldown_remaining(gid) == 0
+
+
+def test_record_guild_rename_trims_expired():
+    from datetime import timedelta
+    import pytz
+    gid = 777002
+    old = datetime.now(pytz.utc) - timedelta(minutes=30)
+    bot_features._rename_times[gid] = [old, old]
+    bot_features._record_guild_rename(gid)
+    assert len(bot_features._rename_times[gid]) == 1   # stale entries dropped

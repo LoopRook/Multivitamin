@@ -158,3 +158,12 @@ def test_showconfig_health_clean(gid):
     db_utils.set_config(gid, "bracket_channel", 2)
     txt = run(bot_features.build_config(gid, _HealthClient(manage_guild=True)))
     assert "no configuration warnings" in txt.lower()
+
+
+def test_openrename_toggle_wired(gid):
+    field, _ = main._FEATURE_MAP["openrename"]
+    assert field == "rename_open"
+    db_utils.get_config(gid)
+    db_utils.set_config(gid, field, 0)                 # valid config field
+    assert db_utils.get_config(gid)["rename_open"] == 0
+    assert db_utils.get_config(gid)["credit_style"]    # migration neighbours intact
