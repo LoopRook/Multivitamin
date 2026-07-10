@@ -54,3 +54,35 @@ def test_cadence_desc():
     assert bot_features._cadence_desc({"quote_interval_days": 3}) == "Every 3 days"
     assert bot_features._cadence_desc({"quote_weekdays": "6"}) == "Weekly on Sun"
     assert bot_features._cadence_desc({"quote_weekdays": "0,2,4"}) == "Weekly on Mon, Wed, Fri"
+
+
+# ── _fire_action: the scheduled time is a threshold, not an exact minute ──────
+
+FIRE = bot_features._fire_action
+
+
+def test_fire_action_fires_at_the_scheduled_minute():
+    assert FIRE("04:00", "04:00", "2026-07-08", "2026-07-09") == "fire"
+
+
+def test_fire_action_catches_up_after_a_missed_minute():
+    # The old `cur_time == scheduled` check skipped the day entirely here:
+    # a restart or a slow tick straddling 04:00 meant no rename at all.
+    assert FIRE("04:00", "04:01", "2026-07-08", "2026-07-09") == "fire"
+    assert FIRE("04:00", "23:59", "2026-07-08", "2026-07-09") == "fire"
+
+
+def test_fire_action_waits_until_the_time():
+    assert FIRE("04:00", "03:59", "2026-07-08", "2026-07-09") == "skip"
+
+
+def test_fire_action_never_double_fires():
+    assert FIRE("04:00", "04:00", "2026-07-09", "2026-07-09") == "skip"
+    assert FIRE("04:00", "18:00", "2026-07-09", "2026-07-09") == "skip"
+
+
+def test_fire_action_first_run_stamps_instead_of_surprise_posting():
+    # Guild configured at 23:00 with a 04:00 slot: record the day, start tomorrow.
+    assert FIRE("04:00", "23:00", None, "2026-07-09") == "stamp"
+    # ...but a first run before the slot just waits for it normally.
+    assert FIRE("04:00", "01:00", None, "2026-07-09") == "skip"

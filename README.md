@@ -33,7 +33,7 @@ Admin commands require the **Manage Server** permission, or bot-admin access gra
 
 ## Self-hosting
 
-Runs as a single worker process. See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for Railway/VM setup, the required Developer Portal settings (enable the **Message Content** intent, toggle **Public Bot**), and the ~100-server verification threshold.
+Runs as a single worker process. In the Developer Portal you must enable both privileged intents — **Message Content** (scanning quote/icon channels) and **Server Members** (naming contributors by their current nickname) — and toggle **Public Bot** on. The bot will not start if either intent is missing. Verification is required past ~100 servers.
 
 ```bash
 pip install -r requirements.txt

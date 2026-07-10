@@ -226,6 +226,10 @@ class QotdClient(discord.Client):
         intents = discord.Intents.default()
         # message_content is required to scan quote/icon/song channel history.
         intents.message_content = True
+        # members populates the member cache, without which guild.get_member()
+        # returns None for anyone not incidentally cached — and every contributor
+        # credit would silently fall back to its stale stored name.
+        intents.members = True
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
         self._scheduler_task = None
