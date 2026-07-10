@@ -248,13 +248,22 @@ async def generate_card(
             draw.text((tx, y), ln, font=qfont, fill=(245, 242, 236))
             y += line_h
 
-        # Credits: QUOTE (left) and ICON (right) columns, fixed near the bottom.
+        # Credits: QUOTE (left) and ICON (right) columns. Both names share ONE font
+        # size (the largest that fits both in their half-column) so they always
+        # match — independently-sized names look off. Ellipsis only if it still
+        # overflows at the floor.
         lab_font = _archivo(13, 600)
         col_w = (tw - 16) // 2
-        for label, name, cx in (("QUOTE", quote_user, tx), ("ICON", icon_user, tx + col_w + 16)):
+        q_name, i_name = quote_user or "Unknown", icon_user or "Unknown"
+        name_size = 14
+        for size in range(18, 13, -1):
+            if all(draw.textlength(n, font=_text_font(size, 500, n)) <= col_w for n in (q_name, i_name)):
+                name_size = size
+                break
+        for label, name, cx in (("QUOTE", q_name, tx), ("ICON", i_name, tx + col_w + 16)):
             _draw_tracked(draw, (cx, 344), label, lab_font, label_col, _LABEL_TRACKING)
-            nfont, shown = _fit_name(draw, name or "Unknown", col_w)
-            draw.text((cx, 362), shown, font=nfont, fill=(236, 231, 223))
+            nfont = _text_font(name_size, 500, name)
+            draw.text((cx, 362), _fit_width(draw, name, nfont, col_w), font=nfont, fill=(236, 231, 223))
 
         # Year-progress bar: dating element, playhead at today.
         by = 410
