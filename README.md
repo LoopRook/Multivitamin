@@ -1,6 +1,8 @@
 # QOTD — the server-renaming Discord bot
 
-Your members write quotes. Every day, the bot picks one, pairs it with a member-submitted image, and **renames the whole server after it** — with a generated card crediting who wrote it. At the end of a season, the year's favorite names fight it out in a **bracket championship**, and the winner becomes the server name for real.
+Your members write quotes. Every day, the bot picks one, pairs it with a member-submitted image, and **renames the whole server after it** — with a generated card crediting who wrote it. That's the whole core, and it runs itself.
+
+When (and only if) you feel like it, the year's favorite names can fight it out in an optional **bracket championship**, and the winner becomes the server name.
 
 It also lets admins spin up their own recurring posts — Meme of the Day, Critter of the Week, Song of the Day — each with its own on-demand slash command.
 
@@ -15,9 +17,8 @@ All slash commands, fully multi-server, no `Administrator` permission, per-serve
 2. **Members drop images** in an icon channel (any image attachment).
 3. **Every day** (or on whatever schedule you set), the bot picks a quote and an icon — *fairly*: one candidate per person, weighted so whoever got picked recently is less likely to be picked again — renames the server, sets the icon, and posts a **card** with the quote and credits.
 4. **Members react** to the cards they love. Any emoji counts.
-5. **Bracket time**: reactions seed a single-elimination tournament voted with native Discord polls. The server gets live-renamed to the winners as rounds progress, and the champion holds the name.
 
-Nobody has to do anything on a schedule — the bot harvests whatever the channels accumulate.
+That's the complete daily loop — steps 1–4 repeat forever with zero upkeep. Then, **optionally, whenever you choose**: those accumulated reactions seed a single-elimination **bracket** voted with native Discord polls, the server gets live-renamed to the winners as rounds progress, and the champion holds the name. Reactions are tracked automatically from day one, so the option is always there — run one bracket a year, one a month, or never.
 
 ---
 
@@ -65,9 +66,9 @@ Renames are rate-limited by Discord (~2 per 10 minutes) — the bot tells you ho
 
 ---
 
-## Brackets — the championship
+## Brackets — the championship (optional)
 
-Reactions on daily cards accumulate all year. When you're ready:
+Nothing here is required — the daily renames are a complete experience on their own. But reactions on the cards accumulate automatically, so whenever you're ready:
 
 ```
 /bracket start
