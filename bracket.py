@@ -278,7 +278,7 @@ async def _warn_rename_forbidden(client: discord.Client, guild_id: int) -> None:
     if channel:
         try:
             await channel.send(
-                "⚠️ I can't rename the server — I'm missing the **Manage Server** permission, "
+                "⚠️ I can't rename the server. I'm missing the **Manage Server** permission, "
                 "so bracket renames are being skipped. Grant it and the name will update from the "
                 "next result onward."
             )
@@ -326,7 +326,7 @@ async def _drive_server_name(
         log.info('[%s] TEST bracket — would rename server to: "%s"', guild_id, name)
         if bracket_channel:
             try:
-                await bracket_channel.send(f'🏷️ *(test — real server unchanged)* would rename to: **"{name}"**')
+                await bracket_channel.send(f'🏷️ *(test, real server unchanged)* would rename to: **"{name}"**')
             except discord.HTTPException:
                 pass
         return False
@@ -436,7 +436,7 @@ async def _crown_champion(
     if renamed:
         tail = "\n\n👑 *The server name is now the winning entry!*"
     elif bracket["year"] == 0:
-        tail = "\n\n🧪 *(test bracket — the real server name was not changed)*"
+        tail = "\n\n🧪 *(test bracket, the real server name was not changed)*"
     else:
         tail = ""
     # The one place mentions actually ping — winning the bracket is worth a ping.
@@ -454,7 +454,9 @@ async def _crown_champion(
         f"\n🎊🏆🎊 **{_bracket_label(bracket)} SERVER NAME CHAMPION** 🎊🏆🎊\n\n"
         f'**"{champion["quote"]}"**\n'
         f'*{who} · {champion["season_reactions"]} reactions this season*\n\n'
-        f"Congratulations! 🎉{tail}"
+        f"Congratulations! 🎉{tail}\n\n"
+        f"*Your server has a new namesake.*\n"
+        f"*Mr. Moniker* 🎩"
     )
     try:
         if card_file:
@@ -521,7 +523,7 @@ def _build_matchup_embeds(match_num: int, entry_a, entry_b, bytes_a, bytes_b,
             icon_user=_col(entry, "icon_user"), icon_uid=_col(entry, "icon_uid"),
         )
         embed = discord.Embed(
-            title=f"Match {match_num + 1} — Option {side}  ·  #{entry['seed']} seed",
+            title=f"Match {match_num + 1} · Option {side}  ·  #{entry['seed']} seed",
             description=(
                 f'**"{entry["quote"]}"**\n'
                 f'*{who}*\n'
@@ -571,8 +573,8 @@ async def _post_matchup(
 
     header = (
         f"─────────────────────────\n"
-        f"🏆 **{round_label}** — Match {match_num + 1} of {total_matches}\n"
-        f"Voting closes **{ends_str}** — poll below!"
+        f"🏆 **{round_label}** · Match {match_num + 1} of {total_matches}\n"
+        f"Voting closes **{ends_str}**. Poll below!"
     )
     try:
         await channel.send(content=header, embeds=embeds, files=files)
@@ -582,7 +584,7 @@ async def _post_matchup(
 
     answer_a = f"A: {entry_a['quote']}"[:_POLL_ANSWER_LIMIT]
     answer_b = f"B: {entry_b['quote']}"[:_POLL_ANSWER_LIMIT]
-    question = f"{round_label} — Match {match_num + 1} of {total_matches}: Which name wins?"[:_POLL_QUESTION_LIMIT]
+    question = f"{round_label} · Match {match_num + 1} of {total_matches}: Which name wins?"[:_POLL_QUESTION_LIMIT]
 
     poll = discord.Poll(question=question, duration=timedelta(hours=voting_hours), multiple=False)
     poll.add_answer(text=answer_a)
@@ -667,7 +669,7 @@ async def _post_round(
         )
         if len(matchups) > 1:
             await channel.send(
-                f"🗓️ **Daily pacing** — Match 1 of {len(matchups)} is up now. "
+                f"🗓️ **Daily pacing.** Match 1 of {len(matchups)} is up now. "
                 f"The next matchup posts automatically when this poll closes."
             )
         return
@@ -704,7 +706,7 @@ async def start_test_bracket(guild_id: int, client: discord.Client) -> tuple[boo
     if not bracket_channel:
         return False, (
             "⚠️ No bracket channel yet. Open `/bracket start` and pick (or 🏗️ create) "
-            "one from the top dropdown — that saves it — then run `/bracket test`."
+            "one from the top dropdown (that saves it), then run `/bracket test`."
         )
 
     quote_channel = client.get_channel(cfg["quote_channel"])
@@ -734,7 +736,7 @@ async def start_test_bracket(guild_id: int, client: discord.Client) -> tuple[boo
                 pool[uid] = (cur, name, count)
 
     if len(pool) < 2:
-        return False, f"⚠️ Only {len(pool)} contributor(s) in quote channel — need at least 2."
+        return False, f"⚠️ Only {len(pool)} contributor(s) in quote channel. Need at least 2."
 
     # Random scores simulate a real season of voting
     scored = sorted(
@@ -748,7 +750,7 @@ async def start_test_bracket(guild_id: int, client: discord.Client) -> tuple[boo
 
     if actual_size != bracket_size:
         await bracket_channel.send(
-            f"ℹ️ Only {len(scored)} contributors — shrinking bracket to {actual_size} (from {bracket_size})."
+            f"ℹ️ Only {len(scored)} contributors, so the bracket shrinks to {actual_size} (from {bracket_size})."
         )
 
     nominees = scored[:actual_size]
@@ -764,12 +766,12 @@ async def start_test_bracket(guild_id: int, client: discord.Client) -> tuple[boo
         entry_ids.append(eid)
 
     lines = [
-        f"🧪 **TEST BRACKET — {actual_size} names** *(random scores, not a real bracket)*",
+        f"🧪 **TEST BRACKET · {actual_size} names** *(random scores, not a real bracket)*",
         f"{total_rounds} round(s) · {voting_hours}h per matchup · use `/bracket forceadvance` to skip the wait\n",
     ]
     for seed, (score, quote, user, uid) in enumerate(nominees, start=1):
         who = credits.resolve_name(client, guild_id, uid, user, credits.style_of(cfg))
-        lines.append(f'  **#{seed}** "{quote}" — *{who}* · {score} reactions (random)')
+        lines.append(f'  **#{seed}** "{quote}" by *{who}* · {score} reactions (random)')
     await _send_lines(bracket_channel, lines)
 
     # Generate card images for each nominee upfront and store the bytes in
@@ -937,7 +939,7 @@ async def force_bracket_advance(guild_id: int, client: discord.Client) -> tuple[
                 nxt["match_num"], len(fresh),
                 bracket_channel, eff, tz, client, rename_posts, label,
             )
-            return True, f"✅ Resolved matchup — posted Match {nxt['match_num'] + 1} of {len(fresh)}."
+            return True, f"✅ Resolved matchup. Posted Match {nxt['match_num'] + 1} of {len(fresh)}."
 
     winners = get_round_winners_ordered(bracket["id"], round_num)
 
@@ -1038,7 +1040,7 @@ async def _start_range_bracket(
             return False, (
                 f"⚠️ No forwarded renames found for {scope_desc}. Members nominate "
                 f"names by **forwarding** rename cards (Discord's Forward button) into the "
-                f"source channel — screenshots and re-uploads don't count."
+                f"source channel. Screenshots and re-uploads don't count."
             )
         await bracket_channel.send(
             f"⏳ Tallying reactions from {len(scored)} forwarded rename(s) for {scope_desc}..."
@@ -1062,7 +1064,7 @@ async def _start_range_bracket(
     ranked = sorted(best.items(), key=lambda x: x[1][0], reverse=True)
 
     if len(ranked) < 2:
-        return False, f"⚠️ Only {len(ranked)} unique rename(s) found for {scope_desc} — need at least 2."
+        return False, f"⚠️ Only {len(ranked)} unique rename(s) found for {scope_desc}. Need at least 2."
 
     actual_size = bracket_size
     while actual_size > len(ranked) and actual_size > 2:
@@ -1070,7 +1072,7 @@ async def _start_range_bracket(
 
     if actual_size != bracket_size:
         await bracket_channel.send(
-            f"ℹ️ Only {len(ranked)} unique names available — bracket shrunk to {actual_size} (from {bracket_size})."
+            f"ℹ️ Only {len(ranked)} unique names available, so the bracket shrank to {actual_size} (from {bracket_size})."
         )
 
     nominees = ranked[:actual_size]
@@ -1091,7 +1093,7 @@ async def _start_range_bracket(
 
     total_rounds = int(math.log2(actual_size))
     lines = [
-        f"🏆 **{label} Server Name Championship — {actual_size}-name bracket!**",
+        f"🏆 **{label} Server Name Championship · {actual_size}-name bracket!**",
         f"Seeded by total reactions · {total_rounds} round(s) · {voting_hours}h per matchup\n",
     ]
     for seed, (quote, (score, post)) in enumerate(nominees, start=1):
@@ -1102,7 +1104,7 @@ async def _start_range_bracket(
             icon_user=_col(post, "icon_user"), icon_uid=_col(post, "icon_uid"),
             prefix="", mention=False,
         )
-        lines.append(f'  **#{seed}** "{quote}" — *{who}* · {score} reactions')
+        lines.append(f'  **#{seed}** "{quote}" by *{who}* · {score} reactions')
     await _send_lines(bracket_channel, lines)
 
     pairs = _first_round_pairs(entry_ids)
@@ -1307,7 +1309,7 @@ def get_bracket_status_text(guild_id: int) -> str:
     matchups     = get_active_round_matchups(bracket["id"], bracket["current_round"])
     done         = sum(1 for m in matchups if m["status"] == "complete")
     lines = [
-        f"**{_bracket_label(bracket)} Bracket** — {label}",
+        f"**{_bracket_label(bracket)} Bracket** · {label}",
         f"Size: {bracket['size']} · Round {bracket['current_round']}/{total_rounds} · "
         f"{done}/{len(matchups)} matchups complete",
         f"Pacing: **{pacing}**" + (" (all matchups at once)" if pacing == "round" else " (one matchup per day)"),
