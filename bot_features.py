@@ -76,6 +76,34 @@ def _fire_action(scheduled: str, cur_time: str, last_date: str | None, today: st
     return "fire" if minutes_late <= _FIRST_RUN_GRACE_MIN else "stamp"
 
 
+# Discord allows ~2 guild-name edits per 10 minutes. discord.py doesn't error
+# past that — it silently sleeps until the limit clears, which would hang an
+# on-demand /rename for up to 10 minutes. We track our own budget so the
+# command can refuse up front with a real wait time instead.
+_RENAME_LIMIT = 2
+_RENAME_WINDOW = timedelta(minutes=10)
+_rename_times: dict[int, list[datetime]] = {}
+
+
+def _record_guild_rename(guild_id: int) -> None:
+    now = datetime.now(pytz.utc)
+    kept = [t for t in _rename_times.get(guild_id, []) if now - t < _RENAME_WINDOW]
+    kept.append(now)
+    _rename_times[guild_id] = kept
+
+
+def rename_cooldown_remaining(guild_id: int) -> int:
+    """Minutes until another server rename is allowed (0 = allowed now)."""
+    now = datetime.now(pytz.utc)
+    kept = [t for t in _rename_times.get(guild_id, []) if now - t < _RENAME_WINDOW]
+    _rename_times[guild_id] = kept
+    if len(kept) < _RENAME_LIMIT:
+        return 0
+    free_at = min(kept) + _RENAME_WINDOW
+    seconds = (free_at - now).total_seconds()
+    return max(1, int(seconds // 60) + (1 if seconds % 60 else 0))
+
+
 def pack_lines(lines: list[str], limit: int = 1900) -> str:
     """
     Join *lines* into a single message that stays under Discord's 2000-char
@@ -447,6 +475,7 @@ async def build_config(guild_id: int, client: discord.Client) -> str:
         f"Quote Feature:       {'Enabled' if c['enable_daily_quote'] else 'Disabled'}",
         f"Song Feature:        {'Enabled' if c['enable_daily_song']  else 'Disabled'}",
         f"Cooldown:            {'Enabled' if c['enable_cooldown']    else 'Disabled'}",
+        f"On-Demand /rename:   {'Everyone' if c.get('rename_open', 1) else 'Admins only'}",
         f"Bracket Tracking:    {tracking}",
         f"Bracket Size:        {c['bracket_size'] or 8}",
         f"Bracket Vote Hours:  {c['bracket_voting_hours'] or 24}",
@@ -540,14 +569,19 @@ async def process_rename(
         return
 
     if not preview:
+        renamed = False
         try:
             await guild.edit(name=truncate_to_100_chars(quote), icon=icon_bytes)
+            renamed = True
+            _record_guild_rename(guild_id)
             log.info('[%s] Server renamed to: "%s"', guild_id, quote)
         except discord.HTTPException as e:
             log.error("[%s] Failed to rename guild: %s", guild_id, e)
-        if quote_uid:
+        # Only count picks for a rename that actually happened — a failed edit
+        # must not burn the contributors' cooldown weighting or pad their stats.
+        if renamed and quote_uid:
             log_pick(guild_id, quote_uid, quote_user or "Unknown", "quote", quote)
-        if icon_uid:
+        if renamed and icon_uid:
             log_pick(guild_id, icon_uid, icon_user or "Unknown", "icon", image_url)
 
     # Names on the card follow the guild's credit style, resolved live from the

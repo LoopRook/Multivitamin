@@ -27,6 +27,7 @@ from bot_features import (
     build_contributors,
     build_config,
     pack_lines,
+    rename_cooldown_remaining,
 )
 from bracket import (
     start_bracket,
@@ -57,8 +58,9 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 # ── Shared config tables ──────────────────────────────────────────────────────
 
 _FEATURE_MAP: dict[str, tuple[str, str]] = {
-    "quote":    ("enable_daily_quote", "Daily Quote"),
-    "cooldown": ("enable_cooldown",    "Cooldown"),
+    "quote":      ("enable_daily_quote", "Daily Quote"),
+    "cooldown":   ("enable_cooldown",    "Cooldown"),
+    "openrename": ("rename_open",        "Open /rename (anyone may trigger a rename)"),
 }
 
 # Cap on admin-defined "X of the day" features per guild (bounds scheduler cost).
@@ -141,8 +143,9 @@ def build_help_embed(is_admin: bool = False, is_manager: bool = False) -> discor
     embed.add_field(
         name="🎚️ Features & Scheduling (Admin)",
         value=(
-            "`/config feature <quote|cooldown> <on/off>`\n"
-            "*(Bracket tracking is always on once a Post Channel is set.)*\n"
+            "`/config feature <quote|cooldown|openrename> <on/off>`\n"
+            "*(openrename = anyone may use `/rename`; off = admins only. "
+            "Bracket tracking is always on once a Post Channel is set.)*\n"
             "`/config timezone <tz>` — IANA name, e.g. `US/Eastern`\n"
             "`/config schedule` — **guided**: rename time & frequency (daily, every N days, or weekdays)\n"
             "`/config credits` — **guided**: name contributors by nickname or username, and @tag them"
@@ -532,11 +535,15 @@ async def config_postchannel(interaction: discord.Interaction, channel: Optional
 @app_commands.describe(feature="Which feature", enabled="Turn it on or off")
 @admin_only()
 async def config_feature(interaction: discord.Interaction,
-                         feature: Literal["quote", "cooldown"], enabled: bool):
+                         feature: Literal["quote", "cooldown", "openrename"], enabled: bool):
     field, label = _FEATURE_MAP[feature]
     set_config(interaction.guild_id, field, 1 if enabled else 0)
-    verb = "enabled" if enabled else "disabled"
-    await interaction.response.send_message(f"✅ {label} feature {verb}.", ephemeral=True)
+    if feature == "openrename":
+        msg = ("✅ `/rename` is open to **everyone**." if enabled
+               else "✅ `/rename` is now **admins only**.")
+    else:
+        msg = f"✅ {label} feature {'enabled' if enabled else 'disabled'}."
+    await interaction.response.send_message(msg, ephemeral=True)
 
 
 @config_group.command(name="timezone", description="Set the server timezone (IANA name)")
@@ -2075,6 +2082,20 @@ async def rename_cmd(interaction: discord.Interaction):
     if not cfg["enable_daily_quote"]:
         await interaction.response.send_message(
             "⚠️ Daily Quote feature is disabled for this server.", ephemeral=True)
+        return
+    if not cfg["rename_open"]:
+        is_admin, _ = _perms(interaction)
+        if not is_admin:
+            await interaction.response.send_message(
+                "⚠️ `/rename` is admins-only on this server.", ephemeral=True)
+            return
+    # Refuse up front rather than letting discord.py sleep through the guild
+    # rename rate limit — that would leave this command hanging for minutes.
+    wait = rename_cooldown_remaining(gid)
+    if wait:
+        await interaction.response.send_message(
+            f"⏳ Discord limits server renames to 2 per 10 minutes — "
+            f"try again in ~{wait} minute{'s' if wait != 1 else ''}.", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=True)
     await process_rename(gid, client, override_post_channel=interaction.channel)
