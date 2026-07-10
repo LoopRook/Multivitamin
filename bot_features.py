@@ -492,7 +492,7 @@ async def build_config(guild_id: int, client: discord.Client) -> str:
     # Health check — surface setup gaps and missing permissions.
     warnings = []
     if not c["post_channel"]:
-        warnings.append("No Post Channel - renames aren't tracked for brackets (/config postchannel).")
+        warnings.append("No Post Channel - renames aren't tracked for brackets (set one in /setup).")
     guild = client.get_guild(guild_id)
     if guild is not None and guild.me is not None:
         p = guild.me.guild_permissions

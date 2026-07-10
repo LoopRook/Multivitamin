@@ -1017,7 +1017,7 @@ async def _start_range_bracket(
     if not posts:
         return False, (
             f"⚠️ No rename posts found for {scope_desc}. "
-            f"Renames are tracked automatically once a post channel is set (`/config postchannel`)."
+            f"Renames are tracked automatically once a post channel is set (see `/setup`)."
         )
 
     # If a curated "best of" source channel is configured, seed from the renames

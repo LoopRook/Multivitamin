@@ -131,12 +131,11 @@ def build_help_embed(is_admin: bool = False, is_manager: bool = False) -> discor
         return embed
 
     embed.add_field(
-        name="📺 Channels (Admin) — `/config …` (optional channel arg)",
+        name="📺 Channels (Admin)",
         value=(
-            "`/config quotechannel` — quote submissions\n"
-            "`/config iconchannel` — icon images\n"
-            "`/config postchannel` — official rename cards (tracked for brackets)\n"
-            "*(Best-of channel is set in `/setup`; the bracket channel is picked in `/bracket start`.)*"
+            "`/setup` — pick or create every channel (quote, icon, post, best-of); "
+            "its dropdowns apply as picked, so re-run it any time to change one channel\n"
+            "*(The bracket channel is picked per-run in `/bracket start`.)*"
         ),
         inline=False,
     )
@@ -506,31 +505,8 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 config_group = app_commands.Group(name="config", description="Server configuration", guild_only=True)
 
 
-async def _set_channel(interaction: discord.Interaction, field: str, label: str,
-                       channel: Optional[discord.TextChannel]) -> None:
-    target = channel or interaction.channel
-    set_config(interaction.guild_id, field, target.id)
-    await interaction.response.send_message(f"✅ {label} set to {target.mention}.", ephemeral=True)
-
-
-@config_group.command(name="quotechannel", description="Set the channel where users post quotes")
-@admin_only()
-async def config_quotechannel(interaction: discord.Interaction, channel: Optional[discord.TextChannel] = None):
-    await _set_channel(interaction, "quote_channel", "Quote channel", channel)
-
-
-@config_group.command(name="iconchannel", description="Set the channel where users post icon images")
-@admin_only()
-async def config_iconchannel(interaction: discord.Interaction, channel: Optional[discord.TextChannel] = None):
-    await _set_channel(interaction, "icon_channel", "Icon channel", channel)
-
-
-@config_group.command(name="postchannel", description="Set the channel where rename cards are posted (tracked for brackets)")
-@admin_only()
-async def config_postchannel(interaction: discord.Interaction, channel: Optional[discord.TextChannel] = None):
-    await _set_channel(interaction, "post_channel", "Post channel", channel)
-
-
+# Channels are set in the /setup wizard (its selects apply as picked, so it
+# doubles as the single-channel changer) — no per-channel setter commands.
 @config_group.command(name="feature", description="Enable or disable a feature")
 @app_commands.describe(feature="Which feature", enabled="Turn it on or off")
 @admin_only()
@@ -563,23 +539,9 @@ async def config_timezone(interaction: discord.Interaction, tz: str):
     await interaction.response.send_message(f"✅ Timezone set to `{tz}`.", ephemeral=True)
 
 
-@config_group.command(name="scheduletime", description="Set the daily rename (quote) time (24-hour)")
-@app_commands.describe(which="quote (the daily rename)", time="H:MM or HH:MM, 24-hour, e.g. 8:00")
-@admin_only()
-async def config_scheduletime(interaction: discord.Interaction,
-                              which: Literal["quote"], time: str):
-    if not _valid_hhmm(time):
-        await interaction.response.send_message(
-            "⚠️ Time must be in `H:MM` or `HH:MM` format (24-hour).", ephemeral=True)
-        return
-    set_config(interaction.guild_id, "quote_time", time)
-    cfg = get_config(interaction.guild_id)
-    tz_name = cfg["timezone"] or "US/Eastern"
-    await interaction.response.send_message(
-        f"✅ Quote (rename) time set to `{time}` ({tz_name}).", ephemeral=True)
-
-
 # ── /config schedule — guided rename time + frequency ─────────────────────────
+# (The old /config scheduletime quick-setter was folded into this panel's
+#  Set-time modal — one way to set the time, not two.)
 
 _INTERVAL_CHOICES = [(1, "Daily"), (2, "Every 2 days"), (3, "Every 3 days"),
                      (5, "Every 5 days"), (7, "Every 7 days"),
