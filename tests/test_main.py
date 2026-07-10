@@ -39,7 +39,9 @@ def test_all_views_instantiate(gid):
     main._CreditsView(1, gid)
     main._CreateChannelsModal(gid)          # quote/icon/post/best-of name inputs
     main._BracketChannelModal(gid)          # bracket channel name input
-    assert "schedule" in {c.name for c in main.feature_group.walk_commands()}
+    # setup panel is the only create path (/feature add removed)
+    fnames = {c.name for c in main.feature_group.walk_commands()}
+    assert fnames == {"setup", "list", "edit", "schedule", "toggle", "remove", "access"}
     assert "reset" in {c.name for c in main.admin_group.walk_commands()}
 
 

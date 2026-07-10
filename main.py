@@ -65,7 +65,7 @@ _FEATURE_MAP: dict[str, tuple[str, str]] = {
 
 # Cap on admin-defined "X of the day" features per guild (bounds scheduler cost).
 _MAX_CUSTOM_FEATURES = 10
-# Content types offered by /feature add.
+# Content types offered by /feature setup.
 _CUSTOM_TYPE_HELP = {
     "media": "any image/gif/video upload or media link",
     "link":  "any web link",
@@ -154,8 +154,7 @@ def build_help_embed(is_admin: bool = False, is_manager: bool = False) -> discor
     embed.add_field(
         name="🗓️ Features (Admin) — your own recurring posts",
         value=(
-            "`/feature setup` — **guided** step-by-step (channels, type, name, command)\n"
-            "`/feature add <name> <command> <type> <source> <destination> <time> …` — one-shot\n"
+            "`/feature setup` — **guided**: channels, type, then name/command/time/emoji\n"
             "Each feature gets its **own command** (e.g. `meme` → `/meme`, runs it on demand here).\n"
             "types: `media` (memes/gifs/images), `link`, `music`, `text`\n"
             "`/feature list` · `/feature toggle <command> <on/off>` · `/feature remove <command>`\n"
@@ -1281,7 +1280,7 @@ def _create_daily_feature(guild_id: int, name: str, emoji: str | None, ctype: st
                           run_roles: str | None = None) -> tuple[bool, str]:
     """
     Validate inputs and create a custom feature. Returns (ok, message). Shared by
-    `/feature add` and the guided `/feature setup` flow so both enforce the same rules.
+    the guided `/feature setup` flow (its final modal) — one place for the rules.
     The caller syncs guild commands when *command* is set.
     """
     name = (name or "").strip()
@@ -1390,39 +1389,9 @@ async def feature_setup(interaction: discord.Interaction):
         view=_DailySetupView(interaction.user.id), ephemeral=True)
 
 
-@feature_group.command(name="add", description="Create a custom 'X of the day' in one command")
-@app_commands.describe(
-    name="Display name, e.g. 'Meme of the Day'",
-    command="Its slash command, e.g. 'meme' → members run /meme (required)",
-    type="What to pick — media (memes/gifs/images), link, music, or text",
-    source="Channel to pick from",
-    destination="Channel to post into",
-    time="Daily post time, 24-hour H:MM (server timezone)",
-    emoji="Optional emoji shown before the name",
-    access="Who may run the command (default admin)",
-    role="Role allowed to run it (when access is 'role')",
-)
-@admin_only()
-async def feature_add(interaction: discord.Interaction, name: str, command: str,
-                    type: Literal["media", "link", "music", "text"],
-                    source: discord.TextChannel, destination: discord.TextChannel,
-                    time: str, emoji: Optional[str] = None,
-                    access: Literal["admin", "everyone", "role"] = "admin",
-                    role: Optional[discord.Role] = None):
-    slug, cerr = _resolve_command_slug(interaction.guild_id, command, required=True)
-    if cerr:
-        await interaction.response.send_message(f"⚠️ {cerr}", ephemeral=True)
-        return
-    run_access, run_roles, aerr = _access_from_choice(access, role)
-    if aerr:
-        await interaction.response.send_message(f"⚠️ {aerr}", ephemeral=True)
-        return
-    ok, msg = _create_daily_feature(interaction.guild_id, name, emoji, type,
-                                    source.id, destination.id, time,
-                                    command=slug, run_access=run_access, run_roles=run_roles)
-    if ok:
-        await sync_guild_feature_commands(interaction.guild_id)
-    await interaction.response.send_message(msg, ephemeral=True)
+# (The old /feature add one-liner was removed: the guided /feature setup panel
+#  collects everything it did — name, command, type, channels, time, emoji —
+#  except access/role, which has its own command, /feature access.)
 
 
 async def _feature_slug_autocomplete(interaction: discord.Interaction, current: str):
@@ -1503,7 +1472,7 @@ async def feature_list(interaction: discord.Interaction):
     feats = get_custom_features(interaction.guild_id)
     if not feats:
         await interaction.response.send_message(
-            "No custom features yet. Create one with `/feature add` or `/feature setup`.", ephemeral=True)
+            "No custom features yet. Create one with `/feature setup`.", ephemeral=True)
         return
     lines = ["**Custom features** (run on demand with each `/command`):"] + [_feature_summary(f) for f in feats]
     await interaction.response.send_message(pack_lines(lines), ephemeral=True)

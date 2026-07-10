@@ -24,7 +24,7 @@ Scopes: `bot` + `applications.commands`. The permission integer `562949953539312
 
 1. `/setup` — a guided wizard that walks you through channels, timezone, and schedule. It can create the channels for you.
 2. `/help` lists every command (it only shows admin sections to admins).
-3. Optional: `/feature add` your own recurring posts (e.g. a Meme of the Day, or a Song of the Day with type `music`).
+3. Optional: `/feature setup` your own recurring posts (e.g. a Meme of the Day, or a Song of the Day with type `music`).
 4. When you want a bracket, run `/bracket start` — you pick the bracket channel, size, voting window, and pacing there.
 
 Individual settings can also be changed one at a time under `/config` (see `/help`).
