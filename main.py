@@ -90,12 +90,13 @@ _COMMON_TIMEZONES = [
 ]
 
 _WELCOME_TEXT = (
-    "👋 **Thanks for adding me!**\n"
-    "I rename your server daily from community-submitted quotes, run reaction-seeded bracket "
-    "championships, and can post any 'X of the day' you like — meme, critter, song, and more.\n\n"
-    "**Get started:** run **`/setup`** — a quick step-by-step that sets your channels, timezone, "
-    "and rename schedule. Then `/help` shows every command.\n"
-    "*(Slash commands can take a few minutes to appear right after inviting.)*"
+    "👋 **Thanks for the invite. I'm Moniker.**\n"
+    "Every day I rename your server after a community-submitted quote, run reaction-seeded "
+    "bracket championships, and can post any 'X of the day' you like: meme, critter, song, and more.\n\n"
+    "**Get started:** run **`/setup`** and I'll walk you through your channels, timezone, and "
+    "rename schedule. Then `/help` shows every command.\n"
+    "*(Slash commands can take a few minutes to appear right after inviting.)*\n\n"
+    "*Yours, Mr. Moniker* 🎩"
 )
 
 # Old prefix commands people might still type — nudge them to slash.

@@ -454,7 +454,9 @@ async def _crown_champion(
         f"\n🎊🏆🎊 **{_bracket_label(bracket)} SERVER NAME CHAMPION** 🎊🏆🎊\n\n"
         f'**"{champion["quote"]}"**\n'
         f'*{who} · {champion["season_reactions"]} reactions this season*\n\n'
-        f"Congratulations! 🎉{tail}"
+        f"Congratulations! 🎉{tail}\n\n"
+        f"*Your server has a new namesake.*\n"
+        f"*Mr. Moniker* 🎩"
     )
     try:
         if card_file:
