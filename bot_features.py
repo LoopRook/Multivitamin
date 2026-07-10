@@ -44,6 +44,9 @@ def _normalize_time(t: str) -> str:
     return f"{int(h):02d}:{int(m):02d}"
 
 
+_FIRST_RUN_GRACE_MIN = 60
+
+
 def _fire_action(scheduled: str, cur_time: str, last_date: str | None, today: str) -> str:
     """
     Whether a scheduled job should run on this tick: 'fire', 'stamp' or 'skip'.
@@ -53,9 +56,11 @@ def _fire_action(scheduled: str, cur_time: str, last_date: str | None, today: st
     container across that one minute skipped the whole day silently. The
     last-run date is what prevents a double fire, so firing late is safe.
 
-    'stamp' is the first-run case: a guild configured after today's slot has
-    already passed shouldn't get an immediate surprise post — record the date
-    and start fresh at the next scheduled time.
+    First run (no last date) is special-cased both ways: reaching the slot on
+    time (within the grace window) fires normally — a weekly cadence must not
+    swallow its very first slot — but a guild configured hours *after* today's
+    slot gets 'stamp' instead of a surprise immediate post: record the date and
+    start fresh at the next scheduled time.
 
     Times are zero-padded HH:MM, so string comparison is chronological.
     """
@@ -63,7 +68,31 @@ def _fire_action(scheduled: str, cur_time: str, last_date: str | None, today: st
         return "skip"           # already ran today
     if cur_time < scheduled:
         return "skip"           # not time yet
-    return "fire" if last_date else "stamp"
+    if last_date:
+        return "fire"
+    sh, sm = scheduled.split(":")
+    ch, cm = cur_time.split(":")
+    minutes_late = (int(ch) * 60 + int(cm)) - (int(sh) * 60 + int(sm))
+    return "fire" if minutes_late <= _FIRST_RUN_GRACE_MIN else "stamp"
+
+
+def pack_lines(lines: list[str], limit: int = 1900) -> str:
+    """
+    Join *lines* into a single message that stays under Discord's 2000-char
+    cap, dropping overflow lines with a "+N more" tail. For single-response
+    replies (ephemeral interactions) where splitting into several messages
+    isn't worth the ceremony — unbounded lists must not 400 the whole reply.
+    """
+    out, used, dropped = [], 0, 0
+    for i, line in enumerate(lines):
+        if used + len(line) + 1 > limit:
+            dropped = len(lines) - i
+            break
+        out.append(line)
+        used += len(line) + 1
+    if dropped:
+        out.append(f"*…and {dropped} more*")
+    return "\n".join(out)
 
 
 def _today_since_utc(tz: pytz.BaseTzInfo) -> str:
@@ -367,7 +396,7 @@ async def build_contributors(guild_id: int, client: discord.Client, category: st
     lines = [f"📊 **{label} contributors**"]
     for name, count in sorted_entries:
         lines.append(f"  {name} — **{count}** submission{'s' if count != 1 else ''}")
-    return "\n".join(lines)
+    return pack_lines(lines)
 
 
 _WEEKDAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]

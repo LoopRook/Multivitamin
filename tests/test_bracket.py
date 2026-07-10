@@ -109,3 +109,12 @@ def test_crown_champion_test_bracket_no_rename():
     run(bracket._crown_champion(FakeClient(g), 1, ch, {"id": 8, "year": 0, "label": "TEST"},
                                 {"id": 1, "quote": "T", "quote_user": "x", "season_reactions": 1}, []))
     assert g.edits == []  # test brackets never rename the real server
+
+
+def test_send_lines_chunks_under_discord_cap():
+    ch = Channel()
+    lines = [f'**#{i}** "' + "q" * 120 + '" — name · 9 reactions' for i in range(32)]
+    run(bracket._send_lines(ch, lines))
+    assert len(ch.sent) > 1                              # split, not one oversized send
+    assert all(len(m) <= 2000 for m in ch.sent)          # every chunk fits
+    assert "".join(ch.sent).count("**#") == 32           # nothing dropped

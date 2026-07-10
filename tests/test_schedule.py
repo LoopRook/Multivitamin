@@ -86,3 +86,24 @@ def test_fire_action_first_run_stamps_instead_of_surprise_posting():
     assert FIRE("04:00", "23:00", None, "2026-07-09") == "stamp"
     # ...but a first run before the slot just waits for it normally.
     assert FIRE("04:00", "01:00", None, "2026-07-09") == "skip"
+
+
+def test_fire_action_first_run_fires_when_the_slot_arrives_on_time():
+    # A weekly cadence must not swallow its very first Sunday: reaching the
+    # slot on time (or within the grace hour) fires even with no history.
+    assert FIRE("04:00", "04:00", None, "2026-07-09") == "fire"
+    assert FIRE("04:00", "04:59", None, "2026-07-09") == "fire"
+    assert FIRE("04:00", "05:01", None, "2026-07-09") == "stamp"
+
+
+# ── pack_lines: unbounded lists must never 400 an ephemeral reply ─────────────
+
+def test_pack_lines_short_list_untouched():
+    assert bot_features.pack_lines(["a", "b"]) == "a\nb"
+
+
+def test_pack_lines_drops_overflow_with_a_tail():
+    lines = [f"line {i} " + "x" * 90 for i in range(40)]  # ~4k chars
+    packed = bot_features.pack_lines(lines)
+    assert len(packed) <= 2000
+    assert "more*" in packed.splitlines()[-1]
