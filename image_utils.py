@@ -40,13 +40,24 @@ def is_pure_ascii(text: str) -> bool:
     return all(c in _ASCII_SET for c in text)
 
 
+# A Unicode noncharacter: no font has a real glyph for it, so it always renders
+# as the font's .notdef box. We compare every char's glyph against it to detect
+# a missing glyph — a bare bbox check can't, because .notdef (the tofu box) has
+# ink too, which made DejaVu wrongly "pass" for e.g. Korean jamo and draw tofu.
+_NOTDEF_PROBE = "￾"
+
+
 def can_render_all(text: str, font, name: str) -> bool:
-    """Return True if *font* can render every character in *text*."""
+    """Return True only if *font* has a real glyph for every char in *text*."""
     try:
+        notdef = bytes(font.getmask(_NOTDEF_PROBE))
         for char in text:
             if char in (" ", "\t", "\n"):
                 continue
-            if not font.getmask(char).getbbox():
+            mask = font.getmask(char)
+            if not mask.getbbox():
+                return False
+            if bytes(mask) == notdef:  # font lacks this glyph -> would draw tofu
                 return False
         return True
     except Exception:
