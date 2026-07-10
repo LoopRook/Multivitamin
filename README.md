@@ -1,0 +1,43 @@
+# QOTD Discord Bot
+
+A multi-server Discord bot that:
+
+- **Renames your server daily** using community-submitted quotes + icons (fair, weighted sampling so no one dominates).
+- **Custom "X of the day" features** (`/daily`) — make your own daily posts from any channel: meme of the day, critter of the day, song of the day, and more (media/link/music/text).
+- **Runs bracket championships** — reactions on rename cards seed a tournament of your favourite names, voted with native Discord polls. Supports calendar-year or custom **seasons** (monthly, holidays, etc.). The winning name becomes the server name.
+
+All commands are **slash (`/`) commands**. The bot is multi-server, uses no `Administrator` permission, and stores each server's data separately.
+
+## Add it to your server
+
+One-click invite (you need **Manage Server** on the target server):
+
+```
+https://discord.com/oauth2/authorize?client_id=1374255006433415248&scope=bot+applications.commands&permissions=562949953539312
+```
+
+Scopes: `bot` + `applications.commands`. The permission integer `562949953539312` grants exactly: View Channels, Send Messages, Embed Links, Attach Files, Add Reactions, Read Message History, Send Polls, **View Audit Log** (to DM whoever adds the bot a private setup guide), **Manage Channels** (so `/setup` can create your channels for you), and **Manage Server** (needed to rename the server). Prefer the Dev Portal's **OAuth2 → URL Generator** to (re)generate this by ticking those boxes. *(View Audit Log and Manage Channels are optional conveniences — without them, onboarding falls back to a channel message, and `/setup` requires you to pick existing channels instead of creating them.)*
+
+> Slash commands can take a few minutes to appear after inviting (Discord propagates global commands gradually).
+
+## Quick start (in your server)
+
+1. `/setup` — a guided wizard that walks you through channels, timezone, and schedule. It can create the channels for you.
+2. `/help` lists every command (it only shows admin sections to admins).
+3. Optional: `/feature setup` your own recurring posts (e.g. a Meme of the Day, or a Song of the Day with type `music`).
+4. When you want a bracket, run `/bracket start` — you pick the bracket channel, size, voting window, and pacing there.
+
+Individual settings can also be changed one at a time under `/config` (see `/help`).
+
+Admin commands require the **Manage Server** permission, or bot-admin access granted via `/admin add`.
+
+## Self-hosting
+
+Runs as a single worker process. In the Developer Portal you must enable both privileged intents — **Message Content** (scanning quote/icon channels) and **Server Members** (naming contributors by their current nickname) — and toggle **Public Bot** on. The bot will not start if either intent is missing. Verification is required past ~100 servers.
+
+```bash
+pip install -r requirements.txt
+DISCORD_TOKEN=your_token DB_FILE=/path/to/server_config.db python main.py
+```
+
+Environment: `DISCORD_TOKEN` (required), `DB_FILE` (optional, defaults to `/data/server_config.db` — put it on a persistent volume).
