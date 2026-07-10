@@ -1512,8 +1512,14 @@ async def feature_access(interaction: discord.Interaction, command: str,
         await interaction.response.send_message(f"⚠️ {aerr}", ephemeral=True)
         return
     set_custom_feature_access(interaction.guild_id, feat["name"], run_access, run_roles)
-    who = {"admin": "admins only", "everyone": "anyone",
-           "roles": f"{role.mention} and admins"}[run_access]
+    # No dict literal here: its values would all evaluate eagerly, and
+    # role.mention crashes when access is admin/everyone (role is None).
+    if run_access == "roles":
+        who = f"{role.mention} and admins"
+    elif run_access == "everyone":
+        who = "anyone"
+    else:
+        who = "admins only"
     await interaction.response.send_message(
         f"✅ `/{feat['command']}` can now be run by {who}.", ephemeral=True)
 

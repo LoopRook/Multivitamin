@@ -168,3 +168,30 @@ def test_openrename_toggle_wired(gid):
     db_utils.set_config(gid, field, 0)                 # valid config field
     assert db_utils.get_config(gid)["rename_open"] == 0
     assert db_utils.get_config(gid)["credit_style"]    # migration neighbours intact
+
+
+def test_feature_access_all_modes(gid):
+    # /feature access crashed live on 'everyone'/'admin': a dict literal built
+    # f"{role.mention}" eagerly even when no role was passed. Drive the real
+    # callback through every mode.
+    db_utils.add_custom_feature(gid, "Meme", None, "media", 1, 2, "9:00", command="meme")
+    replies = []
+
+    class _Resp:
+        async def send_message(self, msg, ephemeral=False):
+            replies.append(msg)
+
+    def _inter():
+        return type("I", (), {"guild_id": gid, "response": _Resp()})()
+
+    cb = main.feature_access.callback
+    run(cb(_inter(), "meme", "everyone", None))
+    assert "anyone" in replies[-1]
+    run(cb(_inter(), "meme", "admin", None))
+    assert "admins only" in replies[-1]
+    role = type("Role", (), {"id": 424242, "mention": "<@&424242>"})()
+    run(cb(_inter(), "meme", "role", role))
+    assert "<@&424242>" in replies[-1]
+    assert db_utils.get_custom_feature_by_command(gid, "meme")["run_roles"] == "424242"
+    run(cb(_inter(), "meme", "role", None))          # role mode w/o role -> friendly error
+    assert replies[-1].startswith("⚠️")
