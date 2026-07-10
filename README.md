@@ -2,7 +2,7 @@
 
 Your members write quotes. Every day, the bot picks one, pairs it with a member-submitted image, and **renames the whole server after it** — with a generated card crediting who wrote it. That's the whole core, and it runs itself.
 
-When (and only if) you feel like it, the year's favorite names can fight it out in an optional **bracket championship**, and the winner becomes the server name.
+Optionally, the year's favorite names can fight it out in a **bracket championship**, and the winner becomes the server name.
 
 It also lets admins spin up their own recurring posts — Meme of the Day, Critter of the Week, Song of the Day — each with its own on-demand slash command.
 
@@ -97,7 +97,7 @@ Make the bot post *anything* on a schedule, sourced from a channel:
 /feature setup
 ```
 
-Pick a source channel, a destination, a type — `media` (images/gifs), `link`, `music` (YouTube/Spotify/SoundCloud), or `text` — then name it and give it a command slug. Example: a "Meme of the Day" sourced from #shitposting gets its own `/meme` command that anyone (or just admins, or a role — `/feature access`) can run on demand, plus a scheduled daily post. Same fair sampling as renames.
+Pick a source channel, a destination, a type — `media` (images/gifs), `link`, `music` (YouTube/Spotify/SoundCloud), or `text` — then name it and give it a command slug. Example: a "Meme of the Day" sourced from #memes gets its own `/meme` command that anyone (or just admins, or a role — `/feature access`) can run on demand, plus a scheduled daily post. Same fair sampling as renames.
 
 ```
 /feature list · edit · schedule · toggle · remove · access
