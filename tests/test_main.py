@@ -16,9 +16,8 @@ def test_command_surface():
     top = {c.name for c in main.client.tree.get_commands()}
     assert {"setup", "season", "showconfig", "help", "rename", "mystats", "preview", "contributors"} <= top
     cnames = {c.name for c in main.config_group.walk_commands()}
-    assert "credits" in cnames
-    # removed commands must be gone
-    assert "bracketchannel" not in cnames
+    # slimmed surface: channels live in /setup, time lives in the schedule panel
+    assert cnames == {"feature", "timezone", "schedule", "credits"}
 
 
 def test_all_views_instantiate(gid):
