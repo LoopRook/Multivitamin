@@ -15,6 +15,7 @@ from db_utils import (
 )
 from image_utils import generate_card, truncate_to_100_chars
 import credits
+import moderation
 
 log = logging.getLogger(__name__)
 
@@ -172,6 +173,7 @@ def _weighted_choice(pool: dict[int, tuple], cooldown_counts: dict[int, int]) ->
 async def get_random_quote(
     channel,
     cooldown_counts: dict[int, int] | None = None,
+    is_blocked=None,
 ) -> tuple[str | None, str | None, int | None]:
     if channel is None:
         return None, None, None
@@ -185,6 +187,8 @@ async def get_random_quote(
         for line in msg.content.strip().splitlines():
             stripped = line.strip()
             if not stripped or stripped.startswith("!"):
+                continue
+            if is_blocked and is_blocked(stripped):   # skip slurs/hate terms
                 continue
             cur, name, count = pool.get(uid, (None, msg.author.display_name, 0))
             count += 1
@@ -440,6 +444,22 @@ def _cadence_desc(c) -> str:
     return "Daily" if n <= 1 else f"Every {n} days"
 
 
+def _blocklist_desc(c) -> str:
+    """Human description of the slur blocklist for /showconfig."""
+    if not (c["blocklist_enabled"] if "blocklist_enabled" in c.keys() else 1):
+        return "Off"
+    extra = len(moderation.parse_custom(c["blocklist_custom"] if "blocklist_custom" in c.keys() else None))
+    return "On" + (f" (+{extra} custom)" if extra else "")
+
+
+def rename_blocklist(cfg):
+    """Return a per-guild is_blocked(text) callable, or None when the blocklist is off."""
+    if not (cfg["blocklist_enabled"] if "blocklist_enabled" in cfg.keys() else 1):
+        return None
+    extra = moderation.parse_custom(cfg["blocklist_custom"] if "blocklist_custom" in cfg.keys() else None)
+    return lambda text: moderation.is_blocked(text, extra)
+
+
 async def build_config(guild_id: int, client: discord.Client) -> str:
     """
     Return a formatted config string with channel IDs resolved to #channel-name.
@@ -487,6 +507,7 @@ async def build_config(guild_id: int, client: discord.Client) -> str:
         f"Song Time:           {c['song_time'] or '10:00'}",
         f"Credit Names:        {'Server nickname' if credits.style_of(c) == 'nickname' else '@username'}",
         f"Credit Tagging:      {'On (mentions)' if credits.mentions_on(c) else 'Off (plain text)'}",
+        f"Slur Blocklist:      {_blocklist_desc(c)}",
     ]
 
     # Health check — surface setup gaps and missing permissions.
@@ -551,7 +572,7 @@ async def process_rename(
     post_channel  = client.get_channel(cfg["post_channel"])
 
     (quote, quote_user, quote_uid), (image_url, icon_user, icon_uid) = await asyncio.gather(
-        get_random_quote(quote_channel, cooldown_counts=q_cd),
+        get_random_quote(quote_channel, cooldown_counts=q_cd, is_blocked=rename_blocklist(cfg)),
         get_random_icon( icon_channel,  cooldown_counts=i_cd),
     )
 

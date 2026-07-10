@@ -16,6 +16,7 @@ _VALID_CONFIG_FIELDS = frozenset({
     "bracket_pacing", "bracket_source_channel", "pre_bracket_name",
     "quote_interval_days", "quote_weekdays",
     "credit_style", "credit_mentions", "rename_open",
+    "blocklist_enabled", "blocklist_custom",
 })
 
 _CREATE_CONFIG = """
@@ -204,6 +205,8 @@ _CONFIG_MIGRATIONS = [
     ("credit_style",           "TEXT DEFAULT 'nickname'"),  # 'nickname' | 'username'
     ("credit_mentions",        "INTEGER DEFAULT 0"),        # 1 = @mention contributors in posts
     ("rename_open",            "INTEGER DEFAULT 1"),        # 1 = anyone may run /rename; 0 = admins only
+    ("blocklist_enabled",      "INTEGER DEFAULT 1"),        # 1 = skip quotes containing slurs/hate terms
+    ("blocklist_custom",       "TEXT"),                     # comma-separated per-guild extra blocked words
 ]
 
 _RENAME_POSTS_MIGRATIONS = [

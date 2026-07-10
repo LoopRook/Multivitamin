@@ -61,6 +61,7 @@ _FEATURE_MAP: dict[str, tuple[str, str]] = {
     "quote":      ("enable_daily_quote", "Daily Quote"),
     "cooldown":   ("enable_cooldown",    "Cooldown"),
     "openrename": ("rename_open",        "Open /rename (anyone may trigger a rename)"),
+    "blocklist":  ("blocklist_enabled",  "Slur blocklist"),
 }
 
 # Cap on admin-defined "X of the day" features per guild (bounds scheduler cost).
@@ -143,9 +144,10 @@ def build_help_embed(is_admin: bool = False, is_manager: bool = False) -> discor
     embed.add_field(
         name="🎚️ Features & Scheduling (Admin)",
         value=(
-            "`/config feature <quote|cooldown|openrename> <on/off>`\n"
-            "*(openrename: anyone may use `/rename`, off means admins only. "
-            "Bracket tracking is always on once a Post Channel is set.)*\n"
+            "`/config feature <quote|cooldown|openrename|blocklist> <on/off>`\n"
+            "*(openrename: anyone may use `/rename`. blocklist: skip quotes with slurs/hate "
+            "terms (on by default). Bracket tracking is always on once a Post Channel is set.)*\n"
+            "`/config blocklist <add|remove|list> [word]`: your server's extra blocked words\n"
             "`/config timezone <tz>`: IANA name, e.g. `US/Eastern`\n"
             "`/config schedule`: **guided** rename time and frequency (daily, every N days, or weekdays)\n"
             "`/config credits`: **guided** contributor naming (nickname or username, and @tagging)"
@@ -511,14 +513,47 @@ config_group = app_commands.Group(name="config", description="Server configurati
 @app_commands.describe(feature="Which feature", enabled="Turn it on or off")
 @admin_only()
 async def config_feature(interaction: discord.Interaction,
-                         feature: Literal["quote", "cooldown", "openrename"], enabled: bool):
+                         feature: Literal["quote", "cooldown", "openrename", "blocklist"], enabled: bool):
     field, label = _FEATURE_MAP[feature]
     set_config(interaction.guild_id, field, 1 if enabled else 0)
     if feature == "openrename":
         msg = ("✅ `/rename` is open to **everyone**." if enabled
                else "✅ `/rename` is now **admins only**.")
+    elif feature == "blocklist":
+        msg = ("✅ Slur blocklist **on** — quotes with slurs or hate terms are skipped."
+               if enabled else
+               "✅ Slur blocklist **off** — no quotes are filtered.")
     else:
         msg = f"✅ {label} feature {'enabled' if enabled else 'disabled'}."
+    await interaction.response.send_message(msg, ephemeral=True)
+
+
+@config_group.command(name="blocklist", description="Manage this server's extra blocked words (slurs are blocked by default)")
+@app_commands.describe(action="add, remove, or list", word="the word to add or remove")
+@admin_only()
+async def config_blocklist(interaction: discord.Interaction,
+                           action: Literal["add", "remove", "list"], word: Optional[str] = None):
+    import moderation
+    cfg = get_config(interaction.guild_id)
+    custom = moderation.parse_custom(cfg["blocklist_custom"])
+    if action == "list":
+        extra = ", ".join(sorted(custom)) if custom else "*(none)*"
+        note = "" if cfg["blocklist_enabled"] else "\n⚠️ The blocklist is currently **off** (`/config feature blocklist true`)."
+        await interaction.response.send_message(
+            f"🛡️ **Blocklist** — a built-in slur/hate list is always active. "
+            f"Your server's extra words: {extra}{note}", ephemeral=True)
+        return
+    w = (word or "").strip().lower()
+    if not w:
+        await interaction.response.send_message("⚠️ Give a word to add or remove.", ephemeral=True)
+        return
+    if action == "add":
+        custom.add(w)
+        msg = f"✅ Added `{w}` to this server's blocklist."
+    else:
+        custom.discard(w)
+        msg = f"✅ Removed `{w}` from this server's blocklist (built-in terms can't be removed)."
+    set_config(interaction.guild_id, "blocklist_custom", ",".join(sorted(custom)))
     await interaction.response.send_message(msg, ephemeral=True)
 
 
@@ -1760,6 +1795,7 @@ class _SetupWizardView(discord.ui.View):
         self.weekdays     = {int(x) for x in wd.split(",") if x.strip().isdigit()} if wd else set()
         self.pending_time = cfg["quote_time"] or "4:00"
         self.pending_tz   = cfg["timezone"] or "US/Eastern"
+        self.blocklist    = bool(cfg["blocklist_enabled"])
         self._rebuild()
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -1793,7 +1829,9 @@ class _SetupWizardView(discord.ui.View):
         elif step == "schedule":
             body = ("**Step 3 of 3: Schedule** *(draft, applied when you press Finish)*\n"
                     f"• Frequency: **{self._cadence_text()}**\n"
-                    f"• Time: **{self.pending_time}** ({self.pending_tz})\n\n"
+                    f"• Time: **{self.pending_time}** ({self.pending_tz})\n"
+                    f"• Slur blocklist: **{'on' if self.blocklist else 'off'}** "
+                    "*(skips quotes with slurs/hate terms so the server name stays safe)*\n\n"
                     "Set how often and when the server renames, then **✅ Finish**. "
                     "*(Weekday mode is how you get 'every Sunday'.)*")
         else:
@@ -1802,7 +1840,9 @@ class _SetupWizardView(discord.ui.View):
             body = ("🎉 **Setup complete!**\n"
                     f"• Quote {m(cfg['quote_channel'])} · Icon {m(cfg['icon_channel'])} · Post {m(cfg['post_channel'])}\n"
                     f"• Renames **{self._cadence_text()}** at **{self.pending_time}** ({self.pending_tz})\n"
-                    f"• Contributors credited by **{style}**, {tagging} (change with `/config credits`)\n\n"
+                    f"• Contributors credited by **{style}**, {tagging} (change with `/config credits`)\n"
+                    f"• Slur blocklist **{'on' if cfg['blocklist_enabled'] else 'off'}** "
+                    "(add words with `/config blocklist`)\n\n"
                     "Optional next steps: `/bracket start` (run a name bracket) · `/feature setup` "
                     "(an 'X of the day') · `/showconfig` to review · `/help` for everything.")
         return "🛠️ **Server setup**\n\n" + body
@@ -1831,6 +1871,9 @@ class _SetupWizardView(discord.ui.View):
         elif step == "schedule":
             self._add_schedule_selects()
             self._button("Set time", "🕐", discord.ButtonStyle.secondary, self._cb_set_time)
+            self._button(f"Blocklist: {'on' if self.blocklist else 'off'}", "🛡️",
+                         discord.ButtonStyle.success if self.blocklist else discord.ButtonStyle.secondary,
+                         self._cb_blocklist)
             self._button("◀ Back", None, discord.ButtonStyle.secondary, self._cb_back)
             self._button("Finish ✅", None, discord.ButtonStyle.success, self._cb_finish)
 
@@ -1910,6 +1953,11 @@ class _SetupWizardView(discord.ui.View):
     async def _cb_set_time(self, interaction):
         await interaction.response.send_modal(_WizardTimeModal(self))
 
+    async def _cb_blocklist(self, interaction):
+        self.blocklist = not self.blocklist
+        self._rebuild()
+        await interaction.response.edit_message(content=self._content(), view=self)
+
     async def _cb_finish(self, interaction):
         if self.mode == "weekly" and not self.weekdays:
             await interaction.response.send_message(
@@ -1921,6 +1969,7 @@ class _SetupWizardView(discord.ui.View):
             set_config(self.guild_id, "quote_weekdays", None)
             set_config(self.guild_id, "quote_interval_days", self.interval)
         set_config(self.guild_id, "quote_time", self.pending_time)
+        set_config(self.guild_id, "blocklist_enabled", 1 if self.blocklist else 0)
         self.step = _WIZARD_STEPS.index("done")
         self.clear_items()
         await interaction.response.edit_message(content=self._content(), view=self)
