@@ -44,6 +44,28 @@ def _normalize_time(t: str) -> str:
     return f"{int(h):02d}:{int(m):02d}"
 
 
+def _fire_action(scheduled: str, cur_time: str, last_date: str | None, today: str) -> str:
+    """
+    Whether a scheduled job should run on this tick: 'fire', 'stamp' or 'skip'.
+
+    The scheduled time is a *threshold*, not an instant. Matching the minute
+    exactly (cur_time == scheduled) meant a slow tick, a restart or a paused
+    container across that one minute skipped the whole day silently. The
+    last-run date is what prevents a double fire, so firing late is safe.
+
+    'stamp' is the first-run case: a guild configured after today's slot has
+    already passed shouldn't get an immediate surprise post — record the date
+    and start fresh at the next scheduled time.
+
+    Times are zero-padded HH:MM, so string comparison is chronological.
+    """
+    if last_date == today:
+        return "skip"           # already ran today
+    if cur_time < scheduled:
+        return "skip"           # not time yet
+    return "fire" if last_date else "stamp"
+
+
 def _today_since_utc(tz: pytz.BaseTzInfo) -> str:
     """
     Return the UTC ISO timestamp for midnight-today in *tz*.
@@ -737,10 +759,13 @@ async def scheduler_loop(client: discord.Client) -> None:
 
                 if cfg["enable_daily_quote"]:
                     scheduled = _normalize_time(cfg["quote_time"] or "04:00")
-                    if (cur_time == scheduled and cfg["last_quote_date"] != today
-                            and _rename_due(cfg, now)):
+                    action = _fire_action(scheduled, cur_time, cfg["last_quote_date"], today)
+                    if action != "skip" and _rename_due(cfg, now):
+                        # Stamp before running: a job that keeps throwing must not
+                        # retry every 60s for the rest of the day.
                         set_config(guild.id, "last_quote_date", today)
-                        await process_rename(guild.id, client)
+                        if action == "fire":
+                            await process_rename(guild.id, client)
 
                 # Admin-defined "X of the day" features (song-of-the-day is one).
                 for feat in get_custom_features(guild.id):
@@ -750,9 +775,11 @@ async def scheduler_loop(client: discord.Client) -> None:
                         scheduled = _normalize_time(feat["post_time"])
                     except Exception:
                         continue
-                    if cur_time == scheduled and feat["last_run_date"] != today and _feature_due(feat, now):
+                    action = _fire_action(scheduled, cur_time, feat["last_run_date"], today)
+                    if action != "skip" and _feature_due(feat, now):
                         set_custom_feature_run_date(feat["id"], today)
-                        await process_custom_daily(guild.id, client, feat)
+                        if action == "fire":
+                            await process_custom_daily(guild.id, client, feat)
 
                 # Check for bracket matchups that need tallying/advancing
                 await check_bracket_advancement(guild.id, client)
