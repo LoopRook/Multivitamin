@@ -135,13 +135,37 @@ def _sample_accent(img: Image.Image):
 
 
 def _palette(accent):
-    """(panel_bg, label_colour) from an accent, or a neutral pair when accent is None."""
+    """(panel_lo, panel_hi, label_col). panel_hi is the brighter top of the panel gradient."""
     if accent is None:
-        return (18, 17, 16), (232, 227, 219)
+        return (16, 15, 14), (28, 26, 24), (232, 227, 219)
     h, s, _ = colorsys.rgb_to_hsv(*(c / 255 for c in accent))
-    pr, pg, pb = colorsys.hsv_to_rgb(h, min(s, 0.6), 0.11)     # dark tinted panel
-    lr, lg, lb = colorsys.hsv_to_rgb(h, min(s, 0.85), 0.96)    # bright label
-    return (int(pr * 255), int(pg * 255), int(pb * 255)), (int(lr * 255), int(lg * 255), int(lb * 255))
+
+    def rgb(sat, val):
+        r, g, b = colorsys.hsv_to_rgb(h, sat, val)
+        return (int(r * 255), int(g * 255), int(b * 255))
+
+    return rgb(min(s, 0.60), 0.10), rgb(min(s, 0.62), 0.20), rgb(min(s, 0.85), 0.96)
+
+
+def _v_gradient(w: int, h: int, top, bot) -> Image.Image:
+    """A vertical gradient image, *top* colour at the top fading to *bot* at the bottom."""
+    strip = Image.new("RGB", (1, h))
+    px = strip.load()
+    for y in range(h):
+        t = y / max(1, h - 1)
+        px[0, y] = tuple(int(top[i] * (1 - t) + bot[i] * t) for i in range(3))
+    return strip.resize((w, h))
+
+
+def _bar_color(frac: float, accent, label_col):
+    """Timeline colour at position *frac* (0=Jan .. 1=Dec): dim early, full accent by Dec."""
+    if accent is None:
+        dim = (86, 82, 76)
+    else:
+        h, s, _ = colorsys.rgb_to_hsv(*(c / 255 for c in accent))
+        r, g, b = colorsys.hsv_to_rgb(h, min(s, 0.5), 0.45)
+        dim = (int(r * 255), int(g * 255), int(b * 255))
+    return tuple(int(dim[i] * (1 - frac) + label_col[i] * frac) for i in range(3))
 
 
 def _square(img: Image.Image, s: int) -> Image.Image:
@@ -185,7 +209,12 @@ def _fit_name(draw, name, max_w, base=18, floor=14):
     return font, _fit_width(draw, name, font, max_w)
 
 
-_LABEL_TRACKING = 1   # letter-spacing (px) for the uppercase QUOTE/ICON labels
+_LABEL_TRACKING = 1     # letter-spacing (px) for the uppercase QUOTE/ICON labels
+_PANEL_GRADIENT = True  # panel as a top-to-bottom gradient vs a flat tint
+_BAR_GRADIENT = True    # timeline colour intensifies from Jan (dim) to Dec (full accent)
+_ICON_INSET = 25        # icon margin from the card edge
+_ICON_RADIUS = 28       # icon corner radius
+_CARD_RADIUS = _ICON_INSET + _ICON_RADIUS   # concentric with the icon's corners
 
 
 def _draw_tracked(draw, xy, text, font, fill, tracking):
@@ -212,17 +241,21 @@ async def generate_card(
         W, H = 800, 450
         icon = Image.open(BytesIO(icon_bytes)).convert("RGBA")
         accent = _sample_accent(icon)
-        panel, label_col = _palette(accent)
+        panel_lo, panel_hi, label_col = _palette(accent)
 
-        base = Image.new("RGBA", (W, H), panel + (255,))
+        base = Image.new("RGBA", (W, H), (0, 0, 0, 255))
+        if _PANEL_GRADIENT:
+            base.paste(_v_gradient(W, H, panel_hi, panel_lo), (0, 0))
+        else:
+            base.paste(Image.new("RGB", (W, H), panel_lo), (0, 0))
         draw = ImageDraw.Draw(base)
 
-        # Icon: square, rounded corners, left.
-        iso = 400
+        # Icon: square, rounded corners, left. Inset + radius are concentric with the card.
+        iso = H - 2 * _ICON_INSET
         sq = _square(icon, iso)
         mask = Image.new("L", (iso, iso), 0)
-        ImageDraw.Draw(mask).rounded_rectangle((0, 0, iso, iso), radius=28, fill=255)
-        base.paste(sq, (24, 25), mask)
+        ImageDraw.Draw(mask).rounded_rectangle((0, 0, iso, iso), radius=_ICON_RADIUS, fill=255)
+        base.paste(sq, (_ICON_INSET, _ICON_INSET), mask)
 
         tx, tx_r = 452, W - 24        # text column left / right edges
         tw = tx_r - tx
@@ -265,19 +298,33 @@ async def generate_card(
             nfont = _text_font(name_size, 500, name)
             draw.text((cx, 362), _fit_width(draw, name, nfont, col_w), font=nfont, fill=(236, 231, 223))
 
-        # Year-progress bar: dating element, playhead at today.
+        # Year-progress bar: dating element, playhead at today. Under _BAR_GRADIENT the
+        # filled portion warms from dim (Jan) to full accent (Dec).
         by = 410
         frac = _year_fraction(datetime.date.today())
         px = tx + int(tw * frac)
-        draw.line([(tx, by), (tx_r, by)], fill=(255, 255, 255, 40), width=3)
-        draw.line([(tx, by), (px, by)], fill=label_col, width=3)
+        draw.line([(tx, by), (tx_r, by)], fill=(255, 255, 255, 40), width=3)   # track
+        if _BAR_GRADIENT:
+            for x in range(tx, px + 1):
+                draw.line([(x, by - 1), (x, by + 1)], fill=_bar_color((x - tx) / max(1, tw), accent, label_col))
+        else:
+            draw.line([(tx, by), (px, by)], fill=label_col, width=3)
         draw.ellipse([px - 4, by - 4, px + 4, by + 4], fill=(247, 241, 228))
+        # Only the date label, riding the playhead (clamped so it never overflows the ends).
         small = _archivo(12, 500)
         today = datetime.date.today()
-        draw.text((tx, by + 8), "Jan", font=small, fill=(150, 144, 135))
-        draw.text((tx_r, by + 8), "Dec", font=small, anchor="ra", fill=(150, 144, 135))
-        draw.text((px, by + 8), f"{today.strftime('%b')} {today.day}",
-                  font=small, anchor="ma", fill=(224, 217, 205))
+        date_txt = f"{today.strftime('%b')} {today.day}"
+        if px <= tx + 24:
+            draw.text((tx, by + 8), date_txt, font=small, fill=(224, 217, 205))
+        elif px >= tx_r - 24:
+            draw.text((tx_r, by + 8), date_txt, font=small, anchor="ra", fill=(224, 217, 205))
+        else:
+            draw.text((px, by + 8), date_txt, font=small, anchor="ma", fill=(224, 217, 205))
+
+        # Round the card's own corners (concentric with the icon).
+        card_mask = Image.new("L", (W, H), 0)
+        ImageDraw.Draw(card_mask).rounded_rectangle((0, 0, W - 1, H - 1), radius=_CARD_RADIUS, fill=255)
+        base.putalpha(card_mask)
 
         buf = BytesIO()
         base.save(buf, format="PNG")
