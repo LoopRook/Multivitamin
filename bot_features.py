@@ -423,7 +423,7 @@ async def build_contributors(guild_id: int, client: discord.Client, category: st
     label = {"quote": "Quote", "icon": "Icon", "song": "Song"}[category]
     lines = [f"📊 **{label} contributors**"]
     for name, count in sorted_entries:
-        lines.append(f"  {name} — **{count}** submission{'s' if count != 1 else ''}")
+        lines.append(f"  {name}: **{count}** submission{'s' if count != 1 else ''}")
     return pack_lines(lines)
 
 
@@ -600,7 +600,7 @@ async def process_rename(
             image_file.seek(0)
             try:
                 await override_post_channel.send(
-                    f"🔍 **Preview** — Quote by {quote_name}, icon by {icon_name}:\n> {quote}",
+                    f"🔍 **Preview.** Quote by {quote_name}, icon by {icon_name}:\n> {quote}",
                     file=discord.File(fp=image_file, filename="preview.png"),
                 )
             except discord.HTTPException as e:
@@ -678,7 +678,7 @@ async def process_custom_daily(
     key     = (guild_id, feature["id"])
     counts  = not preview and not on_demand   # only a scheduled/real run logs + guards
     if counts and key in _custom_running:
-        return False, f"**{name}** is already running — try again in a moment."
+        return False, f"**{name}** is already running. Try again in a moment."
     if counts:
         _custom_running.add(key)
     try:
@@ -697,11 +697,11 @@ async def process_custom_daily(
         post_channel = override_post_channel or client.get_channel(feature["post_channel"])
         if not source:
             return _feature_fail(guild_id, name,
-                f"I can't see the **source** channel for **{name}** — was it deleted, "
+                f"I can't see the **source** channel for **{name}**. Was it deleted, "
                 f"or am I missing **View Channel** there?")
         if not post_channel:
             return _feature_fail(guild_id, name,
-                f"I can't see the **destination** channel for **{name}** — was it deleted, "
+                f"I can't see the **destination** channel for **{name}**. Was it deleted, "
                 f"or am I missing **View Channel** there?")
 
         # Scan the source channel (needs View Channel + Read Message History).
@@ -709,13 +709,13 @@ async def process_custom_daily(
             cand, user, uid = await get_random_content(source, ctype, cooldown_counts=cd)
         except discord.Forbidden:
             return _feature_fail(guild_id, name,
-                f"I can't read {source.mention} — give me **View Channel** and "
+                f"I can't read {source.mention}. Give me **View Channel** and "
                 f"**Read Message History** there.")
         if not cand:
             return _feature_fail(guild_id, name,
                 f"No eligible **{ctype}** content found in {source.mention} yet.")
 
-        prefix  = "🔍 **Preview** — " if preview else ""
+        prefix  = "🔍 **Preview:** " if preview else ""
         emoji   = (feature["emoji"] + " ") if feature["emoji"] else ""
         caption = f"{prefix}{emoji}**{name}** (from {user}):"
 
@@ -749,7 +749,7 @@ async def process_custom_daily(
         except discord.Forbidden:
             extra = " and **Attach Files**" if ctype == "media" else ""
             return _feature_fail(guild_id, name,
-                f"I can't post in {post_channel.mention} — give me **View Channel**, "
+                f"I can't post in {post_channel.mention}. Give me **View Channel**, "
                 f"**Send Messages**{extra} there.")
 
         if counts and uid:
@@ -759,7 +759,7 @@ async def process_custom_daily(
         return True, ""
     except Exception as e:
         log.error("[%s] Custom feature '%s' failed: %s", guild_id, name, e)
-        return False, "Something went wrong running that feature — check the bot logs."
+        return False, "Something went wrong running that feature. Check the bot logs."
     finally:
         if counts:
             _custom_running.discard(key)

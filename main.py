@@ -114,16 +114,16 @@ def build_help_embed(is_admin: bool = False, is_manager: bool = False) -> discor
     """
     embed = discord.Embed(
         title="📖 Command Reference",
-        description="All commands are slash (`/`) commands — type `/` and pick this bot from the list.",
+        description="All commands are slash (`/`) commands. Type `/` and pick Moniker from the list.",
         color=discord.Color.blurple(),
     )
     embed.add_field(
         name="🌐 Everyone",
         value=(
-            "`/rename` — trigger a rename now\n"
-            "`/mystats` — your submission counts & last picks\n"
-            "`/bracket history` — past bracket champions (hall of champions)\n"
-            "`/help` — show this list\n"
+            "`/rename`: trigger a rename now\n"
+            "`/mystats`: your submission counts and last picks\n"
+            "`/bracket history`: past bracket champions (hall of champions)\n"
+            "`/help`: show this list\n"
             "*Plus any per-feature commands this server has made (e.g. `/meme`, `/song`).*"
         ),
         inline=False,
@@ -134,8 +134,8 @@ def build_help_embed(is_admin: bool = False, is_manager: bool = False) -> discor
     embed.add_field(
         name="📺 Channels (Admin)",
         value=(
-            "`/setup` — pick or create every channel (quote, icon, post, best-of); "
-            "its dropdowns apply as picked, so re-run it any time to change one channel\n"
+            "`/setup`: pick or create every channel (quote, icon, post, best-of). "
+            "Its dropdowns apply as picked, so re-run it any time to change one channel.\n"
             "*(The bracket channel is picked per-run in `/bracket start`.)*"
         ),
         inline=False,
@@ -144,33 +144,33 @@ def build_help_embed(is_admin: bool = False, is_manager: bool = False) -> discor
         name="🎚️ Features & Scheduling (Admin)",
         value=(
             "`/config feature <quote|cooldown|openrename> <on/off>`\n"
-            "*(openrename = anyone may use `/rename`; off = admins only. "
+            "*(openrename: anyone may use `/rename`, off means admins only. "
             "Bracket tracking is always on once a Post Channel is set.)*\n"
-            "`/config timezone <tz>` — IANA name, e.g. `US/Eastern`\n"
-            "`/config schedule` — **guided**: rename time & frequency (daily, every N days, or weekdays)\n"
-            "`/config credits` — **guided**: name contributors by nickname or username, and @tag them"
+            "`/config timezone <tz>`: IANA name, e.g. `US/Eastern`\n"
+            "`/config schedule`: **guided** rename time and frequency (daily, every N days, or weekdays)\n"
+            "`/config credits`: **guided** contributor naming (nickname or username, and @tagging)"
         ),
         inline=False,
     )
     embed.add_field(
-        name="🗓️ Features (Admin) — your own recurring posts",
+        name="🗓️ Features (Admin): your own recurring posts",
         value=(
-            "`/feature setup` — **guided**: channels, type, then name/command/time/emoji\n"
-            "Each feature gets its **own command** (e.g. `meme` → `/meme`, runs it on demand here).\n"
+            "`/feature setup`: **guided** setup (channels, type, then name, command, time, emoji)\n"
+            "Each feature gets its **own command** (a feature named `meme` becomes `/meme`, run on demand here).\n"
             "types: `media` (memes/gifs/images), `link`, `music`, `text`\n"
             "`/feature list` · `/feature toggle <command> <on/off>` · `/feature remove <command>`\n"
             "`/feature edit <command> [name] [type] [source] [destination] [time] [emoji]`\n"
-            "`/feature schedule <command>` — **guided**: cadence (every N days or weekdays) & time\n"
-            "`/feature access <command> <admin|everyone|role> [role]` — who can run it\n"
-            "`/preview <command>` — dry-run it (like `/preview rename`)"
+            "`/feature schedule <command>`: **guided** cadence (every N days or weekdays) and time\n"
+            "`/feature access <command> <admin|everyone|role> [role]`: who can run it\n"
+            "`/preview <command>`: dry-run it (like `/preview rename`)"
         ),
         inline=False,
     )
     embed.add_field(
         name="🏆 Bracket (Admin)",
         value=(
-            "`/bracket start` — **guided**: pick where it posts · scope · size · voting · pacing · source → launch\n"
-            "`/bracket test` — test bracket with random scores\n"
+            "`/bracket start`: **guided** launcher for where it posts, scope, size, voting, pacing, and source\n"
+            "`/bracket test`: test bracket with random scores\n"
             "`/bracket forceadvance` · `/bracket status` · `/bracket cancel`"
         ),
         inline=False,
@@ -178,7 +178,7 @@ def build_help_embed(is_admin: bool = False, is_manager: bool = False) -> discor
     embed.add_field(
         name="📅 Seasons (Admin)",
         value=(
-            "`/season` — **guided** panel: add (form), list, and remove named date windows\n"
+            "`/season`: **guided** panel to add (form), list, and remove named date windows\n"
             "Pick a season as the scope in `/bracket start`."
         ),
         inline=False,
@@ -186,10 +186,10 @@ def build_help_embed(is_admin: bool = False, is_manager: bool = False) -> discor
     embed.add_field(
         name="ℹ️ Info & Preview (Admin)",
         value=(
-            "`/showconfig` — current settings + health warnings\n"
-            "`/contributors <quote|icon>` — submission leaderboard\n"
-            "`/preview <rename|command>` — dry-run a rename or a feature, here only\n"
-            "`/setup` — quick setup guide"
+            "`/showconfig`: current settings and health warnings\n"
+            "`/contributors <quote|icon>`: submission leaderboard\n"
+            "`/preview <rename|command>`: dry-run a rename or a feature, here only\n"
+            "`/setup`: quick setup guide"
         ),
         inline=False,
     )
@@ -197,10 +197,10 @@ def build_help_embed(is_admin: bool = False, is_manager: bool = False) -> discor
         embed.add_field(
             name="👑 Bot Admins (Manage Server only)",
             value=(
-                "`/admin add <user>` — grant bot-admin access\n"
-                "`/admin remove <user>` — revoke bot-admin access\n"
-                "`/admin list` — list current bot-admins\n"
-                "`/admin reset` — ⚠️ wipe ALL this server's data (irreversible; testing/cleanup)"
+                "`/admin add <user>`: grant bot-admin access\n"
+                "`/admin remove <user>`: revoke bot-admin access\n"
+                "`/admin list`: list current bot-admins\n"
+                "`/admin reset`: ⚠️ wipe ALL this server's data (irreversible; testing/cleanup)"
             ),
             inline=False,
         )
@@ -338,7 +338,7 @@ class QotdClient(discord.Client):
         if first in _LEGACY_HINTS:
             try:
                 await message.channel.send(
-                    "ℹ️ I've moved to **slash commands** — type `/help` to see everything "
+                    "ℹ️ I've moved to **slash commands**. Type `/help` to see everything "
                     "(start typing `/` and pick me from the list)."
                 )
             except discord.HTTPException:
@@ -634,7 +634,7 @@ class _ScheduleView(discord.ui.View):
     def _render(self) -> str:
         tz = get_config(self.guild_id)["timezone"] or "US/Eastern"
         return (
-            f"🗓️ **Schedule — {self.target_name}**  *(draft — nothing changes until you press ✅ Save)*\n"
+            f"🗓️ **Schedule: {self.target_name}**  *(draft, nothing changes until you press ✅ Save)*\n"
             f"• Frequency: **{self._cadence_text()}**\n"
             f"• Time: **{self.pending_time}** ({tz})\n\n"
             "Set the **mode** and its option below (and the time, if you like), then press **✅ Save** to apply. "
@@ -644,11 +644,11 @@ class _ScheduleView(discord.ui.View):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
             await interaction.response.send_message(
-                "This panel isn't yours — run `/config schedule` yourself.", ephemeral=True)
+                "This panel isn't yours. Run `/config schedule` yourself.", ephemeral=True)
             return False
         return True
 
-    @discord.ui.select(placeholder="Mode — every N days, or specific weekdays",
+    @discord.ui.select(placeholder="Mode: every N days, or specific weekdays",
                        options=[discord.SelectOption(label="Every N days", value="interval")], row=0)
     async def mode_select(self, interaction: discord.Interaction, select: discord.ui.Select):
         self.mode = select.values[0]
@@ -687,7 +687,7 @@ class _ScheduleView(discord.ui.View):
             c.disabled = True
         tz = get_config(self.guild_id)["timezone"] or "US/Eastern"
         await interaction.response.edit_message(
-            content=(f"✅ **Saved** — {self.target_name} now runs **{self._cadence_text()}** "
+            content=(f"✅ **Saved.** {self.target_name} now runs **{self._cadence_text()}** "
                      f"at **{self.pending_time}** ({tz})."),
             view=self)
         self.stop()
@@ -719,25 +719,25 @@ class _CreditsView(discord.ui.View):
                                   else discord.ButtonStyle.secondary)
 
     def _render(self) -> str:
-        style_txt = ("**server nickname** — whatever they're called in this server"
+        style_txt = ("**server nickname** (whatever they're called in this server)"
                      if self.style == "nickname" else
-                     "**@username** — their Discord handle, the same everywhere")
-        mention_txt = ("**on** — the champion announcement pings the winner, and credits "
+                     "**@username** (their Discord handle, the same everywhere)")
+        mention_txt = ("**on**: the champion announcement pings the winner, and credits "
                        "render as mentions in bracket posts"
                        if self.mentions else
-                       "**off** — credits are plain text, nobody gets pinged")
+                       "**off**: credits are plain text, nobody gets pinged")
         return (
-            "🙋 **Contributor credits** — how people are named when the bot credits them.\n"
+            "🙋 **Contributor credits** control how people are named when the bot credits them.\n"
             f"• **Name style**: {style_txt}\n"
             f"• **Tag them**: {mention_txt}\n\n"
             "Names are looked up fresh each time, so a nickname change shows up everywhere. "
-            "Cards are images — they always show a plain name, never a mention."
+            "Cards are images, so they always show a plain name, never a mention."
         )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
             await interaction.response.send_message(
-                "This panel isn't yours — run `/config credits` yourself.", ephemeral=True)
+                "This panel isn't yours. Run `/config credits` yourself.", ephemeral=True)
             return False
         return True
 
@@ -762,14 +762,14 @@ class _CreditsView(discord.ui.View):
         for c in self.children:
             c.disabled = True
         await interaction.response.edit_message(
-            content=(f"✅ **Saved** — contributors are credited by "
+            content=(f"✅ **Saved.** Contributors are credited by "
                      f"**{'server nickname' if self.style == 'nickname' else '@username'}**, "
                      f"tagging **{'on' if self.mentions else 'off'}**."),
             view=self)
         self.stop()
 
 
-@config_group.command(name="credits", description="How contributors are named — nickname vs username, and @tagging")
+@config_group.command(name="credits", description="How contributors are named: nickname vs username, and @tagging")
 @admin_only()
 async def config_credits(interaction: discord.Interaction):
     view = _CreditsView(interaction.user.id, interaction.guild_id)
@@ -786,10 +786,10 @@ bracket_group = app_commands.Group(name="bracket", description="Bracket champion
 
 _SOURCE_INSTRUCTIONS = (
     "📌 **Best-of nominations**\n"
-    "**Forward** your favorite rename cards into this channel (use Discord's **Forward** button — "
-    "screenshots and re-uploads don't count) to nominate them for the bracket.\n"
+    "**Forward** your favorite rename cards into this channel to nominate them for the bracket "
+    "(use Discord's **Forward** button; screenshots and re-uploads don't count).\n"
     "• I'll react ℹ️ when a forward is counted, or 🔁 if that rename was already forwarded here.\n"
-    "• **React** to the forwards you like — the most-reacted renames get seeded into the bracket."
+    "• **React** to the forwards you like. The most-reacted renames get seeded into the bracket."
 )
 
 
@@ -898,22 +898,22 @@ class _BracketStartView(discord.ui.View):
         src  = "best-of channel (forwarded nominations)" if not self.use_firehose else "all tracked renames"
         chan = f"<#{cfg['bracket_channel']}>" if cfg["bracket_channel"] else "⚠️ *pick or create one below*"
         return (
-            "🏆 **Start a bracket** — set the options, then 🚀 **Launch**. *(Pre-filled to your last run.)*\n"
-            f"• **Posts to** — where matchups & results appear: {chan}\n"
-            f"• **Scope** — which renames compete: **{scope_label}**\n"
-            f"• **Size** — how many names enter: **{self.size}**\n"
-            f"• **Voting** — how long each matchup's poll stays open: **{self.voting}h**\n"
-            f"• **Pacing** — **{self.pacing}**: *round* posts a whole round of matchups at once (faster); "
+            "🏆 **Start a bracket.** Set the options, then 🚀 **Launch**. *(Pre-filled to your last run.)*\n"
+            f"• **Posts to** (where matchups and results appear): {chan}\n"
+            f"• **Scope** (which renames compete): **{scope_label}**\n"
+            f"• **Size** (how many names enter): **{self.size}**\n"
+            f"• **Voting** (how long each matchup's poll stays open): **{self.voting}h**\n"
+            f"• **Pacing**: **{self.pacing}**. *round* posts a whole round of matchups at once (faster), "
             "*daily* posts one matchup at a time (much longer)\n"
-            f"• **Source** — **{src}**\n\n"
-            f"⏱️ **Estimated length: {_fmt_duration(total_h)}** — {rounds} round(s), {matchups} matchup(s) "
-            f"× {self.voting}h."
+            f"• **Source**: **{src}**\n\n"
+            f"⏱️ **Estimated length: {_fmt_duration(total_h)}** ({rounds} round(s), {matchups} matchup(s) "
+            f"× {self.voting}h)."
         )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
             await interaction.response.send_message(
-                "This panel isn't yours — run `/bracket start` yourself.", ephemeral=True)
+                "This panel isn't yours. Run `/bracket start` yourself.", ephemeral=True)
             return False
         return True
 
@@ -922,18 +922,18 @@ class _BracketStartView(discord.ui.View):
         await interaction.response.edit_message(content=self._content(), view=self)
 
     @discord.ui.select(cls=discord.ui.ChannelSelect, channel_types=[discord.ChannelType.text],
-                       placeholder="Posts to — where matchups & results appear", row=0)
+                       placeholder="Posts to: where matchups and results appear", row=0)
     async def channel_select(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
         set_config(self.guild_id, "bracket_channel", select.values[0].id)
         await self._refresh(interaction)
 
-    @discord.ui.select(placeholder="Scope — this year or a season",
+    @discord.ui.select(placeholder="Scope: this year or a season",
                        options=[discord.SelectOption(label="This year", value="year")], row=1)
     async def scope_select(self, interaction: discord.Interaction, select: discord.ui.Select):
         self.scope = select.values[0]
         await self._refresh(interaction)
 
-    @discord.ui.select(placeholder="Size — how many names",
+    @discord.ui.select(placeholder="Size: how many names",
                        options=[discord.SelectOption(label="8 names", value="8")], row=2)
     async def size_select(self, interaction: discord.Interaction, select: discord.ui.Select):
         self.size = int(select.values[0])
@@ -966,14 +966,14 @@ class _BracketStartView(discord.ui.View):
     async def launch_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not get_config(self.guild_id)["bracket_channel"]:
             await interaction.response.send_message(
-                "⚠️ Pick or **🏗️ Create** a bracket channel first (top dropdown) — that's where matchups post.",
+                "⚠️ Pick or **🏗️ Create** a bracket channel first (top dropdown). That's where matchups post.",
                 ephemeral=True)
             return
         for c in self.children:
             c.disabled = True
         source_label = "all renames" if self.use_firehose else "best-of channel"
         await interaction.response.edit_message(
-            content=(f"🚀 **Launching** — {self._scope_label()} · {self.size} names · {self.voting}h · "
+            content=(f"🚀 **Launching:** {self._scope_label()} · {self.size} names · {self.voting}h · "
                      f"{self.pacing} · from {source_label}. Watch the bracket channel."),
             view=self)
         self.stop()
@@ -994,7 +994,7 @@ class _BracketStartView(discord.ui.View):
         await interaction.followup.send(msg, ephemeral=True)
 
 
-@bracket_group.command(name="start", description="Start a bracket — pick where it posts, scope, size, voting, pacing & source")
+@bracket_group.command(name="start", description="Start a bracket: pick where it posts, scope, size, voting, pacing, source")
 @admin_only()
 async def bracket_start(interaction: discord.Interaction):
     view = _BracketStartView(interaction.user.id, interaction.guild_id)
@@ -1013,22 +1013,22 @@ class _BracketTestView(discord.ui.View):
         chan = f"<#{cfg['bracket_channel']}>" if cfg["bracket_channel"] else "⚠️ *pick or create one below*"
         size = int(cfg["bracket_size"] or 8)
         return (
-            "🧪 **Test bracket** — a full dry run seeded from the quote channel with random scores. "
+            "🧪 **Test bracket:** a full dry run seeded from the quote channel with random scores. "
             "The real server is never renamed.\n"
             f"• **Posts to**: {chan}\n"
             f"• **Size**: {size} names · **Voting**: {cfg['bracket_voting_hours'] or 24}h "
-            "*(from your saved settings — change them in `/bracket start`)*"
+            "*(from your saved settings, change them in `/bracket start`)*"
         )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
             await interaction.response.send_message(
-                "This panel isn't yours — run `/bracket test` yourself.", ephemeral=True)
+                "This panel isn't yours. Run `/bracket test` yourself.", ephemeral=True)
             return False
         return True
 
     @discord.ui.select(cls=discord.ui.ChannelSelect, channel_types=[discord.ChannelType.text],
-                       placeholder="Posts to — where the test bracket appears", row=0)
+                       placeholder="Posts to: where the test bracket appears", row=0)
     async def channel_select(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
         set_config(self.guild_id, "bracket_channel", select.values[0].id)
         await interaction.response.edit_message(content=self._content(), view=self)
@@ -1041,13 +1041,13 @@ class _BracketTestView(discord.ui.View):
     async def run_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not get_config(self.guild_id)["bracket_channel"]:
             await interaction.response.send_message(
-                "⚠️ Pick or **🏗️ Create** a bracket channel first — that's where the test posts.",
+                "⚠️ Pick or **🏗️ Create** a bracket channel first. That's where the test posts.",
                 ephemeral=True)
             return
         for c in self.children:
             c.disabled = True
         await interaction.response.edit_message(
-            content="🧪 **Running the test bracket** — watch the bracket channel.", view=self)
+            content="🧪 **Running the test bracket.** Watch the bracket channel.", view=self)
         self.stop()
         _, msg = await start_test_bracket(self.guild_id, client)
         await interaction.followup.send(msg, ephemeral=True)
@@ -1079,7 +1079,7 @@ async def bracket_history(interaction: discord.Interaction):
     rows = get_bracket_history(interaction.guild_id)
     if not rows:
         await interaction.response.send_message(
-            "🏆 No completed brackets yet — run one with `/bracket start`.", ephemeral=True)
+            "🏆 No completed brackets yet. Run one with `/bracket start`.", ephemeral=True)
         return
     cfg   = get_config(interaction.guild_id)
     lines = ["🏆 **Hall of Champions**"]
@@ -1090,7 +1090,7 @@ async def bracket_history(interaction: discord.Interaction):
         if champ:
             name = credits.resolve_name(client, interaction.guild_id, r["champion_uid"],
                                         r["champion_user"], credits.style_of(cfg))
-            who = f" — *{name}*" if (r["champion_user"] or r["champion_uid"]) else ""
+            who = f" by *{name}*" if (r["champion_user"] or r["champion_uid"]) else ""
             lines.append(f'• **{label}** ({date}): "{champ}"{who}')
         else:
             lines.append(f"• **{label}** ({date}): *champion not recorded*")
@@ -1123,11 +1123,11 @@ client.tree.add_command(bracket_group)
 def _season_panel_text(guild_id: int) -> str:
     seasons = get_seasons(guild_id)
     if seasons:
-        body = "\n".join(f'• **{s["name"]}** — {s["start_at"][:10]} → {s["end_at"][:10]}' for s in seasons)
+        body = "\n".join(f'• **{s["name"]}**: {s["start_at"][:10]} to {s["end_at"][:10]}' for s in seasons)
     else:
         body = "*No seasons defined yet.*"
     return (
-        "📅 **Seasons** — named date windows you can seed a bracket from (a month, a holiday, etc.).\n\n"
+        "📅 **Seasons** are named date windows you can seed a bracket from (a month, a holiday, etc.).\n\n"
         f"{body}\n\n"
         "Use **➕ Add season** to define one, or the dropdown to remove one. "
         "Then pick it as the scope in `/bracket start`."
@@ -1187,7 +1187,7 @@ class _SeasonView(discord.ui.View):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
             await interaction.response.send_message(
-                "This panel isn't yours — run `/season` yourself.", ephemeral=True)
+                "This panel isn't yours. Run `/season` yourself.", ephemeral=True)
             return False
         return True
 
@@ -1242,8 +1242,8 @@ def _feature_summary(f) -> str:
     emo  = (f["emoji"] + " ") if f["emoji"] else ""
     cmd  = f"`/{f['command']}`" if f["command"] else "`(no command)`"
     acc  = _ACCESS_LABELS.get(f['run_access'] or 'admin', 'admin')
-    return (f"{flag} {cmd} — {emo}**{f['name']}** · `{f['content_type']}` · "
-            f"{src} → {dst} · {f['post_time']} ({_feature_cadence(f)}) · run: {acc}")
+    return (f"{flag} {cmd}: {emo}**{f['name']}** · `{f['content_type']}` · "
+            f"{src} to {dst} · {f['post_time']} ({_feature_cadence(f)}) · run: {acc}")
 
 
 def _resolve_command_slug(guild_id: int, raw: Optional[str], current_name: Optional[str] = None,
@@ -1253,11 +1253,11 @@ def _resolve_command_slug(guild_id: int, raw: Optional[str], current_name: Optio
     Empty/None raw → (None, error) if *required*, else (None, None).
     """
     if not raw or not raw.strip():
-        return None, ("A command is required — pick a short one like `meme`." if required else None)
+        return None, ("A command is required. Pick a short one like `meme`." if required else None)
     slug = _normalize_command_slug(raw)
     if slug is None:
-        return None, ("Command name must be 1–32 chars of lowercase letters/numbers/`-`/`_`, "
-                      "and can't be a reserved name (help, feature, bracket, …).")
+        return None, ("Command name must be 1 to 32 chars of lowercase letters, numbers, `-`, or `_`, "
+                      "and can't be a reserved name (help, feature, bracket, and so on).")
     existing = get_custom_feature_by_command(guild_id, slug)
     if existing and (current_name is None or existing["name"].lower() != current_name.lower()):
         return None, f"`/{slug}` is already used by **{existing['name']}**. Pick another."
@@ -1302,17 +1302,17 @@ def _create_daily_feature(guild_id: int, name: str, emoji: str | None, ctype: st
 # ── Guided /feature setup (channel pickers + type dropdown + a name/time form) ───
 
 _TYPE_SELECT_OPTIONS = [
-    discord.SelectOption(label="Media — memes, gifs, images, videos", value="media", emoji="🖼️"),
-    discord.SelectOption(label="Link — any web link", value="link", emoji="🔗"),
-    discord.SelectOption(label="Music — YouTube / Spotify / SoundCloud", value="music", emoji="🎵"),
-    discord.SelectOption(label="Text — a line of text", value="text", emoji="💬"),
+    discord.SelectOption(label="Media: memes, gifs, images, videos", value="media", emoji="🖼️"),
+    discord.SelectOption(label="Link: any web link", value="link", emoji="🔗"),
+    discord.SelectOption(label="Music: YouTube, Spotify, SoundCloud", value="music", emoji="🎵"),
+    discord.SelectOption(label="Text: a line of text", value="text", emoji="💬"),
 ]
 
 
 class _DailyNameModal(discord.ui.Modal, title="Name your feature"):
     """Final step of /feature setup — name, then a required command, time, optional emoji."""
     name_in    = discord.ui.TextInput(label="Name", placeholder="Meme of the Day", max_length=80)
-    command_in = discord.ui.TextInput(label="Command (required, e.g. meme → /meme)",
+    command_in = discord.ui.TextInput(label="Command (required), e.g. meme for /meme",
                                       max_length=32, placeholder="meme")
     time_in    = discord.ui.TextInput(label="Time (24-hour H:MM, server timezone)", placeholder="12:00", max_length=5)
     emoji_in   = discord.ui.TextInput(label="Emoji (optional)", required=False, max_length=8, placeholder="🖼️")
@@ -1348,23 +1348,23 @@ class _DailySetupView(discord.ui.View):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
             await interaction.response.send_message(
-                "This setup panel isn't yours — run `/feature setup` yourself.", ephemeral=True)
+                "This setup panel isn't yours. Run `/feature setup` yourself.", ephemeral=True)
             return False
         return True
 
     @discord.ui.select(cls=discord.ui.ChannelSelect, channel_types=[discord.ChannelType.text],
-                       placeholder="1) Source — the channel to pick from", row=0)
+                       placeholder="1) Source: the channel to pick from", row=0)
     async def source_select(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
         self.source_id = select.values[0].id
         await interaction.response.defer()
 
     @discord.ui.select(cls=discord.ui.ChannelSelect, channel_types=[discord.ChannelType.text],
-                       placeholder="2) Destination — where to post it", row=1)
+                       placeholder="2) Destination: where to post it", row=1)
     async def dest_select(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
         self.dest_id = select.values[0].id
         await interaction.response.defer()
 
-    @discord.ui.select(placeholder="3) Type — what to pick", options=_TYPE_SELECT_OPTIONS, row=2)
+    @discord.ui.select(placeholder="3) Type: what to pick", options=_TYPE_SELECT_OPTIONS, row=2)
     async def type_select(self, interaction: discord.Interaction, select: discord.ui.Select):
         self.ctype = select.values[0]
         await interaction.response.defer()
@@ -1384,7 +1384,7 @@ class _DailySetupView(discord.ui.View):
 @admin_only()
 async def feature_setup(interaction: discord.Interaction):
     await interaction.response.send_message(
-        "🛠️ **New feature** — pick a **source** channel, a **destination**, and a **type** below, "
+        "🛠️ **New feature.** Pick a **source** channel, a **destination**, and a **type** below, "
         "then hit **Name it & create** to set the name, time, emoji, and (optionally) a slash command "
         "like `/meme`. Set who can use that command afterward with `/feature access`.",
         view=_DailySetupView(interaction.user.id), ephemeral=True)
@@ -1439,7 +1439,7 @@ async def feature_edit(interaction: discord.Interaction, command: str,
     if emoji is not None:       fields["emoji"] = emoji.strip()
     if not fields:
         await interaction.response.send_message(
-            "⚠️ Nothing to change — set at least one field (e.g. `destination`).", ephemeral=True)
+            "⚠️ Nothing to change. Set at least one field (e.g. `destination`).", ephemeral=True)
         return
     if not update_custom_feature(feat["id"], **fields):
         await interaction.response.send_message(
@@ -1608,7 +1608,7 @@ class _ResetConfirmView(discord.ui.View):
         for c in self.children:
             c.disabled = True
         await interaction.response.edit_message(
-            content=("🗑️ **Done.** Every bit of this server's data was wiped — it's back to a fresh "
+            content=("🗑️ **Done.** Every bit of this server's data was wiped. It's back to a fresh "
                      "install. Run `/setup` to reconfigure."),
             view=self)
         self.stop()
@@ -1617,7 +1617,7 @@ class _ResetConfirmView(discord.ui.View):
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         for c in self.children:
             c.disabled = True
-        await interaction.response.edit_message(content="✅ Cancelled — nothing was changed.", view=self)
+        await interaction.response.edit_message(content="✅ Cancelled. Nothing was changed.", view=self)
         self.stop()
 
 
@@ -1626,15 +1626,15 @@ class _ResetConfirmView(discord.ui.View):
 async def admin_reset(interaction: discord.Interaction):
     view = _ResetConfirmView(interaction.user.id, interaction.guild_id)
     await interaction.response.send_message(
-        "⚠️ **DANGER — full reset**\n"
+        "⚠️ **DANGER: full reset**\n"
         "This **permanently deletes everything** this bot stores for this server:\n"
-        "• all `/config` settings, schedule & channels\n"
-        "• every custom `/daily` feature (and its slash command)\n"
-        "• all brackets, seasons & bracket history\n"
-        "• all tracked rename posts, forward nominations & pick history\n"
+        "• all `/config` settings, schedule, and channels\n"
+        "• every custom `/feature` (and its slash command)\n"
+        "• all brackets, seasons, and bracket history\n"
+        "• all tracked rename posts, forward nominations, and pick history\n"
         "• the bot-admin roster\n\n"
         "**This cannot be undone.** The server returns to a fresh state (like a new install).\n"
-        "*(Mainly a testing/cleanup tool — most servers never need this.)*",
+        "*(Mainly a testing and cleanup tool. Most servers never need this.)*",
         view=view, ephemeral=True)
 
 
@@ -1696,11 +1696,11 @@ async def _channels_reply(interaction: discord.Interaction, made, reused, best_i
     if best_id:
         await _post_source_instructions(guild, best_id)
     if not made and not reused:
-        await interaction.followup.send("Nothing to create — all fields were left blank.", ephemeral=True)
+        await interaction.followup.send("Nothing to create. All fields were left blank.", ephemeral=True)
         return
     lines = ["✅ **Channels ready.**"]
-    if made:   lines.append("Created — " + " · ".join(made))
-    if reused: lines.append("Reused existing — " + " · ".join(reused))
+    if made:   lines.append("Created: " + " · ".join(made))
+    if reused: lines.append("Reused existing: " + " · ".join(reused))
     await interaction.followup.send("\n".join(lines), ephemeral=True)
 
 
@@ -1764,7 +1764,7 @@ class _SetupWizardView(discord.ui.View):
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
-            await interaction.response.send_message("This setup isn't yours — run `/setup` yourself.", ephemeral=True)
+            await interaction.response.send_message("This setup isn't yours. Run `/setup` yourself.", ephemeral=True)
             return False
         return True
 
@@ -1779,7 +1779,7 @@ class _SetupWizardView(discord.ui.View):
         def m(cid): return f"<#{cid}>" if cid else "*not set*"
         step = _WIZARD_STEPS[self.step]
         if step == "channels":
-            body = ("**Step 1 of 3 — Channels**\n"
+            body = ("**Step 1 of 3: Channels**\n"
                     f"• Quote: {m(cfg['quote_channel'])}\n"
                     f"• Icon: {m(cfg['icon_channel'])}\n"
                     f"• Post/rename: {m(cfg['post_channel'])}  *(turns on bracket tracking)*\n"
@@ -1787,22 +1787,22 @@ class _SetupWizardView(discord.ui.View):
                     "*(members forward favorite renames here for bracket seeding)*\n\n"
                     "Pick existing channels, or **🏗️ Create channels** to make them, then **Next ▶**.")
         elif step == "timezone":
-            body = ("**Step 2 of 3 — Timezone**\n"
+            body = ("**Step 2 of 3: Timezone**\n"
                     f"• Current: **{self.pending_tz}**\n\n"
                     "Pick your timezone (the daily rename time is in this zone), then **Next ▶**.")
         elif step == "schedule":
-            body = ("**Step 3 of 3 — Schedule** *(draft — applied when you press Finish)*\n"
+            body = ("**Step 3 of 3: Schedule** *(draft, applied when you press Finish)*\n"
                     f"• Frequency: **{self._cadence_text()}**\n"
                     f"• Time: **{self.pending_time}** ({self.pending_tz})\n\n"
-                    "Set how often & when the server renames, then **✅ Finish**. "
-                    "*(Weekday mode = 'every Sunday'.)*")
+                    "Set how often and when the server renames, then **✅ Finish**. "
+                    "*(Weekday mode is how you get 'every Sunday'.)*")
         else:
             style = ("server nickname" if credits.style_of(cfg) == "nickname" else "@username")
             tagging = "with pings" if credits.mentions_on(cfg) else "no pings"
             body = ("🎉 **Setup complete!**\n"
                     f"• Quote {m(cfg['quote_channel'])} · Icon {m(cfg['icon_channel'])} · Post {m(cfg['post_channel'])}\n"
                     f"• Renames **{self._cadence_text()}** at **{self.pending_time}** ({self.pending_tz})\n"
-                    f"• Contributors credited by **{style}**, {tagging} — change with `/config credits`\n\n"
+                    f"• Contributors credited by **{style}**, {tagging} (change with `/config credits`)\n\n"
                     "Optional next steps: `/bracket start` (run a name bracket) · `/feature setup` "
                     "(an 'X of the day') · `/showconfig` to review · `/help` for everything.")
         return "🛠️ **Server setup**\n\n" + body
@@ -1812,10 +1812,10 @@ class _SetupWizardView(discord.ui.View):
         self.clear_items()
         step = _WIZARD_STEPS[self.step]
         if step == "channels":
-            for field, ph in (("quote_channel", "Quote channel — where members post quotes"),
-                              ("icon_channel", "Icon channel — where members post icon images"),
-                              ("post_channel", "Post channel — daily rename cards (tracked for brackets)"),
-                              ("bracket_source_channel", "Best-of channel — forward favorite renames here (optional)")):
+            for field, ph in (("quote_channel", "Quote channel: where members post quotes"),
+                              ("icon_channel", "Icon channel: where members post icon images"),
+                              ("post_channel", "Post channel: daily rename cards (tracked for brackets)"),
+                              ("bracket_source_channel", "Best-of channel: forward favorite renames here (optional)")):
                 sel = discord.ui.ChannelSelect(channel_types=[discord.ChannelType.text], placeholder=ph)
                 sel.callback = self._channel_cb(sel, field)
                 self.add_item(sel)
@@ -1840,7 +1840,7 @@ class _SetupWizardView(discord.ui.View):
         self.add_item(b)
 
     def _add_schedule_selects(self):
-        mode = discord.ui.Select(placeholder="Mode — every N days, or specific weekdays", options=[
+        mode = discord.ui.Select(placeholder="Mode: every N days, or specific weekdays", options=[
             discord.SelectOption(label="Every N days", value="interval", default=(self.mode == "interval")),
             discord.SelectOption(label="Specific weekdays", value="weekly", default=(self.mode == "weekly"))])
         mode.callback = self._mode_cb(mode)
@@ -2013,7 +2013,7 @@ async def rename_cmd(interaction: discord.Interaction):
     gid = interaction.guild_id
     if get_active_bracket(gid):
         await interaction.response.send_message(
-            "⚠️ A bracket is currently running — renames are paused until it finishes. "
+            "⚠️ A bracket is currently running, so renames are paused until it finishes. "
             "The winning name will become the server name.", ephemeral=True)
         return
     cfg = get_config(gid)
@@ -2032,8 +2032,8 @@ async def rename_cmd(interaction: discord.Interaction):
     wait = rename_cooldown_remaining(gid)
     if wait:
         await interaction.response.send_message(
-            f"⏳ Discord limits server renames to 2 per 10 minutes — "
-            f"try again in ~{wait} minute{'s' if wait != 1 else ''}.", ephemeral=True)
+            f"⏳ Discord limits server renames to 2 per 10 minutes. "
+            f"Try again in ~{wait} minute{'s' if wait != 1 else ''}.", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=True)
     await process_rename(gid, client, override_post_channel=interaction.channel)
