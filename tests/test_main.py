@@ -17,7 +17,7 @@ def test_command_surface():
     assert {"setup", "season", "showconfig", "help", "rename", "mystats", "preview", "contributors"} <= top
     cnames = {c.name for c in main.config_group.walk_commands()}
     # slimmed surface: channels live in /setup, time lives in the schedule panel
-    assert cnames == {"feature", "timezone", "schedule", "credits"}
+    assert cnames == {"feature", "timezone", "schedule", "credits", "blocklist"}
 
 
 def test_all_views_instantiate(gid):

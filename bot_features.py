@@ -10,11 +10,12 @@ import pytz
 
 from db_utils import (
     get_config, set_config, log_pick, get_user_last_picks,
-    get_today_pick_counts, store_rename_post, get_active_bracket,
-    get_custom_features, set_custom_feature_run_date,
+    get_today_pick_counts, get_recent_pick_items, store_rename_post,
+    get_active_bracket, get_custom_features, set_custom_feature_run_date,
 )
 from image_utils import generate_card, truncate_to_100_chars
 import credits
+import moderation
 
 log = logging.getLogger(__name__)
 
@@ -82,6 +83,11 @@ def _fire_action(scheduled: str, cur_time: str, last_date: str | None, today: st
 # command can refuse up front with a real wait time instead.
 _RENAME_LIMIT = 2
 _RENAME_WINDOW = timedelta(minutes=10)
+
+# A quote/icon that was picked in the last N days is skipped during sampling, so
+# contributors with only a few submissions don't repeat. Falls back gracefully
+# when a server is so small that everything is recent.
+_NO_REPEAT_DAYS = 30
 _rename_times: dict[int, list[datetime]] = {}
 
 
@@ -169,13 +175,32 @@ def _weighted_choice(pool: dict[int, tuple], cooldown_counts: dict[int, int]) ->
 #
 # Returns (item, display_name, user_id).
 
+def _reservoir_add(pool: dict, uid: int, name: str, item) -> None:
+    """Algorithm R (k=1): after N items, each had a 1/N chance to be the kept one."""
+    cur, _, count = pool.get(uid, (None, name, 0))
+    count += 1
+    pool[uid] = (item if random.randint(1, count) == 1 else cur, name, count)
+
+
+def _strip_query(url: str) -> str:
+    """Discord CDN URLs carry rotating signature params; the base path is the identity."""
+    return url.split("?", 1)[0]
+
+
 async def get_random_quote(
     channel,
     cooldown_counts: dict[int, int] | None = None,
+    is_blocked=None,
+    recent_items: set | None = None,
 ) -> tuple[str | None, str | None, int | None]:
     if channel is None:
         return None, None, None
-    pool: dict[int, tuple[str, str, int]] = {}
+    # Two reservoirs: `fresh` excludes items picked inside the no-repeat window,
+    # `full` is everything. A contributor whose whole (small) pool was used
+    # recently simply sits out until the window expires; if that would leave
+    # nobody, fall back to `full` so tiny servers still get a rename.
+    fresh: dict[int, tuple[str, str, int]] = {}
+    full:  dict[int, tuple[str, str, int]] = {}
     scanned = 0
     async for msg in channel.history(limit=None, oldest_first=False):
         scanned += 1
@@ -186,20 +211,20 @@ async def get_random_quote(
             stripped = line.strip()
             if not stripped or stripped.startswith("!"):
                 continue
-            cur, name, count = pool.get(uid, (None, msg.author.display_name, 0))
-            count += 1
-            if random.randint(1, count) == 1:
-                pool[uid] = (stripped, msg.author.display_name, count)
-            else:
-                pool[uid] = (cur, name, count)
+            if is_blocked and is_blocked(stripped):   # skip slurs/hate terms
+                continue
+            _reservoir_add(full, uid, msg.author.display_name, stripped)
+            if not (recent_items and stripped in recent_items):
+                _reservoir_add(fresh, uid, msg.author.display_name, stripped)
+    pool = fresh or full
     if not pool:
         log.info("[quote] scanned %d messages → 0 contributors", scanned)
         return None, None, None
     chosen_uid = _weighted_choice(pool, cooldown_counts or {})
     item, name, count = pool[chosen_uid]
     log.info(
-        "[quote] scanned %d messages → %d contributors → picked %r from %s (%d submissions)",
-        scanned, len(pool), item, name, count,
+        "[quote] scanned %d messages → %d contributors (%d with fresh material) → picked %r from %s (%d submissions)",
+        scanned, len(full), len(fresh), item, name, count,
     )
     return item, name, chosen_uid
 
@@ -207,10 +232,12 @@ async def get_random_quote(
 async def get_random_icon(
     channel,
     cooldown_counts: dict[int, int] | None = None,
+    recent_items: set | None = None,
 ) -> tuple[str | None, str | None, int | None]:
     if channel is None:
         return None, None, None
-    pool: dict[int, tuple[str, str, int]] = {}
+    fresh: dict[int, tuple[str, str, int]] = {}
+    full:  dict[int, tuple[str, str, int]] = {}
     scanned = 0
     async for msg in channel.history(limit=None, oldest_first=False):
         scanned += 1
@@ -220,20 +247,18 @@ async def get_random_icon(
         for att in msg.attachments:
             if not (att.content_type and att.content_type.startswith("image")):
                 continue
-            cur, name, count = pool.get(uid, (None, msg.author.display_name, 0))
-            count += 1
-            if random.randint(1, count) == 1:
-                pool[uid] = (att.url, msg.author.display_name, count)
-            else:
-                pool[uid] = (cur, name, count)
+            _reservoir_add(full, uid, msg.author.display_name, att.url)
+            if not (recent_items and _strip_query(att.url) in recent_items):
+                _reservoir_add(fresh, uid, msg.author.display_name, att.url)
+    pool = fresh or full
     if not pool:
         log.info("[icon] scanned %d messages → 0 contributors", scanned)
         return None, None, None
     chosen_uid = _weighted_choice(pool, cooldown_counts or {})
     url, name, count = pool[chosen_uid]
     log.info(
-        "[icon] scanned %d messages → %d contributors → picked image from %s (%d submissions)",
-        scanned, len(pool), name, count,
+        "[icon] scanned %d messages → %d contributors (%d with fresh material) → picked image from %s (%d submissions)",
+        scanned, len(full), len(fresh), name, count,
     )
     return url, name, chosen_uid
 
@@ -280,15 +305,30 @@ async def get_random_content(
     channel,
     content_type: str,
     cooldown_counts: dict[int, int] | None = None,
+    recent_items: set | None = None,
 ) -> tuple[dict | None, str | None, int | None]:
     """
     Fair pick (one candidate per contributor, cooldown-weighted) for a custom
     daily feature. Returns (candidate_dict, display_name, user_id) — see
     _extract_candidate for the candidate shape. Scans all-time history.
+
+    *recent_items* is the raw logged-item set for the no-repeat window.
+    Attachment URLs are compared signature-stripped (CDN signatures rotate);
+    content items (links/music/text) are compared verbatim, since a link's
+    query string IS its identity (youtube.com/watch?v=...).
     """
     if channel is None:
         return None, None, None
-    pool: dict[int, tuple[dict, str, int]] = {}
+    recent_raw = recent_items or set()
+    recent_stripped = {_strip_query(i) for i in recent_raw}
+
+    def _is_recent(cand: dict) -> bool:
+        if cand["kind"] == "attachment":
+            return _strip_query(cand["url"]) in recent_stripped
+        return cand["content"] in recent_raw
+
+    fresh: dict[int, tuple[dict, str, int]] = {}
+    full:  dict[int, tuple[dict, str, int]] = {}
     scanned = 0
     async for msg in channel.history(limit=None, oldest_first=False):
         scanned += 1
@@ -298,20 +338,18 @@ async def get_random_content(
         if cand is None:
             continue
         uid = msg.author.id
-        cur, name, count = pool.get(uid, (None, msg.author.display_name, 0))
-        count += 1
-        if random.randint(1, count) == 1:
-            pool[uid] = (cand, msg.author.display_name, count)
-        else:
-            pool[uid] = (cur, name, count)
+        _reservoir_add(full, uid, msg.author.display_name, cand)
+        if not _is_recent(cand):
+            _reservoir_add(fresh, uid, msg.author.display_name, cand)
+    pool = fresh or full
     if not pool:
         log.info("[custom:%s] scanned %d messages → 0 contributors", content_type, scanned)
         return None, None, None
     chosen_uid = _weighted_choice(pool, cooldown_counts or {})
     cand, name, count = pool[chosen_uid]
     log.info(
-        "[custom:%s] scanned %d messages → %d contributors → picked from %s (%d submissions)",
-        content_type, scanned, len(pool), name, count,
+        "[custom:%s] scanned %d messages → %d contributors (%d with fresh material) → picked from %s (%d submissions)",
+        content_type, scanned, len(full), len(fresh), name, count,
     )
     return cand, name, chosen_uid
 
@@ -440,6 +478,22 @@ def _cadence_desc(c) -> str:
     return "Daily" if n <= 1 else f"Every {n} days"
 
 
+def _blocklist_desc(c) -> str:
+    """Human description of the slur blocklist for /showconfig."""
+    if not (c["blocklist_enabled"] if "blocklist_enabled" in c.keys() else 1):
+        return "Off"
+    extra = len(moderation.parse_custom(c["blocklist_custom"] if "blocklist_custom" in c.keys() else None))
+    return "On" + (f" (+{extra} custom)" if extra else "")
+
+
+def rename_blocklist(cfg):
+    """Return a per-guild is_blocked(text) callable, or None when the blocklist is off."""
+    if not (cfg["blocklist_enabled"] if "blocklist_enabled" in cfg.keys() else 1):
+        return None
+    extra = moderation.parse_custom(cfg["blocklist_custom"] if "blocklist_custom" in cfg.keys() else None)
+    return lambda text: moderation.is_blocked(text, extra)
+
+
 async def build_config(guild_id: int, client: discord.Client) -> str:
     """
     Return a formatted config string with channel IDs resolved to #channel-name.
@@ -487,6 +541,7 @@ async def build_config(guild_id: int, client: discord.Client) -> str:
         f"Song Time:           {c['song_time'] or '10:00'}",
         f"Credit Names:        {'Server nickname' if credits.style_of(c) == 'nickname' else '@username'}",
         f"Credit Tagging:      {'On (mentions)' if credits.mentions_on(c) else 'Off (plain text)'}",
+        f"Slur Blocklist:      {_blocklist_desc(c)}",
     ]
 
     # Health check — surface setup gaps and missing permissions.
@@ -550,9 +605,16 @@ async def process_rename(
     icon_channel  = client.get_channel(cfg["icon_channel"])
     post_channel  = client.get_channel(cfg["post_channel"])
 
+    # No-repeat window: exclude items already used recently, so contributors with
+    # only a few submissions don't have the same quote/icon headline over and over.
+    nr_since = (datetime.now(pytz.utc) - timedelta(days=_NO_REPEAT_DAYS)).isoformat()
+    recent_q = get_recent_pick_items(guild_id, "quote", nr_since)
+    recent_i = {_strip_query(u) for u in get_recent_pick_items(guild_id, "icon", nr_since)}
+
     (quote, quote_user, quote_uid), (image_url, icon_user, icon_uid) = await asyncio.gather(
-        get_random_quote(quote_channel, cooldown_counts=q_cd),
-        get_random_icon( icon_channel,  cooldown_counts=i_cd),
+        get_random_quote(quote_channel, cooldown_counts=q_cd, is_blocked=rename_blocklist(cfg),
+                         recent_items=recent_q),
+        get_random_icon( icon_channel,  cooldown_counts=i_cd, recent_items=recent_i),
     )
 
     if not quote or not image_url:
@@ -705,8 +767,11 @@ async def process_custom_daily(
                 f"or am I missing **View Channel** there?")
 
         # Scan the source channel (needs View Channel + Read Message History).
+        nr_since = (datetime.now(pytz.utc) - timedelta(days=_NO_REPEAT_DAYS)).isoformat()
+        recent = get_recent_pick_items(guild_id, category, nr_since)
         try:
-            cand, user, uid = await get_random_content(source, ctype, cooldown_counts=cd)
+            cand, user, uid = await get_random_content(source, ctype, cooldown_counts=cd,
+                                                       recent_items=recent)
         except discord.Forbidden:
             return _feature_fail(guild_id, name,
                 f"I can't read {source.mention}. Give me **View Channel** and "
