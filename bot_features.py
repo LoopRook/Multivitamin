@@ -10,8 +10,8 @@ import pytz
 
 from db_utils import (
     get_config, set_config, log_pick, get_user_last_picks,
-    get_today_pick_counts, store_rename_post, get_active_bracket,
-    get_custom_features, set_custom_feature_run_date,
+    get_today_pick_counts, get_recent_pick_items, store_rename_post,
+    get_active_bracket, get_custom_features, set_custom_feature_run_date,
 )
 from image_utils import generate_card, truncate_to_100_chars
 import credits
@@ -83,6 +83,11 @@ def _fire_action(scheduled: str, cur_time: str, last_date: str | None, today: st
 # command can refuse up front with a real wait time instead.
 _RENAME_LIMIT = 2
 _RENAME_WINDOW = timedelta(minutes=10)
+
+# A quote/icon that was picked in the last N days is skipped during sampling, so
+# contributors with only a few submissions don't repeat. Falls back gracefully
+# when a server is so small that everything is recent.
+_NO_REPEAT_DAYS = 30
 _rename_times: dict[int, list[datetime]] = {}
 
 
@@ -170,14 +175,32 @@ def _weighted_choice(pool: dict[int, tuple], cooldown_counts: dict[int, int]) ->
 #
 # Returns (item, display_name, user_id).
 
+def _reservoir_add(pool: dict, uid: int, name: str, item) -> None:
+    """Algorithm R (k=1): after N items, each had a 1/N chance to be the kept one."""
+    cur, _, count = pool.get(uid, (None, name, 0))
+    count += 1
+    pool[uid] = (item if random.randint(1, count) == 1 else cur, name, count)
+
+
+def _strip_query(url: str) -> str:
+    """Discord CDN URLs carry rotating signature params; the base path is the identity."""
+    return url.split("?", 1)[0]
+
+
 async def get_random_quote(
     channel,
     cooldown_counts: dict[int, int] | None = None,
     is_blocked=None,
+    recent_items: set | None = None,
 ) -> tuple[str | None, str | None, int | None]:
     if channel is None:
         return None, None, None
-    pool: dict[int, tuple[str, str, int]] = {}
+    # Two reservoirs: `fresh` excludes items picked inside the no-repeat window,
+    # `full` is everything. A contributor whose whole (small) pool was used
+    # recently simply sits out until the window expires; if that would leave
+    # nobody, fall back to `full` so tiny servers still get a rename.
+    fresh: dict[int, tuple[str, str, int]] = {}
+    full:  dict[int, tuple[str, str, int]] = {}
     scanned = 0
     async for msg in channel.history(limit=None, oldest_first=False):
         scanned += 1
@@ -190,20 +213,18 @@ async def get_random_quote(
                 continue
             if is_blocked and is_blocked(stripped):   # skip slurs/hate terms
                 continue
-            cur, name, count = pool.get(uid, (None, msg.author.display_name, 0))
-            count += 1
-            if random.randint(1, count) == 1:
-                pool[uid] = (stripped, msg.author.display_name, count)
-            else:
-                pool[uid] = (cur, name, count)
+            _reservoir_add(full, uid, msg.author.display_name, stripped)
+            if not (recent_items and stripped in recent_items):
+                _reservoir_add(fresh, uid, msg.author.display_name, stripped)
+    pool = fresh or full
     if not pool:
         log.info("[quote] scanned %d messages → 0 contributors", scanned)
         return None, None, None
     chosen_uid = _weighted_choice(pool, cooldown_counts or {})
     item, name, count = pool[chosen_uid]
     log.info(
-        "[quote] scanned %d messages → %d contributors → picked %r from %s (%d submissions)",
-        scanned, len(pool), item, name, count,
+        "[quote] scanned %d messages → %d contributors (%d with fresh material) → picked %r from %s (%d submissions)",
+        scanned, len(full), len(fresh), item, name, count,
     )
     return item, name, chosen_uid
 
@@ -211,10 +232,12 @@ async def get_random_quote(
 async def get_random_icon(
     channel,
     cooldown_counts: dict[int, int] | None = None,
+    recent_items: set | None = None,
 ) -> tuple[str | None, str | None, int | None]:
     if channel is None:
         return None, None, None
-    pool: dict[int, tuple[str, str, int]] = {}
+    fresh: dict[int, tuple[str, str, int]] = {}
+    full:  dict[int, tuple[str, str, int]] = {}
     scanned = 0
     async for msg in channel.history(limit=None, oldest_first=False):
         scanned += 1
@@ -224,20 +247,18 @@ async def get_random_icon(
         for att in msg.attachments:
             if not (att.content_type and att.content_type.startswith("image")):
                 continue
-            cur, name, count = pool.get(uid, (None, msg.author.display_name, 0))
-            count += 1
-            if random.randint(1, count) == 1:
-                pool[uid] = (att.url, msg.author.display_name, count)
-            else:
-                pool[uid] = (cur, name, count)
+            _reservoir_add(full, uid, msg.author.display_name, att.url)
+            if not (recent_items and _strip_query(att.url) in recent_items):
+                _reservoir_add(fresh, uid, msg.author.display_name, att.url)
+    pool = fresh or full
     if not pool:
         log.info("[icon] scanned %d messages → 0 contributors", scanned)
         return None, None, None
     chosen_uid = _weighted_choice(pool, cooldown_counts or {})
     url, name, count = pool[chosen_uid]
     log.info(
-        "[icon] scanned %d messages → %d contributors → picked image from %s (%d submissions)",
-        scanned, len(pool), name, count,
+        "[icon] scanned %d messages → %d contributors (%d with fresh material) → picked image from %s (%d submissions)",
+        scanned, len(full), len(fresh), name, count,
     )
     return url, name, chosen_uid
 
@@ -571,9 +592,16 @@ async def process_rename(
     icon_channel  = client.get_channel(cfg["icon_channel"])
     post_channel  = client.get_channel(cfg["post_channel"])
 
+    # No-repeat window: exclude items already used recently, so contributors with
+    # only a few submissions don't have the same quote/icon headline over and over.
+    nr_since = (datetime.now(pytz.utc) - timedelta(days=_NO_REPEAT_DAYS)).isoformat()
+    recent_q = get_recent_pick_items(guild_id, "quote", nr_since)
+    recent_i = {_strip_query(u) for u in get_recent_pick_items(guild_id, "icon", nr_since)}
+
     (quote, quote_user, quote_uid), (image_url, icon_user, icon_uid) = await asyncio.gather(
-        get_random_quote(quote_channel, cooldown_counts=q_cd, is_blocked=rename_blocklist(cfg)),
-        get_random_icon( icon_channel,  cooldown_counts=i_cd),
+        get_random_quote(quote_channel, cooldown_counts=q_cd, is_blocked=rename_blocklist(cfg),
+                         recent_items=recent_q),
+        get_random_icon( icon_channel,  cooldown_counts=i_cd, recent_items=recent_i),
     )
 
     if not quote or not image_url:

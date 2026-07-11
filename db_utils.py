@@ -435,6 +435,17 @@ def get_today_pick_counts(guild_id: int, category: str, since_utc: str) -> dict[
     return {row["user_id"]: row["count"] for row in rows}
 
 
+def get_recent_pick_items(guild_id: int, category: str, since_utc: str) -> set:
+    """Item texts/URLs picked in *category* since *since_utc* (for the no-repeat window)."""
+    with db_conn() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT item FROM picks_history "
+            "WHERE guild_id=? AND category=? AND picked_at >= ? AND item IS NOT NULL",
+            (guild_id, category, since_utc),
+        ).fetchall()
+    return {row["item"] for row in rows}
+
+
 def get_user_last_picks(guild_id: int, user_id: int) -> dict[str, str]:
     with db_conn() as conn:
         rows = conn.execute(
