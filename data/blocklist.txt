@@ -1,0 +1,75 @@
+# Default content blocklist for Moniker (the "slur / offensive" filter).
+#
+# Purpose: keep the SERVER NAME and rename cards from being set to hate speech.
+# This is intentionally scoped to genuine slurs and hate terms, NOT broad
+# profanity — edgy-but-harmless quotes are the point of the bot, so "damn",
+# "sex", etc. are deliberately absent. Servers can add their own terms with
+# /config blocklist add.
+#
+# One term per line, lowercase. Blank lines and #-comments are ignored.
+# Matching is whole-word and case-insensitive (so "assassin" is NOT caught by
+# a substring). Leetspeak / spaced-out evasions are not exhaustively covered —
+# a blocklist is a blunt instrument that catches the obvious, not everything.
+#
+# Racial / ethnic slurs
+nigger
+niggers
+nigga
+niggas
+n1gger
+n1gga
+chink
+chinks
+gook
+gooks
+spic
+spics
+wetback
+wetbacks
+kike
+kikes
+beaner
+beaners
+coon
+coons
+darkie
+darky
+sandnigger
+raghead
+towelhead
+gypsy
+gyppo
+paki
+pakis
+zipperhead
+jungle bunny
+porch monkey
+
+# Anti-LGBTQ slurs
+faggot
+faggots
+fag
+fags
+f4ggot
+dyke
+dykes
+tranny
+trannies
+tranned
+shemale
+ladyboy
+
+# Ableist slurs
+retard
+retards
+retarded
+tard
+tards
+mongoloid
+spastic
+spaz
+
+# Nazi / hate
+heil hitler
+sieg heil
+white power

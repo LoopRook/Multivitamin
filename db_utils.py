@@ -16,6 +16,7 @@ _VALID_CONFIG_FIELDS = frozenset({
     "bracket_pacing", "bracket_source_channel", "pre_bracket_name",
     "quote_interval_days", "quote_weekdays",
     "credit_style", "credit_mentions", "rename_open",
+    "blocklist_enabled", "blocklist_custom",
 })
 
 _CREATE_CONFIG = """
@@ -204,6 +205,8 @@ _CONFIG_MIGRATIONS = [
     ("credit_style",           "TEXT DEFAULT 'nickname'"),  # 'nickname' | 'username'
     ("credit_mentions",        "INTEGER DEFAULT 0"),        # 1 = @mention contributors in posts
     ("rename_open",            "INTEGER DEFAULT 1"),        # 1 = anyone may run /rename; 0 = admins only
+    ("blocklist_enabled",      "INTEGER DEFAULT 1"),        # 1 = skip quotes containing slurs/hate terms
+    ("blocklist_custom",       "TEXT"),                     # comma-separated per-guild extra blocked words
 ]
 
 _RENAME_POSTS_MIGRATIONS = [
@@ -430,6 +433,17 @@ def get_today_pick_counts(guild_id: int, category: str, since_utc: str) -> dict[
             (guild_id, category, since_utc),
         ).fetchall()
     return {row["user_id"]: row["count"] for row in rows}
+
+
+def get_recent_pick_items(guild_id: int, category: str, since_utc: str) -> set:
+    """Item texts/URLs picked in *category* since *since_utc* (for the no-repeat window)."""
+    with db_conn() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT item FROM picks_history "
+            "WHERE guild_id=? AND category=? AND picked_at >= ? AND item IS NOT NULL",
+            (guild_id, category, since_utc),
+        ).fetchall()
+    return {row["item"] for row in rows}
 
 
 def get_user_last_picks(guild_id: int, user_id: int) -> dict[str, str]:
