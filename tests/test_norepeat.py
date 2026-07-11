@@ -68,3 +68,40 @@ def test_get_recent_pick_items_windowing(gid):
     assert db_utils.get_recent_pick_items(gid, "quote", "9999-01-01") == set()
     # other categories don't bleed in
     assert db_utils.get_recent_pick_items(gid, "icon", "2000-01-01") == set()
+
+
+def test_custom_feature_recent_text_skipped():
+    chan = Chan([_msg(1, "meme A"), _msg(2, "meme B")])
+    for _ in range(25):
+        cand, _, uid = run(bf.get_random_content(chan, "text", recent_items={"meme A"}))
+        assert (cand["content"], uid) == ("meme B", 2)
+
+
+def test_custom_feature_link_query_is_identity():
+    # Two YouTube links differing ONLY by query string are different items; the
+    # window must not strip a link's query when comparing (unlike CDN images).
+    used, fresh_link = "https://youtube.com/watch?v=aaa", "https://youtube.com/watch?v=bbb"
+    chan = Chan([_msg(1, used), _msg(2, fresh_link)])
+    for _ in range(25):
+        cand, _, uid = run(bf.get_random_content(chan, "link", recent_items={used}))
+        assert (cand["content"], uid) == (fresh_link, 2)
+
+
+def test_custom_feature_attachment_signature_stripped():
+    base = "https://cdn.discordapp.com/attachments/9/9/meme.png"
+    att_msg = types.SimpleNamespace(
+        author=types.SimpleNamespace(id=1, bot=False, display_name="user1"),
+        content="", attachments=[types.SimpleNamespace(
+            url=base + "?ex=zzz", content_type="image/png", filename="meme.png", size=100)])
+    other = _msg(2, "https://imgur.com/fresh.gif")
+    chan = Chan([att_msg, other])
+    # recent set holds the SIGNED url exactly as it was logged at pick time
+    for _ in range(25):
+        cand, _, uid = run(bf.get_random_content(chan, "media", recent_items={base + "?ex=old"}))
+        assert uid == 2
+
+
+def test_custom_feature_all_recent_falls_back():
+    chan = Chan([_msg(1, "only meme")])
+    cand, _, uid = run(bf.get_random_content(chan, "text", recent_items={"only meme"}))
+    assert (cand["content"], uid) == ("only meme", 1)
