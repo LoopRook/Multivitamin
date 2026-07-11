@@ -205,7 +205,7 @@ def build_help_embed(is_admin: bool = False, is_manager: bool = False) -> discor
                 "`/admin add <user>`: grant bot-admin access\n"
                 "`/admin remove <user>`: revoke bot-admin access\n"
                 "`/admin list`: list current bot-admins\n"
-                "`/admin reset`: ⚠️ wipe ALL this server's data (irreversible; testing/cleanup)"
+                "`/admin reset`: 🛑 **permanently** wipe ALL this server's data (no undo)"
             ),
             inline=False,
         )
@@ -1639,7 +1639,7 @@ class _ResetConfirmView(discord.ui.View):
             return False
         return True
 
-    @discord.ui.button(label="Yes, wipe EVERYTHING", style=discord.ButtonStyle.danger, emoji="⚠️")
+    @discord.ui.button(label="Permanently delete everything", style=discord.ButtonStyle.danger, emoji="🛑")
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
         reset_guild(self.guild_id)
         await sync_guild_feature_commands(self.guild_id)  # remove the wiped features' /commands
@@ -1659,20 +1659,21 @@ class _ResetConfirmView(discord.ui.View):
         self.stop()
 
 
-@admin_group.command(name="reset", description="⚠️ Wipe ALL of this server's bot data (irreversible)")
+@admin_group.command(name="reset", description="⚠️ Permanently wipe ALL of this server's bot data (cannot be undone)")
 @manager_only()
 async def admin_reset(interaction: discord.Interaction):
     view = _ResetConfirmView(interaction.user.id, interaction.guild_id)
     await interaction.response.send_message(
-        "⚠️ **DANGER: full reset**\n"
-        "This **permanently deletes everything** this bot stores for this server:\n"
+        "🛑 **STOP. This is permanent and cannot be undone.**\n"
+        "It **irreversibly deletes everything** Moniker stores for this server:\n"
         "• all `/config` settings, schedule, and channels\n"
         "• every custom `/feature` (and its slash command)\n"
         "• all brackets, seasons, and bracket history\n"
         "• all tracked rename posts, forward nominations, and pick history\n"
         "• the bot-admin roster\n\n"
-        "**This cannot be undone.** The server returns to a fresh state (like a new install).\n"
-        "*(Mainly a testing and cleanup tool. Most servers never need this.)*",
+        "There is **no undo and no way to recover this** once you confirm. The server drops "
+        "back to a fresh install, exactly as if Moniker had never been set up.\n"
+        "Only continue if you are absolutely certain.",
         view=view, ephemeral=True)
 
 
