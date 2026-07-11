@@ -32,3 +32,14 @@ def test_purge_ignores_present_guilds(gid):
     db_utils.set_config(gid, "quote_time", "9:00")   # present, removed_at is NULL
     assert db_utils.purge_expired_guilds(_iso(0)) == []
     assert db_utils.get_config(gid)["quote_time"] == "9:00"   # untouched
+
+
+def test_purge_excludes_current_guilds_even_if_flagged(gid):
+    # Safety belt: a stale removed_at on a guild the bot is still in must NOT wipe it.
+    db_utils.get_config(gid)
+    db_utils.set_config(gid, "quote_time", "9:00")
+    db_utils.set_config(gid, "removed_at", _iso(40))   # stale flag, well past grace
+    assert db_utils.purge_expired_guilds(_iso(30), exclude={gid}) == []
+    assert db_utils.get_config(gid)["quote_time"] == "9:00"   # survived
+    # Without the exclude, it would be purged.
+    assert gid in db_utils.purge_expired_guilds(_iso(30))

@@ -897,7 +897,8 @@ async def scheduler_loop(client: discord.Client) -> None:
                 log.exception("Daily DB backup failed — continuing.")
             try:
                 cutoff = (now_utc - timedelta(days=DATA_GRACE_DAYS)).isoformat()
-                purged = purge_expired_guilds(cutoff)
+                # Never purge a guild the bot is currently in (stale-flag safety belt).
+                purged = purge_expired_guilds(cutoff, exclude={g.id for g in client.guilds})
                 if purged:
                     log.info("Purged data for %d guild(s) past the %d-day removal grace.",
                              len(purged), DATA_GRACE_DAYS)
