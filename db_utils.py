@@ -1,3 +1,4 @@
+import glob
 import logging
 import os
 import sqlite3
@@ -691,6 +692,36 @@ def reset_guild(guild_id: int) -> None:
                       "custom_features", "picks_history", "bot_admins", "server_config"):
             conn.execute(f"DELETE FROM {table} WHERE guild_id=?", (guild_id,))
         conn.commit()
+
+
+def backup_database(keep: int = 7) -> str | None:
+    """
+    Write a consistent snapshot of the DB to ./backups/backup-YYYY-MM-DD.db (next
+    to DB_FILE), pruning to the *keep* newest. Uses SQLite's VACUUM INTO, which is
+    safe on a live database. On-volume only — protects against a bad /admin reset,
+    a botched migration, or corruption, NOT against the volume itself being lost.
+    Returns the backup path, or None on failure.
+    """
+    db_dir = os.path.dirname(os.path.abspath(DB_FILE)) or "."
+    backup_dir = os.path.join(db_dir, "backups")
+    try:
+        os.makedirs(backup_dir, exist_ok=True)
+        dest = os.path.join(backup_dir, f"backup-{datetime.now(timezone.utc):%Y-%m-%d}.db")
+        if os.path.exists(dest):        # VACUUM INTO refuses an existing file
+            os.remove(dest)
+        with db_conn() as conn:
+            conn.execute("VACUUM INTO ?", (dest,))
+    except (sqlite3.Error, OSError) as e:
+        log.error("DB backup failed: %s", e)
+        return None
+    backups = sorted(glob.glob(os.path.join(backup_dir, "backup-*.db")))
+    for old in backups[:-keep]:
+        try:
+            os.remove(old)
+        except OSError:
+            pass
+    log.info("DB backed up to %s (keeping %d newest)", dest, keep)
+    return dest
 
 
 # ── seasons ───────────────────────────────────────────────────────────────────
