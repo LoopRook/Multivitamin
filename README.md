@@ -178,3 +178,7 @@ See the [Privacy Policy](PRIVACY.md) and [Terms of Service](TERMS.md) for the fu
 ## Bugs and ideas
 
 Found a bug or want to suggest something? [Open an issue](https://github.com/LoopRook/Multivitamin/issues). The version is shown in the footer of `/help`, so include it in bug reports.
+
+## License
+
+MIT, see [LICENSE](LICENSE). You're free to use, modify, and self-host it.
