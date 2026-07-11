@@ -217,7 +217,10 @@ async def get_random_quote(
             continue
         uid = msg.author.id
         for line in msg.content.strip().splitlines():
-            stripped = line.strip()
+            # Strip Discord/unicode emoji first: they render as raw <:name:id>
+            # or tofu on the card and in the server name. Emoji-only lines clean
+            # to "" and drop out here.
+            stripped = moderation.strip_emoji(line)
             if not stripped or stripped.startswith("!"):
                 continue
             if is_blocked and is_blocked(stripped):   # skip slurs/hate terms
