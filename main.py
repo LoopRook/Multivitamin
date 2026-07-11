@@ -51,7 +51,8 @@ logging.getLogger("discord.client").setLevel(logging.ERROR)
 
 log = logging.getLogger(__name__)
 
-__version__ = "1.0.0"
+__version__ = "1.0.0-rc"   # flip to "1.0.0" at the v1.0.0 tag
+_ISSUES_URL = "https://github.com/LoopRook/Multivitamin/issues"
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 
@@ -115,9 +116,11 @@ def build_help_embed(is_admin: bool = False, is_manager: bool = False) -> discor
     """
     embed = discord.Embed(
         title="📖 Command Reference",
-        description="All commands are slash (`/`) commands. Type `/` and pick Moniker from the list.",
+        description="All commands are slash (`/`) commands. Type `/` and pick Moniker from the list.\n"
+                    f"🐛 Found a bug or have an idea? [Open an issue]({_ISSUES_URL}).",
         color=discord.Color.blurple(),
     )
+    embed.set_footer(text=f"Moniker v{__version__}")
     embed.add_field(
         name="🌐 Everyone",
         value=(
