@@ -305,15 +305,30 @@ async def get_random_content(
     channel,
     content_type: str,
     cooldown_counts: dict[int, int] | None = None,
+    recent_items: set | None = None,
 ) -> tuple[dict | None, str | None, int | None]:
     """
     Fair pick (one candidate per contributor, cooldown-weighted) for a custom
     daily feature. Returns (candidate_dict, display_name, user_id) — see
     _extract_candidate for the candidate shape. Scans all-time history.
+
+    *recent_items* is the raw logged-item set for the no-repeat window.
+    Attachment URLs are compared signature-stripped (CDN signatures rotate);
+    content items (links/music/text) are compared verbatim, since a link's
+    query string IS its identity (youtube.com/watch?v=...).
     """
     if channel is None:
         return None, None, None
-    pool: dict[int, tuple[dict, str, int]] = {}
+    recent_raw = recent_items or set()
+    recent_stripped = {_strip_query(i) for i in recent_raw}
+
+    def _is_recent(cand: dict) -> bool:
+        if cand["kind"] == "attachment":
+            return _strip_query(cand["url"]) in recent_stripped
+        return cand["content"] in recent_raw
+
+    fresh: dict[int, tuple[dict, str, int]] = {}
+    full:  dict[int, tuple[dict, str, int]] = {}
     scanned = 0
     async for msg in channel.history(limit=None, oldest_first=False):
         scanned += 1
@@ -323,20 +338,18 @@ async def get_random_content(
         if cand is None:
             continue
         uid = msg.author.id
-        cur, name, count = pool.get(uid, (None, msg.author.display_name, 0))
-        count += 1
-        if random.randint(1, count) == 1:
-            pool[uid] = (cand, msg.author.display_name, count)
-        else:
-            pool[uid] = (cur, name, count)
+        _reservoir_add(full, uid, msg.author.display_name, cand)
+        if not _is_recent(cand):
+            _reservoir_add(fresh, uid, msg.author.display_name, cand)
+    pool = fresh or full
     if not pool:
         log.info("[custom:%s] scanned %d messages → 0 contributors", content_type, scanned)
         return None, None, None
     chosen_uid = _weighted_choice(pool, cooldown_counts or {})
     cand, name, count = pool[chosen_uid]
     log.info(
-        "[custom:%s] scanned %d messages → %d contributors → picked from %s (%d submissions)",
-        content_type, scanned, len(pool), name, count,
+        "[custom:%s] scanned %d messages → %d contributors (%d with fresh material) → picked from %s (%d submissions)",
+        content_type, scanned, len(full), len(fresh), name, count,
     )
     return cand, name, chosen_uid
 
@@ -754,8 +767,11 @@ async def process_custom_daily(
                 f"or am I missing **View Channel** there?")
 
         # Scan the source channel (needs View Channel + Read Message History).
+        nr_since = (datetime.now(pytz.utc) - timedelta(days=_NO_REPEAT_DAYS)).isoformat()
+        recent = get_recent_pick_items(guild_id, category, nr_since)
         try:
-            cand, user, uid = await get_random_content(source, ctype, cooldown_counts=cd)
+            cand, user, uid = await get_random_content(source, ctype, cooldown_counts=cd,
+                                                       recent_items=recent)
         except discord.Forbidden:
             return _feature_fail(guild_id, name,
                 f"I can't read {source.mention}. Give me **View Channel** and "
