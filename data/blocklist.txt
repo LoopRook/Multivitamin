@@ -54,6 +54,11 @@ wigger
 wiggers
 cracker
 crackers
+cracka
+crackah
+whyte
+wyte
+wypipo
 
 # Anti-LGBTQ slurs
 faggot
@@ -83,3 +88,24 @@ spaz
 heil hitler
 sieg heil
 white power
+
+# Common leetspeak / evasion spellings of the worst slurs. (A wordlist can't
+# catch every variation; these are the frequent ones. Servers add more with
+# /config blocklist add.)
+niqqer
+niqqers
+niqqa
+niqqas
+ni99er
+ni99a
+nigg3r
+nigg3rs
+niglet
+nigglet
+fagg0t
+f4g
+f4gs
+phaggot
+ret4rd
+r3tard
+r3tarded
