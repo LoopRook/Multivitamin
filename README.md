@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/moniker-banner-teal.png" alt="Moniker" width="820">
+</p>
+
 # Moniker
 
 *A Discord bot that renames your server every day after something one of your members said, then crowns the year's favorites in a bracket.*
