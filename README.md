@@ -14,6 +14,10 @@ It also lets admins spin up their own recurring posts (Meme of the Day, Critter 
 
 All slash commands, fully multi-server, no `Administrator` permission, per-server data.
 
+<p align="center">
+  <img src="assets/screenshots/rename.gif" alt="Moniker renaming a server and posting the card" width="820">
+</p>
+
 ---
 
 ## How it works: the loop
@@ -48,6 +52,10 @@ Run **`/setup`**, a stepped wizard in one ephemeral message:
 2. **Timezone**, so "8:00" means *your* 8:00.
 3. **Schedule**: daily, every N days, or specific weekdays ("every Sunday"), and the time.
 
+<p align="center">
+  <img src="assets/screenshots/setup.png" alt="The /setup wizard, step 1: channels" width="640">
+</p>
+
 That's it. Moniker starts renaming on schedule. Re-run `/setup` any time to change a channel; each dropdown applies as picked. Check the state of everything with `/showconfig` (it includes a health check for missing permissions).
 
 ### Try it immediately
@@ -70,6 +78,10 @@ That's it. Moniker starts renaming on schedule. Re-run `/setup` any time to chan
 
 Renames are rate-limited by Discord (~2 per 10 minutes), so Moniker tells you how long to wait rather than hanging.
 
+<p align="center">
+  <img src="assets/screenshots/rename-limit.png" alt="Moniker telling a user how long until they can rename again" width="520">
+</p>
+
 ---
 
 ## Brackets: the championship (optional)
@@ -86,6 +98,13 @@ One panel, everything per-run: **where it posts** (pick or create a channel), **
 - **Daily pacing**: one matchup at a time, and each winner immediately becomes the server name. Slow-burn.
 
 Matchups are native Discord polls with both cards displayed. Ties get a dramatic coin flip. The champion gets an announcement with their winning card, the server name, and a place in `/bracket history`.
+
+<p align="center">
+  <img src="assets/screenshots/bracket-matchup.png" alt="A bracket matchup: two cards paired in a native Discord poll" width="440">
+</p>
+<p align="center">
+  <img src="assets/screenshots/champion.png" alt="The champion announcement with the winning card" width="560">
+</p>
 
 **Seasons**: define named windows with `/season` (for example "Halloween 2026" = Oct 1 to 31) and run brackets scoped to them, for monthly brackets, holiday brackets, whatever.
 
@@ -104,6 +123,10 @@ Make the bot post *anything* on a schedule, sourced from a channel:
 ```
 
 Pick a source channel, a destination, and a type (`media` for images and gifs, `link`, `music` for YouTube/Spotify/SoundCloud, or `text`), then name it and give it a command slug. Example: a "Meme of the Day" sourced from #memes gets its own `/meme` command that anyone can run on demand (or just admins, or a role, via `/feature access`), plus a scheduled daily post. Same fair sampling as the renames.
+
+<p align="center">
+  <img src="assets/screenshots/feature-setup.png" alt="The /feature setup panel: source, destination, type" width="560">
+</p>
 
 ```
 /feature list, edit, schedule, toggle, remove, access
