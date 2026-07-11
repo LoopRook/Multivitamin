@@ -12,6 +12,7 @@ from db_utils import (
     get_config, set_config, log_pick, get_user_last_picks,
     get_today_pick_counts, get_recent_pick_items, store_rename_post,
     get_active_bracket, get_custom_features, set_custom_feature_run_date,
+    backup_database,
 )
 from image_utils import generate_card, truncate_to_100_chars
 import credits
@@ -88,6 +89,10 @@ _RENAME_WINDOW = timedelta(minutes=10)
 # contributors with only a few submissions don't repeat. Falls back gracefully
 # when a server is so small that everything is recent.
 _NO_REPEAT_DAYS = 30
+
+# UTC date of the last on-volume DB backup (reset on restart; the scheduler
+# re-backs-up at most once per UTC day).
+_last_backup_date: str | None = None
 _rename_times: dict[int, list[datetime]] = {}
 
 
@@ -875,6 +880,18 @@ async def scheduler_loop(client: discord.Client) -> None:
     while not client.is_closed():
         await asyncio.sleep(60)
         now_utc = datetime.now(pytz.utc)
+
+        # Once-a-day on-volume DB backup (guarded so a restart re-backs-up at most
+        # once per UTC day). Global, not per-guild.
+        global _last_backup_date
+        today_utc = now_utc.strftime("%Y-%m-%d")
+        if _last_backup_date != today_utc:
+            _last_backup_date = today_utc
+            try:
+                backup_database()
+            except Exception:
+                log.exception("Daily DB backup failed — continuing.")
+
         for guild in client.guilds:
             # Isolate each guild: one guild's failure must not abort the cycle
             # for every other guild (critical for a multi-tenant public bot).
