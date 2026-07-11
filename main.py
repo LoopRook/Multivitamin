@@ -18,6 +18,7 @@ from db_utils import (
     get_custom_feature_by_command, set_custom_feature_access, update_custom_feature,
     get_rename_post_by_message_id, record_forward_nomination,
     set_custom_feature_schedule,
+    mark_guild_removed, clear_guild_removed,
 )
 from bot_features import (
     process_rename,
@@ -28,6 +29,7 @@ from bot_features import (
     build_config,
     pack_lines,
     rename_cooldown_remaining,
+    DATA_GRACE_DAYS,
 )
 from bracket import (
     start_bracket,
@@ -286,6 +288,7 @@ class QotdClient(discord.Client):
     async def on_guild_join(self, guild: discord.Guild) -> None:
         log.info("➕ Joined guild %s (%s)", guild.id, guild.name)
         get_config(guild.id)  # ensure a config row exists
+        clear_guild_removed(guild.id)  # re-added within the grace window: cancel any pending deletion
 
         # Prefer to DM whoever added the bot (private — no channel noise). Fall
         # back to a channel only if the DM can't be delivered or we can't tell
@@ -328,8 +331,12 @@ class QotdClient(discord.Client):
             return False
 
     async def on_guild_remove(self, guild: discord.Guild) -> None:
-        # Keep the guild's data in case of a re-invite; just log the departure.
-        log.info("➖ Removed from guild %s (%s) — data retained.", guild.id, guild.name)
+        # Schedule the guild's data for deletion after a grace period. A re-invite
+        # within the window cancels it (on_guild_join clears the stamp); otherwise
+        # the daily purge job deletes it. See PRIVACY.md.
+        mark_guild_removed(guild.id)
+        log.info("➖ Removed from guild %s (%s) — data scheduled for deletion in %d days.",
+                 guild.id, guild.name, DATA_GRACE_DAYS)
 
     async def on_message(self, message: discord.Message) -> None:
         if message.author.bot or not message.guild:

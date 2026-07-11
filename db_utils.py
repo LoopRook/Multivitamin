@@ -17,7 +17,7 @@ _VALID_CONFIG_FIELDS = frozenset({
     "bracket_pacing", "bracket_source_channel", "pre_bracket_name",
     "quote_interval_days", "quote_weekdays",
     "credit_style", "credit_mentions", "rename_open",
-    "blocklist_enabled", "blocklist_custom",
+    "blocklist_enabled", "blocklist_custom", "removed_at",
 })
 
 _CREATE_CONFIG = """
@@ -208,6 +208,7 @@ _CONFIG_MIGRATIONS = [
     ("rename_open",            "INTEGER DEFAULT 1"),        # 1 = anyone may run /rename; 0 = admins only
     ("blocklist_enabled",      "INTEGER DEFAULT 1"),        # 1 = skip quotes containing slurs/hate terms
     ("blocklist_custom",       "TEXT"),                     # comma-separated per-guild extra blocked words
+    ("removed_at",             "TEXT"),                     # ISO UTC when the bot was removed; NULL = present
 ]
 
 _RENAME_POSTS_MIGRATIONS = [
@@ -722,6 +723,34 @@ def backup_database(keep: int = 7) -> str | None:
             pass
     log.info("DB backed up to %s (keeping %d newest)", dest, keep)
     return dest
+
+
+def mark_guild_removed(guild_id: int) -> None:
+    """Stamp a guild for deletion after the grace period. No-op if it has no data row."""
+    with db_conn() as conn:
+        conn.execute("UPDATE server_config SET removed_at=? WHERE guild_id=?",
+                     (datetime.now(timezone.utc).isoformat(), guild_id))
+        conn.commit()
+
+
+def clear_guild_removed(guild_id: int) -> None:
+    """Cancel a pending deletion (the bot was re-added within the grace window)."""
+    with db_conn() as conn:
+        conn.execute("UPDATE server_config SET removed_at=NULL WHERE guild_id=?", (guild_id,))
+        conn.commit()
+
+
+def purge_expired_guilds(cutoff_utc: str) -> list[int]:
+    """Delete all data for guilds removed on/before *cutoff_utc*. Returns the purged guild ids."""
+    with db_conn() as conn:
+        rows = conn.execute(
+            "SELECT guild_id FROM server_config WHERE removed_at IS NOT NULL AND removed_at <= ?",
+            (cutoff_utc,),
+        ).fetchall()
+    purged = [r["guild_id"] for r in rows]
+    for gid in purged:
+        reset_guild(gid)
+    return purged
 
 
 # ── seasons ───────────────────────────────────────────────────────────────────
