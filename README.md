@@ -145,3 +145,7 @@ Tests: `pip install -r requirements-dev.txt && python -m pytest tests/ -q`
 ## Data
 
 Per-server only: channel and schedule config, a log of picks (for fair sampling and `/mystats`), tracked rename cards (quote text, submitter, message ids, which is what seeds brackets), and bracket history. No message content is stored beyond the quotes Moniker itself posted on cards. `/admin reset` wipes a server's data completely.
+
+## Bugs and ideas
+
+Found a bug or want to suggest something? [Open an issue](https://github.com/LoopRook/Multivitamin/issues). The version is shown in the footer of `/help`, so include it in bug reports.
