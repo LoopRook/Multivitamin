@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- Moniker avatar: a "HELLO, my name is" name tag.
+       Discord crops avatars to a circle, so the tag is centered and sized to
+       survive the crop. Colors: teal bg #1f6f66, cream card #f7f2e8,
+       amber band #e8933a, ink monogram #23262c.
+       NOTE: the M is a <text> element using a system serif. In your vector
+       editor, convert it to outlines/paths so the font is locked and the file
+       renders identically everywhere. -->
+  <rect width="512" height="512" fill="#1f6f66"/>
+  <g transform="translate(256 256) rotate(-6)">
+    <!-- card -->
+    <rect x="-150" y="-118" width="300" height="236" rx="20" fill="#f7f2e8"/>
+    <!-- top band (rounded top corners only) -->
+    <path d="M -150 -98 A 20 20 0 0 1 -130 -118 L 130 -118 A 20 20 0 0 1 150 -98 L 150 -44 L -150 -44 Z" fill="#e8933a"/>
+    <!-- "HELLO / my name is" hint line -->
+    <rect x="-96" y="-88" width="192" height="12" rx="6" fill="#ffffff" opacity="0.55"/>
+    <!-- monogram, centered in the white area -->
+    <text x="0" y="37" text-anchor="middle" dominant-baseline="central"
+          font-family="Georgia, 'Times New Roman', serif" font-size="150" font-weight="700" fill="#23262c">M</text>
+  </g>
+</svg>
