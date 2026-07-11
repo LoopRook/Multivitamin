@@ -740,14 +740,20 @@ def clear_guild_removed(guild_id: int) -> None:
         conn.commit()
 
 
-def purge_expired_guilds(cutoff_utc: str) -> list[int]:
-    """Delete all data for guilds removed on/before *cutoff_utc*. Returns the purged guild ids."""
+def purge_expired_guilds(cutoff_utc: str, exclude: set | None = None) -> list[int]:
+    """
+    Delete all data for guilds removed on/before *cutoff_utc*. Returns the purged
+    guild ids. *exclude* (guilds the bot is currently in) is a safety belt: even
+    if a stale `removed_at` lingers on an active guild, its live data is never
+    wiped.
+    """
+    exclude = exclude or set()
     with db_conn() as conn:
         rows = conn.execute(
             "SELECT guild_id FROM server_config WHERE removed_at IS NOT NULL AND removed_at <= ?",
             (cutoff_utc,),
         ).fetchall()
-    purged = [r["guild_id"] for r in rows]
+    purged = [r["guild_id"] for r in rows if r["guild_id"] not in exclude]
     for gid in purged:
         reset_guild(gid)
     return purged
