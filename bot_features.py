@@ -12,7 +12,7 @@ from db_utils import (
     get_config, set_config, log_pick, get_user_last_picks,
     get_today_pick_counts, get_recent_pick_items, store_rename_post,
     get_active_bracket, get_custom_features, set_custom_feature_run_date,
-    backup_database,
+    backup_database, purge_expired_guilds,
 )
 from image_utils import generate_card, truncate_to_100_chars
 import credits
@@ -90,8 +90,12 @@ _RENAME_WINDOW = timedelta(minutes=10)
 # when a server is so small that everything is recent.
 _NO_REPEAT_DAYS = 30
 
-# UTC date of the last on-volume DB backup (reset on restart; the scheduler
-# re-backs-up at most once per UTC day).
+# Grace period: a removed guild's data is kept this long (re-invite cancels it),
+# then the daily purge deletes it. See PRIVACY.md.
+DATA_GRACE_DAYS = 30
+
+# UTC date of the last daily-maintenance run (backup + purge); reset on restart,
+# so a restart re-runs it at most once per UTC day.
 _last_backup_date: str | None = None
 _rename_times: dict[int, list[datetime]] = {}
 
@@ -881,8 +885,8 @@ async def scheduler_loop(client: discord.Client) -> None:
         await asyncio.sleep(60)
         now_utc = datetime.now(pytz.utc)
 
-        # Once-a-day on-volume DB backup (guarded so a restart re-backs-up at most
-        # once per UTC day). Global, not per-guild.
+        # Once-a-day maintenance (guarded so a restart re-runs at most once per UTC
+        # day): back up the DB, then purge data for guilds past the removal grace.
         global _last_backup_date
         today_utc = now_utc.strftime("%Y-%m-%d")
         if _last_backup_date != today_utc:
@@ -891,6 +895,14 @@ async def scheduler_loop(client: discord.Client) -> None:
                 backup_database()
             except Exception:
                 log.exception("Daily DB backup failed — continuing.")
+            try:
+                cutoff = (now_utc - timedelta(days=DATA_GRACE_DAYS)).isoformat()
+                purged = purge_expired_guilds(cutoff)
+                if purged:
+                    log.info("Purged data for %d guild(s) past the %d-day removal grace.",
+                             len(purged), DATA_GRACE_DAYS)
+            except Exception:
+                log.exception("Removed-guild purge failed — continuing.")
 
         for guild in client.guilds:
             # Isolate each guild: one guild's failure must not abort the cycle
