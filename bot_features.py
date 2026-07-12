@@ -524,6 +524,8 @@ async def build_config(guild_id: int, client: discord.Client) -> str:
     """
     from db_utils import show_config, get_seasons, get_custom_features
     c = show_config(guild_id)
+    guild = client.get_guild(guild_id)
+    server_name = guild.name if guild else "(unknown)"
 
     def ch(cid) -> str:
         if not cid:
@@ -541,7 +543,8 @@ async def build_config(guild_id: int, client: discord.Client) -> str:
     season_count = len(get_seasons(guild_id))
 
     lines = [
-        f"Guild ID:            {c['guild_id']}",
+        f"Server:              {server_name}",
+        f"Server ID:           {c['guild_id']}",
         f"Quote Channel:       {ch(c['quote_channel'])}",
         f"Icon Channel:        {ch(c['icon_channel'])}",
         f"Post Channel:        {ch(c['post_channel'])}",
@@ -570,12 +573,18 @@ async def build_config(guild_id: int, client: discord.Client) -> str:
         lines.append(f"Custom Features:     {len(features)}")
         for f in features:
             tag = f"/{f['command']}" if f["command"] else "no command"
-            prefix = f"{f['emoji']} " if f["emoji"] else ""
+            # Custom-emoji shortcodes (<:name:id>) can't render in a code block,
+            # so strip them here; a plain unicode emoji is kept as a glyph.
+            emoji = moderation.strip_custom_emoji(f["emoji"])
+            prefix = f"{emoji} " if emoji else ""
             cadence = _cadence_from(f["weekdays"], f["interval_days"])
             state = "" if f["enabled"] else "  [disabled]"
+            # Name/slug on its own line, routing + schedule indented below, so a
+            # feature with emoji-laden channel names doesn't wrap into a mess.
+            lines.append(f"  {prefix}{f['name']} ({tag}){state}")
             lines.append(
-                f"  {prefix}{f['name']} ({tag}): {ch(f['source_channel'])} -> "
-                f"{ch(f['post_channel'])}, {cadence} at {f['post_time']}{state}"
+                f"      {ch(f['source_channel'])} -> {ch(f['post_channel'])}, "
+                f"{cadence} at {f['post_time']}"
             )
     else:
         lines.append("Custom Features:     None")
@@ -584,7 +593,6 @@ async def build_config(guild_id: int, client: discord.Client) -> str:
     warnings = []
     if not c["post_channel"]:
         warnings.append("No Post Channel - renames aren't tracked for brackets (set one in /setup).")
-    guild = client.get_guild(guild_id)
     if guild is not None and guild.me is not None:
         p = guild.me.guild_permissions
         if not p.manage_guild:
