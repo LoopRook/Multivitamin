@@ -80,6 +80,15 @@ def strip_emoji(text: str | None) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def strip_custom_emoji(text: str | None) -> str:
+    """Remove only Discord custom-emoji shortcodes (<:name:id>), keeping unicode
+    emoji. For display in a monospace/code block, where custom shortcodes can't
+    render but plain unicode emoji still show as a glyph."""
+    if not text:
+        return ""
+    return _CUSTOM_EMOJI_RE.sub("", text).strip()
+
+
 def parse_custom(csv: str | None) -> set:
     """Parse a stored comma-separated per-guild blocklist into a lowercase set."""
     return {w.strip().lower() for w in (csv or "").split(",") if w.strip()}
