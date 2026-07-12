@@ -414,11 +414,12 @@ async def scan_contributions(channel, category: str) -> dict[int, tuple[str, int
             for att in msg.attachments:
                 if att.content_type and att.content_type.startswith("image"):
                     n += 1
-        elif category == "song":
-            for line in msg.content.strip().splitlines():
-                s = line.strip()
-                if s and is_music_link(s):
-                    n += 1
+        else:
+            # Any custom-feature content type (media|link|music|text): count a
+            # message as one submission if it yields a candidate, matching how
+            # get_random_content samples (first qualifying candidate per message).
+            if _extract_candidate(msg, category) is not None:
+                n = 1
         if n:
             _, prev = counts.get(uid, (name, 0))
             counts[uid] = (name, prev + n)
@@ -429,29 +430,35 @@ async def build_mystats(guild_id: int, client: discord.Client, user_id: int, dis
     cfg = get_config(guild_id)
     quote_ch = client.get_channel(cfg["quote_channel"])
     icon_ch  = client.get_channel(cfg["icon_channel"])
-    music_ch = client.get_channel(cfg["music_channel"])
+    feats = get_custom_features(guild_id)
 
-    q_counts, i_counts, s_counts = await asyncio.gather(
-        scan_contributions(quote_ch, "quote"),
-        scan_contributions(icon_ch,  "icon"),
-        scan_contributions(music_ch, "song"),
-    )
-
-    q_count = q_counts.get(user_id, (None, 0))[1]
-    i_count = i_counts.get(user_id, (None, 0))[1]
-    s_count = s_counts.get(user_id, (None, 0))[1]
+    # Scan the two rename inputs plus every custom feature's source channel, in
+    # parallel. Custom features are counted by their own content type.
+    scans = [scan_contributions(quote_ch, "quote"), scan_contributions(icon_ch, "icon")]
+    scans += [scan_contributions(client.get_channel(f["source_channel"]), f["content_type"]) for f in feats]
+    results = await asyncio.gather(*scans)
+    q_counts, i_counts = results[0], results[1]
+    feat_counts = results[2:]
 
     last = get_user_last_picks(guild_id, user_id)
 
     def fmt(iso: str | None) -> str:
         return iso[:10] if iso else "Never"
 
-    return (
-        f"📊 **Stats for {display_name}**\n"
-        f"Quotes submitted: **{q_count}** │ Last picked: {fmt(last.get('quote'))}\n"
-        f"Images submitted: **{i_count}** │ Last picked: {fmt(last.get('icon'))}\n"
-        f"Songs submitted:  **{s_count}** │ Last picked: {fmt(last.get('song'))}\n"
-    )
+    def cnt(counts: dict) -> int:
+        return counts.get(user_id, (None, 0))[1]
+
+    lines = [
+        f"📊 **Stats for {display_name}**",
+        f"Quotes submitted: **{cnt(q_counts)}** │ Last picked: {fmt(last.get('quote'))}",
+        f"Images submitted: **{cnt(i_counts)}** │ Last picked: {fmt(last.get('icon'))}",
+    ]
+    # Per-feature submission counts (no last-picked: features don't log picks
+    # per-user the way renames do).
+    for f, counts in zip(feats, feat_counts):
+        label = f"{f['emoji']} {f['name']}" if f["emoji"] else f["name"]
+        lines.append(f"{label} submitted: **{cnt(counts)}**")
+    return pack_lines(lines)
 
 
 async def build_contributors(guild_id: int, client: discord.Client, category: str) -> str:
@@ -459,7 +466,6 @@ async def build_contributors(guild_id: int, client: discord.Client, category: st
     ch_map = {
         "quote": client.get_channel(cfg["quote_channel"]),
         "icon":  client.get_channel(cfg["icon_channel"]),
-        "song":  client.get_channel(cfg["music_channel"]),
     }
     channel = ch_map.get(category)
     if not channel:
@@ -470,7 +476,7 @@ async def build_contributors(guild_id: int, client: discord.Client, category: st
         return f"No {category} contributions found."
 
     sorted_entries = sorted(counts.values(), key=lambda x: x[1], reverse=True)
-    label = {"quote": "Quote", "icon": "Icon", "song": "Song"}[category]
+    label = {"quote": "Quote", "icon": "Icon"}[category]
     lines = [f"📊 **{label} contributors**"]
     for name, count in sorted_entries:
         lines.append(f"  {name}: **{count}** submission{'s' if count != 1 else ''}")
