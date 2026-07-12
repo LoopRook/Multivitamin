@@ -161,6 +161,22 @@ def test_showconfig_health_clean(gid):
     assert "no configuration warnings" in txt.lower()
 
 
+def test_showconfig_lists_custom_features(gid):
+    db_utils.add_custom_feature(gid, "Meme of the Day", "M", "media", 111, 222, "12:00", command="meme")
+    txt = run(bot_features.build_config(gid, _HealthClient(manage_guild=True)))
+    assert "Custom Features:" in txt
+    assert "Meme of the Day" in txt
+    assert "/meme" in txt
+    # legacy single-song plumbing must no longer appear in the config view
+    for legacy in ("Song Feature", "Song Post Channel", "Song Time", "Music Channel"):
+        assert legacy not in txt
+
+
+def test_showconfig_no_features(gid):
+    txt = run(bot_features.build_config(gid, _HealthClient(manage_guild=True)))
+    assert "Custom Features:     None" in txt
+
+
 def test_openrename_toggle_wired(gid):
     field, _ = main._FEATURE_MAP["openrename"]
     assert field == "rename_open"

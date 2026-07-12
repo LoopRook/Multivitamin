@@ -480,14 +480,19 @@ async def build_contributors(guild_id: int, client: discord.Client, category: st
 _WEEKDAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 
-def _cadence_desc(c) -> str:
-    """Human description of the rename cadence for /showconfig."""
-    wd = (c.get("quote_weekdays") or "").strip()
+def _cadence_from(weekdays, interval_days) -> str:
+    """Human description of an interval/weekday cadence (renames or features)."""
+    wd = (weekdays or "").strip()
     if wd:
         days = [_WEEKDAY_NAMES[int(x)] for x in wd.split(",") if x.strip().isdigit() and 0 <= int(x) <= 6]
         return ("Weekly on " + ", ".join(days)) if days else "Daily"
-    n = c.get("quote_interval_days") or 1
+    n = interval_days or 1
     return "Daily" if n <= 1 else f"Every {n} days"
+
+
+def _cadence_desc(c) -> str:
+    """Human description of the rename cadence for /showconfig."""
+    return _cadence_from(c.get("quote_weekdays"), c.get("quote_interval_days"))
 
 
 def _blocklist_desc(c) -> str:
@@ -511,7 +516,7 @@ async def build_config(guild_id: int, client: discord.Client) -> str:
     Return a formatted config string with channel IDs resolved to #channel-name.
     Falls back to the raw ID if the channel can't be found (e.g. deleted channel).
     """
-    from db_utils import show_config, get_seasons
+    from db_utils import show_config, get_seasons, get_custom_features
     c = show_config(guild_id)
 
     def ch(cid) -> str:
@@ -534,12 +539,9 @@ async def build_config(guild_id: int, client: discord.Client) -> str:
         f"Quote Channel:       {ch(c['quote_channel'])}",
         f"Icon Channel:        {ch(c['icon_channel'])}",
         f"Post Channel:        {ch(c['post_channel'])}",
-        f"Music Channel:       {ch(c['music_channel'])}",
-        f"Song Post Channel:   {ch(c['song_post_channel'])}",
         f"Bracket Channel:     {ch(c['bracket_channel'])}",
         f"Bracket Source:      {ch(c.get('bracket_source_channel')) if c.get('bracket_source_channel') else 'All tracked renames'}",
         f"Quote Feature:       {'Enabled' if c['enable_daily_quote'] else 'Disabled'}",
-        f"Song Feature:        {'Enabled' if c['enable_daily_song']  else 'Disabled'}",
         f"Cooldown:            {'Enabled' if c['enable_cooldown']    else 'Disabled'}",
         f"On-Demand /rename:   {'Everyone' if c.get('rename_open', 1) else 'Admins only'}",
         f"Bracket Tracking:    {tracking}",
@@ -550,11 +552,27 @@ async def build_config(guild_id: int, client: discord.Client) -> str:
         f"Timezone:            {c['timezone'] or 'US/Eastern'}",
         f"Quote Time:          {c['quote_time'] or '4:00'}",
         f"Rename Cadence:      {_cadence_desc(c)}",
-        f"Song Time:           {c['song_time'] or '10:00'}",
         f"Credit Names:        {'Server nickname' if credits.style_of(c) == 'nickname' else '@username'}",
         f"Credit Tagging:      {'On (mentions)' if credits.mentions_on(c) else 'Off (plain text)'}",
         f"Slur Blocklist:      {_blocklist_desc(c)}",
     ]
+
+    # Custom "X of the day" features are per-server and dynamic, so list whatever
+    # this guild has defined rather than hardcoding one (song used to live here).
+    features = get_custom_features(guild_id)
+    if features:
+        lines.append(f"Custom Features:     {len(features)}")
+        for f in features:
+            tag = f"/{f['command']}" if f["command"] else "no command"
+            prefix = f"{f['emoji']} " if f["emoji"] else ""
+            cadence = _cadence_from(f["weekdays"], f["interval_days"])
+            state = "" if f["enabled"] else "  [disabled]"
+            lines.append(
+                f"  {prefix}{f['name']} ({tag}): {ch(f['source_channel'])} -> "
+                f"{ch(f['post_channel'])}, {cadence} at {f['post_time']}{state}"
+            )
+    else:
+        lines.append("Custom Features:     None")
 
     # Health check — surface setup gaps and missing permissions.
     warnings = []
