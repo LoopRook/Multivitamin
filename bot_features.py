@@ -12,6 +12,7 @@ from db_utils import (
     get_config, set_config, log_pick, get_user_last_picks,
     get_today_pick_counts, get_recent_pick_items, store_rename_post,
     get_active_bracket, get_custom_features, set_custom_feature_run_date,
+    backup_database, purge_expired_guilds,
 )
 from image_utils import generate_card, truncate_to_100_chars
 import credits
@@ -88,6 +89,14 @@ _RENAME_WINDOW = timedelta(minutes=10)
 # contributors with only a few submissions don't repeat. Falls back gracefully
 # when a server is so small that everything is recent.
 _NO_REPEAT_DAYS = 30
+
+# Grace period: a removed guild's data is kept this long (re-invite cancels it),
+# then the daily purge deletes it. See PRIVACY.md.
+DATA_GRACE_DAYS = 30
+
+# UTC date of the last daily-maintenance run (backup + purge); reset on restart,
+# so a restart re-runs it at most once per UTC day.
+_last_backup_date: str | None = None
 _rename_times: dict[int, list[datetime]] = {}
 
 
@@ -208,7 +217,10 @@ async def get_random_quote(
             continue
         uid = msg.author.id
         for line in msg.content.strip().splitlines():
-            stripped = line.strip()
+            # Strip Discord/unicode emoji first: they render as raw <:name:id>
+            # or tofu on the card and in the server name. Emoji-only lines clean
+            # to "" and drop out here.
+            stripped = moderation.strip_emoji(line)
             if not stripped or stripped.startswith("!"):
                 continue
             if is_blocked and is_blocked(stripped):   # skip slurs/hate terms
@@ -402,11 +414,12 @@ async def scan_contributions(channel, category: str) -> dict[int, tuple[str, int
             for att in msg.attachments:
                 if att.content_type and att.content_type.startswith("image"):
                     n += 1
-        elif category == "song":
-            for line in msg.content.strip().splitlines():
-                s = line.strip()
-                if s and is_music_link(s):
-                    n += 1
+        else:
+            # Any custom-feature content type (media|link|music|text): count a
+            # message as one submission if it yields a candidate, matching how
+            # get_random_content samples (first qualifying candidate per message).
+            if _extract_candidate(msg, category) is not None:
+                n = 1
         if n:
             _, prev = counts.get(uid, (name, 0))
             counts[uid] = (name, prev + n)
@@ -417,29 +430,35 @@ async def build_mystats(guild_id: int, client: discord.Client, user_id: int, dis
     cfg = get_config(guild_id)
     quote_ch = client.get_channel(cfg["quote_channel"])
     icon_ch  = client.get_channel(cfg["icon_channel"])
-    music_ch = client.get_channel(cfg["music_channel"])
+    feats = get_custom_features(guild_id)
 
-    q_counts, i_counts, s_counts = await asyncio.gather(
-        scan_contributions(quote_ch, "quote"),
-        scan_contributions(icon_ch,  "icon"),
-        scan_contributions(music_ch, "song"),
-    )
-
-    q_count = q_counts.get(user_id, (None, 0))[1]
-    i_count = i_counts.get(user_id, (None, 0))[1]
-    s_count = s_counts.get(user_id, (None, 0))[1]
+    # Scan the two rename inputs plus every custom feature's source channel, in
+    # parallel. Custom features are counted by their own content type.
+    scans = [scan_contributions(quote_ch, "quote"), scan_contributions(icon_ch, "icon")]
+    scans += [scan_contributions(client.get_channel(f["source_channel"]), f["content_type"]) for f in feats]
+    results = await asyncio.gather(*scans)
+    q_counts, i_counts = results[0], results[1]
+    feat_counts = results[2:]
 
     last = get_user_last_picks(guild_id, user_id)
 
     def fmt(iso: str | None) -> str:
         return iso[:10] if iso else "Never"
 
-    return (
-        f"📊 **Stats for {display_name}**\n"
-        f"Quotes submitted: **{q_count}** │ Last picked: {fmt(last.get('quote'))}\n"
-        f"Images submitted: **{i_count}** │ Last picked: {fmt(last.get('icon'))}\n"
-        f"Songs submitted:  **{s_count}** │ Last picked: {fmt(last.get('song'))}\n"
-    )
+    def cnt(counts: dict) -> int:
+        return counts.get(user_id, (None, 0))[1]
+
+    lines = [
+        f"📊 **Stats for {display_name}**",
+        f"Quotes submitted: **{cnt(q_counts)}** │ Last picked: {fmt(last.get('quote'))}",
+        f"Images submitted: **{cnt(i_counts)}** │ Last picked: {fmt(last.get('icon'))}",
+    ]
+    # Per-feature submission counts (no last-picked: features don't log picks
+    # per-user the way renames do).
+    for f, counts in zip(feats, feat_counts):
+        label = f"{f['emoji']} {f['name']}" if f["emoji"] else f["name"]
+        lines.append(f"{label} submitted: **{cnt(counts)}**")
+    return pack_lines(lines)
 
 
 async def build_contributors(guild_id: int, client: discord.Client, category: str) -> str:
@@ -447,7 +466,6 @@ async def build_contributors(guild_id: int, client: discord.Client, category: st
     ch_map = {
         "quote": client.get_channel(cfg["quote_channel"]),
         "icon":  client.get_channel(cfg["icon_channel"]),
-        "song":  client.get_channel(cfg["music_channel"]),
     }
     channel = ch_map.get(category)
     if not channel:
@@ -458,7 +476,7 @@ async def build_contributors(guild_id: int, client: discord.Client, category: st
         return f"No {category} contributions found."
 
     sorted_entries = sorted(counts.values(), key=lambda x: x[1], reverse=True)
-    label = {"quote": "Quote", "icon": "Icon", "song": "Song"}[category]
+    label = {"quote": "Quote", "icon": "Icon"}[category]
     lines = [f"📊 **{label} contributors**"]
     for name, count in sorted_entries:
         lines.append(f"  {name}: **{count}** submission{'s' if count != 1 else ''}")
@@ -468,14 +486,19 @@ async def build_contributors(guild_id: int, client: discord.Client, category: st
 _WEEKDAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 
-def _cadence_desc(c) -> str:
-    """Human description of the rename cadence for /showconfig."""
-    wd = (c.get("quote_weekdays") or "").strip()
+def _cadence_from(weekdays, interval_days) -> str:
+    """Human description of an interval/weekday cadence (renames or features)."""
+    wd = (weekdays or "").strip()
     if wd:
         days = [_WEEKDAY_NAMES[int(x)] for x in wd.split(",") if x.strip().isdigit() and 0 <= int(x) <= 6]
         return ("Weekly on " + ", ".join(days)) if days else "Daily"
-    n = c.get("quote_interval_days") or 1
+    n = interval_days or 1
     return "Daily" if n <= 1 else f"Every {n} days"
+
+
+def _cadence_desc(c) -> str:
+    """Human description of the rename cadence for /showconfig."""
+    return _cadence_from(c.get("quote_weekdays"), c.get("quote_interval_days"))
 
 
 def _blocklist_desc(c) -> str:
@@ -499,7 +522,7 @@ async def build_config(guild_id: int, client: discord.Client) -> str:
     Return a formatted config string with channel IDs resolved to #channel-name.
     Falls back to the raw ID if the channel can't be found (e.g. deleted channel).
     """
-    from db_utils import show_config, get_seasons
+    from db_utils import show_config, get_seasons, get_custom_features
     c = show_config(guild_id)
 
     def ch(cid) -> str:
@@ -522,12 +545,9 @@ async def build_config(guild_id: int, client: discord.Client) -> str:
         f"Quote Channel:       {ch(c['quote_channel'])}",
         f"Icon Channel:        {ch(c['icon_channel'])}",
         f"Post Channel:        {ch(c['post_channel'])}",
-        f"Music Channel:       {ch(c['music_channel'])}",
-        f"Song Post Channel:   {ch(c['song_post_channel'])}",
         f"Bracket Channel:     {ch(c['bracket_channel'])}",
         f"Bracket Source:      {ch(c.get('bracket_source_channel')) if c.get('bracket_source_channel') else 'All tracked renames'}",
         f"Quote Feature:       {'Enabled' if c['enable_daily_quote'] else 'Disabled'}",
-        f"Song Feature:        {'Enabled' if c['enable_daily_song']  else 'Disabled'}",
         f"Cooldown:            {'Enabled' if c['enable_cooldown']    else 'Disabled'}",
         f"On-Demand /rename:   {'Everyone' if c.get('rename_open', 1) else 'Admins only'}",
         f"Bracket Tracking:    {tracking}",
@@ -538,11 +558,27 @@ async def build_config(guild_id: int, client: discord.Client) -> str:
         f"Timezone:            {c['timezone'] or 'US/Eastern'}",
         f"Quote Time:          {c['quote_time'] or '4:00'}",
         f"Rename Cadence:      {_cadence_desc(c)}",
-        f"Song Time:           {c['song_time'] or '10:00'}",
         f"Credit Names:        {'Server nickname' if credits.style_of(c) == 'nickname' else '@username'}",
         f"Credit Tagging:      {'On (mentions)' if credits.mentions_on(c) else 'Off (plain text)'}",
         f"Slur Blocklist:      {_blocklist_desc(c)}",
     ]
+
+    # Custom "X of the day" features are per-server and dynamic, so list whatever
+    # this guild has defined rather than hardcoding one (song used to live here).
+    features = get_custom_features(guild_id)
+    if features:
+        lines.append(f"Custom Features:     {len(features)}")
+        for f in features:
+            tag = f"/{f['command']}" if f["command"] else "no command"
+            prefix = f"{f['emoji']} " if f["emoji"] else ""
+            cadence = _cadence_from(f["weekdays"], f["interval_days"])
+            state = "" if f["enabled"] else "  [disabled]"
+            lines.append(
+                f"  {prefix}{f['name']} ({tag}): {ch(f['source_channel'])} -> "
+                f"{ch(f['post_channel'])}, {cadence} at {f['post_time']}{state}"
+            )
+    else:
+        lines.append("Custom Features:     None")
 
     # Health check — surface setup gaps and missing permissions.
     warnings = []
@@ -875,6 +911,27 @@ async def scheduler_loop(client: discord.Client) -> None:
     while not client.is_closed():
         await asyncio.sleep(60)
         now_utc = datetime.now(pytz.utc)
+
+        # Once-a-day maintenance (guarded so a restart re-runs at most once per UTC
+        # day): back up the DB, then purge data for guilds past the removal grace.
+        global _last_backup_date
+        today_utc = now_utc.strftime("%Y-%m-%d")
+        if _last_backup_date != today_utc:
+            _last_backup_date = today_utc
+            try:
+                backup_database()
+            except Exception:
+                log.exception("Daily DB backup failed — continuing.")
+            try:
+                cutoff = (now_utc - timedelta(days=DATA_GRACE_DAYS)).isoformat()
+                # Never purge a guild the bot is currently in (stale-flag safety belt).
+                purged = purge_expired_guilds(cutoff, exclude={g.id for g in client.guilds})
+                if purged:
+                    log.info("Purged data for %d guild(s) past the %d-day removal grace.",
+                             len(purged), DATA_GRACE_DAYS)
+            except Exception:
+                log.exception("Removed-guild purge failed — continuing.")
+
         for guild in client.guilds:
             # Isolate each guild: one guild's failure must not abort the cycle
             # for every other guild (critical for a multi-tenant public bot).

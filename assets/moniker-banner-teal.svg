@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640">
+  <!-- Moniker banner (teal). 1280x640 = GitHub social-preview size; content is
+       centered and clear of the bottom-left so Discord's avatar overlap and any
+       wider crop are safe. NOTE: convert the text to outlines in your editor. -->
+  <rect width="1280" height="640" fill="#1f6f66"/>
+  <g transform="translate(345,320) scale(0.82) rotate(-6)">
+    <rect x="-150" y="-118" width="300" height="236" rx="20" fill="#f7f2e8"/>
+    <path d="M -150 -98 A 20 20 0 0 1 -130 -118 L 130 -118 A 20 20 0 0 1 150 -98 L 150 -44 L -150 -44 Z" fill="#e8933a"/>
+    <rect x="-96" y="-88" width="192" height="12" rx="6" fill="#ffffff" opacity="0.55"/>
+    <text x="0" y="37" text-anchor="middle" dominant-baseline="central" font-family="Georgia, serif" font-size="150" font-weight="700" fill="#23262c">M</text>
+  </g>
+  <text x="510" y="318" font-family="Georgia, serif" font-size="124" font-weight="700" fill="#f7f2e8">Moniker</text>
+  <text x="514" y="384" font-family="Georgia, serif" font-size="40" font-style="italic" fill="#f2c081">A fresh server name every day</text>
+</svg>

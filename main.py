@@ -18,6 +18,7 @@ from db_utils import (
     get_custom_feature_by_command, set_custom_feature_access, update_custom_feature,
     get_rename_post_by_message_id, record_forward_nomination,
     set_custom_feature_schedule,
+    mark_guild_removed, clear_guild_removed,
 )
 from bot_features import (
     process_rename,
@@ -28,6 +29,7 @@ from bot_features import (
     build_config,
     pack_lines,
     rename_cooldown_remaining,
+    DATA_GRACE_DAYS,
 )
 from bracket import (
     start_bracket,
@@ -205,7 +207,7 @@ def build_help_embed(is_admin: bool = False, is_manager: bool = False) -> discor
                 "`/admin add <user>`: grant bot-admin access\n"
                 "`/admin remove <user>`: revoke bot-admin access\n"
                 "`/admin list`: list current bot-admins\n"
-                "`/admin reset`: ⚠️ wipe ALL this server's data (irreversible; testing/cleanup)"
+                "`/admin reset`: 🛑 **permanently** wipe ALL this server's data (no undo)"
             ),
             inline=False,
         )
@@ -286,6 +288,7 @@ class QotdClient(discord.Client):
     async def on_guild_join(self, guild: discord.Guild) -> None:
         log.info("➕ Joined guild %s (%s)", guild.id, guild.name)
         get_config(guild.id)  # ensure a config row exists
+        clear_guild_removed(guild.id)  # re-added within the grace window: cancel any pending deletion
 
         # Prefer to DM whoever added the bot (private — no channel noise). Fall
         # back to a channel only if the DM can't be delivered or we can't tell
@@ -328,8 +331,12 @@ class QotdClient(discord.Client):
             return False
 
     async def on_guild_remove(self, guild: discord.Guild) -> None:
-        # Keep the guild's data in case of a re-invite; just log the departure.
-        log.info("➖ Removed from guild %s (%s) — data retained.", guild.id, guild.name)
+        # Schedule the guild's data for deletion after a grace period. A re-invite
+        # within the window cancels it (on_guild_join clears the stamp); otherwise
+        # the daily purge job deletes it. See PRIVACY.md.
+        mark_guild_removed(guild.id)
+        log.info("➖ Removed from guild %s (%s) — data scheduled for deletion in %d days.",
+                 guild.id, guild.name, DATA_GRACE_DAYS)
 
     async def on_message(self, message: discord.Message) -> None:
         if message.author.bot or not message.guild:
@@ -1639,7 +1646,7 @@ class _ResetConfirmView(discord.ui.View):
             return False
         return True
 
-    @discord.ui.button(label="Yes, wipe EVERYTHING", style=discord.ButtonStyle.danger, emoji="⚠️")
+    @discord.ui.button(label="Permanently delete everything", style=discord.ButtonStyle.danger, emoji="🛑")
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
         reset_guild(self.guild_id)
         await sync_guild_feature_commands(self.guild_id)  # remove the wiped features' /commands
@@ -1659,20 +1666,21 @@ class _ResetConfirmView(discord.ui.View):
         self.stop()
 
 
-@admin_group.command(name="reset", description="⚠️ Wipe ALL of this server's bot data (irreversible)")
+@admin_group.command(name="reset", description="⚠️ Permanently wipe ALL of this server's bot data (cannot be undone)")
 @manager_only()
 async def admin_reset(interaction: discord.Interaction):
     view = _ResetConfirmView(interaction.user.id, interaction.guild_id)
     await interaction.response.send_message(
-        "⚠️ **DANGER: full reset**\n"
-        "This **permanently deletes everything** this bot stores for this server:\n"
+        "🛑 **STOP. This is permanent and cannot be undone.**\n"
+        "It **irreversibly deletes everything** Moniker stores for this server:\n"
         "• all `/config` settings, schedule, and channels\n"
         "• every custom `/feature` (and its slash command)\n"
         "• all brackets, seasons, and bracket history\n"
         "• all tracked rename posts, forward nominations, and pick history\n"
         "• the bot-admin roster\n\n"
-        "**This cannot be undone.** The server returns to a fresh state (like a new install).\n"
-        "*(Mainly a testing and cleanup tool. Most servers never need this.)*",
+        "There is **no undo and no way to recover this** once you confirm. The server drops "
+        "back to a fresh install, exactly as if Moniker had never been set up.\n"
+        "Only continue if you are absolutely certain.",
         view=view, ephemeral=True)
 
 

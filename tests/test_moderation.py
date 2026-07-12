@@ -33,3 +33,30 @@ def test_parse_custom_roundtrip():
 def test_empty_text():
     assert not moderation.is_blocked("")
     assert not moderation.is_blocked(None)
+
+
+def test_strip_custom_emoji():
+    # the reported case: a custom emoji shortcode plus real text
+    assert moderation.strip_emoji("<:hazMonka:6882587832768> No.") == "No."
+    assert moderation.strip_emoji("<a:spin:12345> hype") == "hype"
+
+
+def test_strip_unicode_emoji():
+    assert moderation.strip_emoji("lol 😂 no") == "lol no"
+    assert moderation.strip_emoji("great job 👍🏽") == "great job"
+    assert moderation.strip_emoji("flag 🇺🇸 here") == "flag here"
+
+
+def test_emoji_only_cleans_to_empty():
+    assert moderation.strip_emoji("<:hazMonka:6882587832768>") == ""
+    assert moderation.strip_emoji("😂😂😂") == ""
+    assert moderation.strip_emoji("  🎉  ") == ""
+    assert moderation.strip_emoji(None) == ""
+    assert moderation.strip_emoji("") == ""
+
+
+def test_strip_emoji_preserves_ordinary_text():
+    # plain punctuation, arrows and symbols people actually mean must survive
+    assert moderation.strip_emoji("2 + 2 = 4") == "2 + 2 = 4"
+    assert moderation.strip_emoji("go left -> then right") == "go left -> then right"
+    assert moderation.strip_emoji("café façade naïve") == "café façade naïve"
