@@ -1,3 +1,4 @@
+import glob
 import logging
 import os
 import sqlite3
@@ -16,7 +17,7 @@ _VALID_CONFIG_FIELDS = frozenset({
     "bracket_pacing", "bracket_source_channel", "pre_bracket_name",
     "quote_interval_days", "quote_weekdays",
     "credit_style", "credit_mentions", "rename_open",
-    "blocklist_enabled", "blocklist_custom",
+    "blocklist_enabled", "blocklist_custom", "removed_at",
 })
 
 _CREATE_CONFIG = """
@@ -207,6 +208,7 @@ _CONFIG_MIGRATIONS = [
     ("rename_open",            "INTEGER DEFAULT 1"),        # 1 = anyone may run /rename; 0 = admins only
     ("blocklist_enabled",      "INTEGER DEFAULT 1"),        # 1 = skip quotes containing slurs/hate terms
     ("blocklist_custom",       "TEXT"),                     # comma-separated per-guild extra blocked words
+    ("removed_at",             "TEXT"),                     # ISO UTC when the bot was removed; NULL = present
 ]
 
 _RENAME_POSTS_MIGRATIONS = [
@@ -691,6 +693,70 @@ def reset_guild(guild_id: int) -> None:
                       "custom_features", "picks_history", "bot_admins", "server_config"):
             conn.execute(f"DELETE FROM {table} WHERE guild_id=?", (guild_id,))
         conn.commit()
+
+
+def backup_database(keep: int = 7) -> str | None:
+    """
+    Write a consistent snapshot of the DB to ./backups/backup-YYYY-MM-DD.db (next
+    to DB_FILE), pruning to the *keep* newest. Uses SQLite's VACUUM INTO, which is
+    safe on a live database. On-volume only — protects against a bad /admin reset,
+    a botched migration, or corruption, NOT against the volume itself being lost.
+    Returns the backup path, or None on failure.
+    """
+    db_dir = os.path.dirname(os.path.abspath(DB_FILE)) or "."
+    backup_dir = os.path.join(db_dir, "backups")
+    try:
+        os.makedirs(backup_dir, exist_ok=True)
+        dest = os.path.join(backup_dir, f"backup-{datetime.now(timezone.utc):%Y-%m-%d}.db")
+        if os.path.exists(dest):        # VACUUM INTO refuses an existing file
+            os.remove(dest)
+        with db_conn() as conn:
+            conn.execute("VACUUM INTO ?", (dest,))
+    except (sqlite3.Error, OSError) as e:
+        log.error("DB backup failed: %s", e)
+        return None
+    backups = sorted(glob.glob(os.path.join(backup_dir, "backup-*.db")))
+    for old in backups[:-keep]:
+        try:
+            os.remove(old)
+        except OSError:
+            pass
+    log.info("DB backed up to %s (keeping %d newest)", dest, keep)
+    return dest
+
+
+def mark_guild_removed(guild_id: int) -> None:
+    """Stamp a guild for deletion after the grace period. No-op if it has no data row."""
+    with db_conn() as conn:
+        conn.execute("UPDATE server_config SET removed_at=? WHERE guild_id=?",
+                     (datetime.now(timezone.utc).isoformat(), guild_id))
+        conn.commit()
+
+
+def clear_guild_removed(guild_id: int) -> None:
+    """Cancel a pending deletion (the bot was re-added within the grace window)."""
+    with db_conn() as conn:
+        conn.execute("UPDATE server_config SET removed_at=NULL WHERE guild_id=?", (guild_id,))
+        conn.commit()
+
+
+def purge_expired_guilds(cutoff_utc: str, exclude: set | None = None) -> list[int]:
+    """
+    Delete all data for guilds removed on/before *cutoff_utc*. Returns the purged
+    guild ids. *exclude* (guilds the bot is currently in) is a safety belt: even
+    if a stale `removed_at` lingers on an active guild, its live data is never
+    wiped.
+    """
+    exclude = exclude or set()
+    with db_conn() as conn:
+        rows = conn.execute(
+            "SELECT guild_id FROM server_config WHERE removed_at IS NOT NULL AND removed_at <= ?",
+            (cutoff_utc,),
+        ).fetchall()
+    purged = [r["guild_id"] for r in rows if r["guild_id"] not in exclude]
+    for gid in purged:
+        reset_guild(gid)
+    return purged
 
 
 # ── seasons ───────────────────────────────────────────────────────────────────
