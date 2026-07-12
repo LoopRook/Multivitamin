@@ -142,7 +142,7 @@ class _HealthClient:
 
     def get_guild(self, gid):
         me = type("Me", (), {"guild_permissions": _Perms(manage_guild=self._mg)})()
-        return type("G", (), {"me": me})()
+        return type("G", (), {"me": me, "name": "Test Server"})()
 
 
 def test_showconfig_health_warnings(gid):
@@ -162,11 +162,17 @@ def test_showconfig_health_clean(gid):
 
 
 def test_showconfig_lists_custom_features(gid):
-    db_utils.add_custom_feature(gid, "Meme of the Day", "M", "media", 111, 222, "12:00", command="meme")
+    db_utils.add_custom_feature(gid, "Meme of the Day", "<:yoba:1446632582472143019>",
+                                "media", 111, 222, "12:00", command="meme")
     txt = run(bot_features.build_config(gid, _HealthClient(manage_guild=True)))
     assert "Custom Features:" in txt
     assert "Meme of the Day" in txt
     assert "/meme" in txt
+    # header is the server name, not a raw guild id label
+    assert "Server:" in txt
+    assert "Guild ID:" not in txt
+    # custom-emoji shortcodes can't render in a code block, so they're stripped
+    assert "<:yoba:" not in txt
     # legacy single-song plumbing must no longer appear in the config view
     for legacy in ("Song Feature", "Song Post Channel", "Song Time", "Music Channel"):
         assert legacy not in txt

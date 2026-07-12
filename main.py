@@ -53,7 +53,7 @@ logging.getLogger("discord.client").setLevel(logging.ERROR)
 
 log = logging.getLogger(__name__)
 
-__version__ = "1.0.0-rc"   # flip to "1.0.0" at the v1.0.0 tag
+__version__ = "1.0.0"
 _ISSUES_URL = "https://github.com/LoopRook/Multivitamin/issues"
 
 TOKEN = os.getenv("DISCORD_TOKEN")
