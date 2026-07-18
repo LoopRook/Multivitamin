@@ -110,7 +110,7 @@ Matchups are native Discord polls with both cards displayed. Ties get a dramatic
 
 ### The best-of channel (optional, recommended)
 
-Instead of seeding from *every* card's reactions, set a **best-of channel** in `/setup`: members **forward** their favorite rename cards into it (Discord's native Forward), and the bracket seeds from reactions on those forwards. Moniker confirms each nomination with ℹ️ (or 🔁 for a duplicate) and pins instructions in the channel. Screenshots don't count, only real forwards, so nominations stay traceable to the original card. Each `/bracket start` chooses between best-of and all-renames seeding for that run.
+Instead of seeding from *every* card's reactions, set a **best-of channel** in `/setup`: members **forward** their favorite rename cards into it (Discord's native Forward), and the bracket seeds from reactions on those forwards. Moniker confirms each nomination with ℹ️ (or 🔁 for a duplicate) and pins instructions in the channel. Screenshots don't count, only real forwards, so nominations stay traceable to the original card. Best-of seeding counts **distinct people**, so piling five emoji on your own favorite still only counts once. Each `/bracket start` chooses between best-of and all-renames seeding for that run.
 
 ---
 

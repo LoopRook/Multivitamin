@@ -82,6 +82,30 @@ def test_scored_from_forwards_excludes_bot_and_dedups():
     assert sorted((c, p["quote"], p["quote_user"]) for c, p in scored) == [(3, "A", "u"), (5, "A", "u")]
 
 
+def test_best_of_counts_distinct_people_not_emoji():
+    # Best-of seeding is one-person-one-point: stacking emoji must not inflate.
+    posts = [{"message_id": 1, "quote": "Stacked", "quote_user": "u"},
+             {"message_id": 2, "quote": "Popular", "quote_user": "u"}]
+    msgs = [
+        # user 5 alone piled on four different emoji -> still worth 1
+        forward_msg(ref(1, FWD), [reaction(1, user_ids=[5]), reaction(1, user_ids=[5]),
+                                  reaction(1, user_ids=[5]), reaction(1, user_ids=[5])]),
+        # three different people, some overlapping emoji -> worth 3
+        forward_msg(ref(2, FWD), [reaction(2, user_ids=[7, 8]), reaction(2, user_ids=[8, 9])]),
+    ]
+    scored = run(bracket._scored_from_forwards(FakeClient(channel=Channel(msgs)), 7, posts))
+    by_quote = {p["quote"]: c for c, p in scored}
+    assert by_quote == {"Stacked": 1, "Popular": 3}
+
+
+def test_best_of_ignores_bot_reactions():
+    # the bot's own info/duplicate confirmations must never score
+    posts = [{"message_id": 1, "quote": "A", "quote_user": "u"}]
+    msgs = [forward_msg(ref(1, FWD), [reaction(1, me=True), reaction(1, user_ids=[4])])]
+    scored = run(bracket._scored_from_forwards(FakeClient(channel=Channel(msgs)), 7, posts))
+    assert [c for c, _ in scored] == [1]
+
+
 def test_crown_champion_credits_icon_poster(gid):
     ch = Channel()
     champ = {"id": 5, "quote": "Win", "quote_user": "a", "quote_uid": None,

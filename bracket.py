@@ -2,7 +2,9 @@
 bracket.py — Yearly rename bracket championship.
 
 Rename posts accumulate freeform reactions from users all year (any emoji counts).
-At bracket time, total reaction count seeds the bracket.
+At bracket time those totals seed the bracket. Seeding from a curated best-of
+channel instead scores each nomination by DISTINCT reactors, so one member can't
+stack several emoji to inflate their favourite.
 Matchups use Discord native polls so users vote cleanly without specific emojis.
 Each matchup post shows both rename cards as embeds so voters can see what they're choosing.
 """
@@ -165,6 +167,34 @@ async def _get_total_reactions(client: discord.Client, channel_id: int, message_
         return 0
 
 
+async def _unique_reactors(msg) -> int:
+    """
+    Number of DISTINCT humans who reacted to *msg*, regardless of how many
+    different emoji each used.
+
+    Used for best-of seeding, where one nomination should carry one person's
+    weight: summing raw reaction counts lets a single member stack five emoji on
+    their favourite and hand it five points. Bots are excluded, which also drops
+    the bot's own ℹ️/🔁 nomination confirmations.
+
+    Costs one paginated request per emoji, which is fine here: brackets start
+    rarely and a curated best-of channel is small. Falls back to the raw summed
+    count if the user list can't be fetched, so a hiccup degrades instead of
+    zeroing a card's score.
+    """
+    voters: set[int] = set()
+    try:
+        for r in msg.reactions:
+            async for user in r.users():
+                if not getattr(user, "bot", False):
+                    voters.add(user.id)
+    except discord.HTTPException as e:
+        log.warning("Could not list reactors (msg %s): %s — falling back to raw counts",
+                    getattr(msg, "id", "?"), e)
+        return sum(r.count - (1 if r.me else 0) for r in msg.reactions)
+    return len(voters)
+
+
 async def _scored_from_forwards(
     client: discord.Client, source_channel_id: int, posts_in_window: list,
 ) -> list[tuple[int, str, str | None]]:
@@ -179,9 +209,9 @@ async def _scored_from_forwards(
     window and the tracking floor still apply. Screenshots or re-uploads have no
     such reference and are silently ignored — members must use the Forward button.
 
-    Returns (reaction_count, post_row) tuples scored by the reactions on the
-    *forwarded* message; the row carries the quote and both credits. Dedup-by-
-    quote happens in the caller.
+    Returns (score, post_row) tuples where the score is the number of DISTINCT
+    humans who reacted to the *forwarded* message (see _unique_reactors); the row
+    carries the quote and both credits. Dedup-by-quote happens in the caller.
     """
     by_msg = {p["message_id"]: p for p in posts_in_window}
     if not by_msg:
@@ -200,9 +230,9 @@ async def _scored_from_forwards(
             original = by_msg.get(ref.message_id)
             if original is None:
                 continue
-            # Count human reactions only — the bot's own ℹ️/🔁 confirmation
-            # reactions must not add to a forward's score.
-            count = sum(r.count - (1 if r.me else 0) for r in msg.reactions)
+            # One nominator, one point: count distinct humans, not total emoji,
+            # so nobody can stack reactions to inflate their favourite's seed.
+            count = await _unique_reactors(msg)
             scored.append((count, original))
     except discord.HTTPException as e:
         log.warning("Could not scan bracket source channel %s: %s", source_channel_id, e)
