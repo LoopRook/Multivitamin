@@ -45,6 +45,18 @@ def test_all_views_instantiate(gid):
     assert "reset" in {c.name for c in main.admin_group.walk_commands()}
 
 
+def test_feature_setup_allows_forum_threads():
+    # A forum post is a thread, so the source/destination pickers must offer
+    # thread types, not just plain text channels.
+    view = main._DailySetupView(1)
+    selects = [c for c in view.children if isinstance(c, discord.ui.ChannelSelect)]
+    assert len(selects) == 2                      # source + destination
+    for sel in selects:
+        types = set(sel.channel_types)
+        assert discord.ChannelType.public_thread in types
+        assert discord.ChannelType.text in types
+
+
 def test_help_embed_within_field_limits():
     e = main.build_help_embed(is_admin=True, is_manager=True)
     assert all(len(f.value) <= 1024 for f in e.fields)

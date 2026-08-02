@@ -2,7 +2,7 @@ import logging
 import os
 import re
 from datetime import datetime
-from typing import Literal, Optional
+from typing import Literal, Optional, Union
 
 import discord
 import pytz
@@ -1353,6 +1353,18 @@ _TYPE_SELECT_OPTIONS = [
     discord.SelectOption(label="Text: a line of text", value="text", emoji="💬"),
 ]
 
+# Channels a feature can read from or post into. Threads count (a forum post IS a
+# thread), so a forum thread can be a source. The forum/media *containers* are
+# left out on purpose: they hold threads, not messages, so there's nothing to
+# sample from or post directly into one.
+_FEATURE_CHANNEL_TYPES = [
+    discord.ChannelType.text,
+    discord.ChannelType.news,
+    discord.ChannelType.public_thread,
+    discord.ChannelType.private_thread,
+    discord.ChannelType.news_thread,
+]
+
 
 class _DailyNameModal(discord.ui.Modal, title="Name your feature"):
     """Final step of /feature setup — name, then a required command, time, optional emoji."""
@@ -1397,13 +1409,13 @@ class _DailySetupView(discord.ui.View):
             return False
         return True
 
-    @discord.ui.select(cls=discord.ui.ChannelSelect, channel_types=[discord.ChannelType.text],
+    @discord.ui.select(cls=discord.ui.ChannelSelect, channel_types=_FEATURE_CHANNEL_TYPES,
                        placeholder="1) Source: the channel to pick from", row=0)
     async def source_select(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
         self.source_id = select.values[0].id
         await interaction.response.defer()
 
-    @discord.ui.select(cls=discord.ui.ChannelSelect, channel_types=[discord.ChannelType.text],
+    @discord.ui.select(cls=discord.ui.ChannelSelect, channel_types=_FEATURE_CHANNEL_TYPES,
                        placeholder="2) Destination: where to post it", row=1)
     async def dest_select(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
         self.dest_id = select.values[0].id
@@ -1462,8 +1474,8 @@ async def _feature_slug_autocomplete(interaction: discord.Interaction, current: 
 async def feature_edit(interaction: discord.Interaction, command: str,
                      name: Optional[str] = None,
                      type: Optional[Literal["media", "link", "music", "text"]] = None,
-                     source: Optional[discord.TextChannel] = None,
-                     destination: Optional[discord.TextChannel] = None,
+                     source: Optional[Union[discord.TextChannel, discord.Thread]] = None,
+                     destination: Optional[Union[discord.TextChannel, discord.Thread]] = None,
                      time: Optional[str] = None,
                      emoji: Optional[str] = None):
     feat = get_custom_feature_by_command(interaction.guild_id, command.strip().lower())
