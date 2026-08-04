@@ -86,7 +86,7 @@ Renames are rate-limited by Discord (~2 per 10 minutes), so Moniker tells you ho
 
 ## Brackets: the championship (optional)
 
-Nothing here is required. The daily renames are a complete experience on their own. But reactions on the cards accumulate automatically, so whenever you're ready:
+Nothing here is required. The daily renames are enough on their own. But reactions on the cards accumulate automatically, so whenever you're ready:
 
 ```
 /bracket start

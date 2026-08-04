@@ -45,6 +45,25 @@ def test_all_views_instantiate(gid):
     assert "reset" in {c.name for c in main.admin_group.walk_commands()}
 
 
+def test_pickable_channel_types_include_threads():
+    # A forum post is a thread; every channel picker must offer thread types.
+    types = set(main._PICKABLE_CHANNEL_TYPES)
+    assert {discord.ChannelType.text, discord.ChannelType.news,
+            discord.ChannelType.public_thread, discord.ChannelType.private_thread,
+            discord.ChannelType.news_thread} <= types
+
+
+def test_channel_pickers_offer_threads(gid):
+    # Feature setup (source + destination) and bracket start ("where it posts")
+    # all pick channels; none may be narrowed back to text-only.
+    views = [main._DailySetupView(1), main._BracketStartView(1, gid)]
+    selects = [c for v in views for c in v.children
+               if isinstance(c, discord.ui.ChannelSelect)]
+    assert len(selects) >= 3
+    for sel in selects:
+        assert discord.ChannelType.public_thread in set(sel.channel_types)
+
+
 def test_help_embed_within_field_limits():
     e = main.build_help_embed(is_admin=True, is_manager=True)
     assert all(len(f.value) <= 1024 for f in e.fields)
