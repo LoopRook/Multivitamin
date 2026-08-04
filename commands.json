@@ -1,0 +1,26 @@
+{
+  "groups": [
+    {
+      "title": "Everyday (members)",
+      "commands": [
+        { "name": "/mystats", "desc": "Your submission counts and when you were last picked" },
+        { "name": "/contributors", "desc": "Quote or icon submission leaderboard" },
+        { "name": "/rename", "desc": "Trigger a rename now (admins can restrict this)" }
+      ]
+    },
+    {
+      "title": "Configuration",
+      "commands": [
+        { "name": "/setup", "desc": "The wizard: channels, timezone, schedule" },
+        { "name": "/config schedule", "desc": "Rename cadence and time" },
+        { "name": "/config credits", "desc": "Nickname vs @username, champion pings" },
+        { "name": "/config feature", "desc": "Toggle quote, cooldown, openrename" },
+        { "name": "/config timezone", "desc": "Any IANA zone" },
+        { "name": "/season", "desc": "Manage named bracket windows" },
+        { "name": "/admin add/remove/list", "desc": "Grant bot-admin to non-managers" },
+        { "name": "/admin reset", "desc": "Wipe this server's data (two-step confirm)" },
+        { "name": "/showconfig", "desc": "Everything, plus a health check" }
+      ]
+    }
+  ]
+}
