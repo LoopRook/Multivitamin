@@ -19,14 +19,14 @@ a:hover{color:oklch(0.32 0.14 280)}
 
 <div style="width:100%;font-family:Inter,system-ui,sans-serif;color:oklch(0.32 0.01 260);background:oklch(0.93 0.006 260);{{ themeVars }}">
 
-<nav style="position:sticky;top:0;z-index:50;display:flex;align-items:center;justify-content:space-between;padding:18px 56px;background:oklch(0.93 0.006 260);box-shadow:0 2px 10px oklch(0.8 0.006 260 / .5)">
+<nav style="position:sticky;top:0;z-index:50;display:flex;align-items:center;justify-content:space-between;padding:16px clamp(20px,5vw,56px);background:oklch(0.93 0.006 260);box-shadow:0 2px 10px oklch(0.8 0.006 260 / .5);flex-wrap:wrap;row-gap:12px">
   <div style="display:flex;align-items:center;gap:10px">
     <div style="width:30px;height:30px;border-radius:10px;background:oklch(0.93 0.006 260);box-shadow:var(--btn-shadow-sm);display:flex;align-items:center;justify-content:center">
       <div style="width:12px;height:12px;border-radius:4px;background:var(--logo-dot)"></div>
     </div>
     <span style="font:700 17px 'Space Grotesk',sans-serif;color:oklch(0.24 0.01 260)">Moniker</span>
   </div>
-  <div style="display:flex;gap:30px;font:500 14px Inter,sans-serif;color:oklch(0.45 0.01 260)">
+  <div style="display:flex;gap:clamp(14px,3vw,30px);flex-wrap:wrap;font:500 14px Inter,sans-serif;color:oklch(0.45 0.01 260)">
     <a href="#features" style="color:inherit">Features</a>
     <a href="#setup" style="color:inherit">Setup</a>
     <a href="#commands" style="color:inherit">Commands</a>
@@ -35,31 +35,31 @@ a:hover{color:oklch(0.32 0.14 280)}
   <a href="https://discord.com/oauth2/authorize?client_id=1374255006433415248&amp;scope=bot+applications.commands&amp;permissions=562949953539312" style="padding:10px 20px;border-radius:100px;font:600 13px Inter,sans-serif;color:var(--accent);background:oklch(0.93 0.006 260);box-shadow:var(--btn-shadow-sm)">Add to Discord</a>
 </nav>
 
-<section data-screen-label="Hero" style="position:relative;padding:110px 120px 100px;text-align:center">
+<section data-screen-label="Hero" style="position:relative;padding:clamp(60px,10vw,110px) clamp(20px,6vw,120px) clamp(50px,8vw,100px);text-align:center">
   <div style="max-width:840px;margin:0 auto">
     <div style="display:inline-block;padding:8px 18px;border-radius:100px;background:oklch(0.93 0.006 260);box-shadow:var(--inset-shadow);font:600 12px Inter,sans-serif;letter-spacing:.03em;color:oklch(0.42 0.1 280);margin-bottom:26px">A DISCORD BOT THAT RENAMES YOUR SERVER</div>
-    <h1 style="margin:0;font:700 56px/1.1 'Space Grotesk',sans-serif;color:oklch(0.24 0.01 260)">Your server, renamed daily by the best thing someone said.</h1>
-    <p style="margin:24px auto 36px;font:400 18px/1.6 Inter,sans-serif;color:oklch(0.5 0.01 260);max-width:600px">Members write quotes and drop images. Every day Moniker picks one, renames the whole server after it, and posts a card crediting who wrote it. It runs itself.</p>
-    <div style="display:flex;gap:14px;justify-content:center">
+    <h1 style="margin:0;font:700 clamp(32px,5.5vw,56px)/1.15 'Space Grotesk',sans-serif;color:oklch(0.24 0.01 260)">Your server, renamed daily by the best thing someone said.</h1>
+    <p style="margin:24px auto 36px;font:400 clamp(15px,1.9vw,18px)/1.6 Inter,sans-serif;color:oklch(0.5 0.01 260);max-width:600px">Members write quotes and drop images. Every day Moniker picks one, renames the whole server after it, and posts a card crediting who wrote it. It runs itself.</p>
+    <div style="display:flex;gap:14px;justify-content:center;flex-wrap:wrap">
       <a href="https://discord.com/oauth2/authorize?client_id=1374255006433415248&amp;scope=bot+applications.commands&amp;permissions=562949953539312" style="padding:15px 30px;border-radius:100px;font:600 15px Inter,sans-serif;color:var(--accent);background:oklch(0.93 0.006 260);box-shadow:var(--btn-shadow)">Add to Discord</a>
       <a href="https://github.com/LoopRook/Multivitamin" style="padding:15px 30px;border-radius:100px;font:600 15px Inter,sans-serif;color:oklch(0.4 0.01 260);background:oklch(0.93 0.006 260);box-shadow:var(--btn-shadow)">View on GitHub</a>
     </div>
   </div>
   <div style="display:flex;justify-content:center;margin-top:60px">
-    <div style="width:640px;height:280px;border-radius:var(--radius-card);background:oklch(0.93 0.006 260);border:var(--card-border);box-shadow:var(--card-shadow-xl);overflow:hidden">
+    <div style="width:100%;max-width:640px;aspect-ratio:640/280;border-radius:var(--radius-card);background:oklch(0.93 0.006 260);border:var(--card-border);box-shadow:var(--card-shadow-xl);overflow:hidden">
       <img src="https://github.com/LoopRook/Multivitamin/raw/main/assets/moniker-banner-teal.png" alt="Moniker banner" style="width:100%;height:100%;object-fit:cover;display:block">
     </div>
   </div>
 </section>
 
-<section id="features" data-screen-label="How it works" style="position:relative;padding:100px 80px">
+<section id="features" data-screen-label="How it works" style="position:relative;padding:clamp(60px,9vw,100px) clamp(20px,6vw,80px)">
   <div style="max-width:1120px;margin:0 auto">
     <div style="text-align:center;margin-bottom:64px">
       <div style="display:inline-block;padding:8px 18px;border-radius:100px;background:oklch(0.93 0.006 260);box-shadow:var(--inset-shadow);font:600 12px Inter,sans-serif;letter-spacing:.03em;color:oklch(0.42 0.1 280);margin-bottom:20px">HOW IT WORKS</div>
-      <h2 style="margin:0 0 14px;font:700 38px/1.15 'Space Grotesk',sans-serif;color:oklch(0.24 0.01 260)">The loop</h2>
+      <h2 style="margin:0 0 14px;font:700 clamp(26px,4vw,38px)/1.15 'Space Grotesk',sans-serif;color:oklch(0.24 0.01 260)">The loop</h2>
       <p style="margin:0 auto;font:400 17px/1.6 Inter,sans-serif;color:oklch(0.5 0.01 260);max-width:640px">Four steps repeat forever with zero upkeep.</p>
     </div>
-    <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:30px">
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(400px,1fr));gap:30px">
       <div style="background:oklch(0.93 0.006 260);border-radius:var(--radius-card);border:var(--card-border);box-shadow:var(--card-shadow);padding:32px">
         <div style="width:40px;height:40px;border-radius:12px;background:var(--pip1);display:flex;align-items:center;justify-content:center;font:700 16px 'Space Grotesk',sans-serif;color:#fff;margin-bottom:18px;box-shadow:0 6px 14px color-mix(in oklch, var(--pip1) 45%, transparent)">1</div>
         <h3 style="margin:0 0 10px;font:600 20px 'Space Grotesk',sans-serif;color:oklch(0.24 0.01 260)">Members drop quotes</h3>
@@ -70,12 +70,12 @@ a:hover{color:oklch(0.32 0.14 280)}
         <div style="width:40px;height:40px;border-radius:12px;background:var(--pip2);display:flex;align-items:center;justify-content:center;font:700 16px 'Space Grotesk',sans-serif;color:#fff;margin-bottom:18px;box-shadow:0 6px 14px color-mix(in oklch, var(--pip2) 45%, transparent)">2</div>
         <h3 style="margin:0 0 10px;font:600 20px 'Space Grotesk',sans-serif;color:oklch(0.24 0.01 260)">Members drop images</h3>
         <p style="margin:0;font:400 15.5px/1.6 Inter,sans-serif;color:oklch(0.5 0.01 260)">In an icon channel: any image attachment works as a candidate icon for the server.</p>
-      </div>
-      <div style="background:oklch(0.93 0.006 260);border-radius:var(--radius-card);border:var(--card-border);box-shadow:var(--card-shadow);padding:32px">
+      </div><div style="background:oklch(0.93 0.006 260);border-radius:var(--radius-card);border:var(--card-border);box-shadow:var(--card-shadow);padding:32px">
         <div style="width:40px;height:40px;border-radius:12px;background:var(--pip3);display:flex;align-items:center;justify-content:center;font:700 16px 'Space Grotesk',sans-serif;color:#fff;margin-bottom:18px;box-shadow:0 6px 14px color-mix(in oklch, var(--pip3) 45%, transparent)">3</div>
         <h3 style="margin:0 0 10px;font:600 20px 'Space Grotesk',sans-serif;color:oklch(0.24 0.01 260)">Moniker picks, fairly</h3>
         <p style="margin:0;font:400 15.5px/1.6 Inter,sans-serif;color:oklch(0.5 0.01 260)">Every day (or on whatever schedule you set), one quote and one icon are picked, one candidate per person, weighted so whoever got picked recently is less likely to come up again. Then it renames the server, sets the icon, and posts a card with the quote and credits.</p>
       </div>
+
       <div style="background:oklch(0.93 0.006 260);border-radius:var(--radius-card);border:var(--card-border);box-shadow:var(--card-shadow);padding:32px">
         <div style="width:40px;height:40px;border-radius:12px;background:var(--pip4);display:flex;align-items:center;justify-content:center;font:700 16px 'Space Grotesk',sans-serif;color:#fff;margin-bottom:18px;box-shadow:0 6px 14px color-mix(in oklch, var(--pip4) 45%, transparent)">4</div>
         <h3 style="margin:0 0 10px;font:600 20px 'Space Grotesk',sans-serif;color:oklch(0.24 0.01 260)">Members react</h3>
@@ -88,15 +88,15 @@ a:hover{color:oklch(0.32 0.14 280)}
   </div>
 </section>
 
-<section data-screen-label="Daily renames" style="position:relative;padding:100px 80px">
-  <div style="max-width:1120px;margin:0 auto;display:flex;align-items:center;gap:64px">
-    <div style="flex:1">
+<section data-screen-label="Daily renames" style="position:relative;padding:clamp(60px,9vw,100px) clamp(20px,6vw,80px)">
+  <div style="max-width:1120px;margin:0 auto;display:flex;align-items:center;flex-wrap:wrap;gap:clamp(32px,5vw,64px)">
+    <div style="flex:1 1 380px;min-width:280px">
       <div style="display:inline-block;padding:8px 18px;border-radius:100px;background:oklch(0.93 0.006 260);box-shadow:var(--inset-shadow);font:600 12px Inter,sans-serif;letter-spacing:.03em;color:oklch(0.42 0.1 300);margin-bottom:20px">THE CORE LOOP</div>
-      <h2 style="margin:0 0 16px;font:700 34px/1.2 'Space Grotesk',sans-serif;color:oklch(0.24 0.01 260)">Rename whenever, not just on schedule</h2>
+      <h2 style="margin:0 0 16px;font:700 clamp(24px,3.5vw,34px)/1.2 'Space Grotesk',sans-serif;color:oklch(0.24 0.01 260)">Rename whenever, not just on schedule</h2>
       <p style="margin:0 0 20px;font:400 17px/1.65 Inter,sans-serif;color:oklch(0.5 0.01 260)">Anyone can trigger a rename with <span style="font:600 14px ui-monospace,monospace;background:oklch(0.93 0.006 260);box-shadow:var(--inset-shadow-sm);padding:3px 9px;border-radius:7px;color:oklch(0.4 0.1 280)">/rename</span> (admins can restrict it). Renames are rate-limited by Discord to about two per ten minutes, so Moniker tells you how long to wait instead of hanging.</p>
       <p style="margin:0;font:400 17px/1.65 Inter,sans-serif;color:oklch(0.5 0.01 260)">Members can check <span style="font:600 14px ui-monospace,monospace;background:oklch(0.93 0.006 260);box-shadow:var(--inset-shadow-sm);padding:3px 9px;border-radius:7px;color:oklch(0.4 0.1 280)">/mystats</span> for their submission counts and last pick, or <span style="font:600 14px ui-monospace,monospace;background:oklch(0.93 0.006 260);box-shadow:var(--inset-shadow-sm);padding:3px 9px;border-radius:7px;color:oklch(0.4 0.1 280)">/contributors</span> for the quote or icon leaderboard.</p>
     </div>
-    <div style="flex:1;display:flex;justify-content:center">
+    <div style="flex:1 1 380px;min-width:280px;display:flex;justify-content:center">
       <div style="width:100%;max-width:400px;border-radius:var(--radius-card);background:oklch(0.93 0.006 260);border:var(--card-border);box-shadow:var(--card-shadow-lg);overflow:hidden">
         <img src="https://github.com/LoopRook/Multivitamin/raw/main/assets/screenshots/rename-limit.png" alt="Rename cooldown message" style="width:100%;height:auto;display:block">
       </div>
@@ -104,21 +104,21 @@ a:hover{color:oklch(0.32 0.14 280)}
   </div>
 </section>
 
-<section data-screen-label="Brackets" style="position:relative;padding:100px 80px">
+<section data-screen-label="Brackets" style="position:relative;padding:clamp(60px,9vw,100px) clamp(20px,6vw,80px)">
   <div style="max-width:1120px;margin:0 auto">
     <div style="text-align:center;margin-bottom:56px">
       <div style="display:inline-block;padding:8px 18px;border-radius:100px;background:oklch(0.93 0.006 260);box-shadow:var(--inset-shadow);font:600 12px Inter,sans-serif;letter-spacing:.03em;color:oklch(0.42 0.1 330);margin-bottom:20px">OPTIONAL</div>
-      <h2 style="margin:0 0 14px;font:700 38px/1.15 'Space Grotesk',sans-serif;color:oklch(0.24 0.01 260)">Brackets: the championship</h2>
+      <h2 style="margin:0 0 14px;font:700 clamp(26px,4vw,38px)/1.15 'Space Grotesk',sans-serif;color:oklch(0.24 0.01 260)">Brackets: the championship</h2>
       <p style="margin:0 auto;font:400 17px/1.6 Inter,sans-serif;color:oklch(0.5 0.01 260);max-width:680px">The daily renames are enough on their own. But reactions accumulate automatically, so whenever you're ready, run <span style="font:600 14px ui-monospace,monospace;background:oklch(0.93 0.006 260);box-shadow:var(--inset-shadow-sm);padding:3px 9px;border-radius:7px;color:oklch(0.4 0.1 330)">/bracket start</span>.</p>
     </div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:30px;margin-bottom:30px">
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:30px;margin-bottom:30px">
       <div style="display:flex;flex-direction:column;gap:20px">
         <div style="background:oklch(0.93 0.006 260);border-radius:var(--radius-card);border:var(--card-border);box-shadow:var(--card-shadow);padding:32px;box-sizing:border-box">
           <h3 style="margin:0 0 14px;font:600 19px 'Space Grotesk',sans-serif;color:oklch(0.24 0.01 260)">One panel, everything per-run</h3>
           <p style="margin:0 0 16px;font:400 15.5px/1.6 Inter,sans-serif;color:oklch(0.5 0.01 260)">Where it posts, scope (this year, last year, or a season), size (4 to 32), voting window (6 hours to a week), pacing, and source, with the estimated total length shown before you launch.</p>
           <p style="margin:0;font:400 15.5px/1.6 Inter,sans-serif;color:oklch(0.5 0.01 260)"><strong style="font-weight:600;color:oklch(0.35 0.01 260)">Round pacing:</strong> each round's matchups post and vote in parallel; the server name rotates through the previous round's winners. <strong style="font-weight:600;color:oklch(0.35 0.01 260)">Daily pacing:</strong> one matchup at a time, and each winner immediately becomes the server name.</p>
         </div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:16px">
           <div style="background:oklch(0.93 0.006 260);border-radius:var(--radius-card-sm);border:var(--card-border);box-shadow:var(--card-shadow-sm);padding:18px 20px;box-sizing:border-box">
             <div style="font:700 22px 'Space Grotesk',sans-serif;color:var(--pip2)">~1 month</div>
             <div style="font:400 13px/1.4 Inter,sans-serif;color:oklch(0.5 0.01 260);margin-top:4px">32 names, daily pacing at 24h a matchup</div>
@@ -183,7 +183,7 @@ a:hover{color:oklch(0.32 0.14 280)}
         <img src="https://github.com/LoopRook/Multivitamin/raw/main/assets/screenshots/bracket-matchup.png" alt="A bracket matchup" style="width:100%;height:auto;display:block">
       </div>
     </div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:30px;align-items:start">
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:30px;align-items:start">
       <div style="background:oklch(0.93 0.006 260);border-radius:var(--radius-card);border:var(--card-border);box-shadow:var(--card-shadow);padding:32px;box-sizing:border-box">
         <h3 style="margin:0 0 14px;font:600 19px 'Space Grotesk',sans-serif;color:oklch(0.24 0.01 260)">Matchups &amp; seasons</h3>
         <p style="margin:0 0 16px;font:400 15.5px/1.6 Inter,sans-serif;color:oklch(0.5 0.01 260)">Matchups are native Discord polls with both cards displayed. Ties get a dramatic coin flip. The champion gets an announcement with their winning card, the server name, and a place in <span style="font:600 13px ui-monospace,monospace;background:oklch(0.93 0.006 260);box-shadow:var(--inset-shadow-sm);padding:2px 8px;border-radius:6px;color:oklch(0.4 0.1 330)">/bracket history</span>.</p>
@@ -196,10 +196,10 @@ a:hover{color:oklch(0.32 0.14 280)}
   </div>
 </section>
 
-<section data-screen-label="Best-of channel" style="position:relative;padding:100px 80px">
+<section data-screen-label="Best-of channel" style="position:relative;padding:clamp(60px,9vw,100px) clamp(20px,6vw,80px)">
   <div style="max-width:900px;margin:0 auto;text-align:center">
     <div style="display:inline-block;padding:8px 18px;border-radius:100px;background:oklch(0.93 0.006 260);box-shadow:var(--inset-shadow);font:600 12px Inter,sans-serif;letter-spacing:.03em;color:oklch(0.42 0.1 350);margin-bottom:20px">OPTIONAL</div>
-    <h2 style="margin:0 0 32px;font:700 34px/1.2 'Space Grotesk',sans-serif;color:oklch(0.24 0.01 260)">The best-of channel</h2>
+    <h2 style="margin:0 0 32px;font:700 clamp(24px,3.5vw,34px)/1.2 'Space Grotesk',sans-serif;color:oklch(0.24 0.01 260)">The best-of channel</h2>
     <div style="text-align:left;background:oklch(0.93 0.006 260);border-radius:var(--radius-card);border:var(--card-border);box-shadow:var(--card-shadow);padding:36px">
       <p style="margin:0 0 16px;font:400 16.5px/1.65 Inter,sans-serif;color:oklch(0.5 0.01 260)">Instead of seeding a bracket from every card's reactions, set a best-of channel in <span style="font:600 13px ui-monospace,monospace;background:oklch(0.93 0.006 260);box-shadow:var(--inset-shadow-sm);padding:2px 8px;border-radius:6px;color:oklch(0.4 0.1 350)">/setup</span>. Members forward their favorite rename cards into it using Discord's native Forward, and the bracket seeds from reactions on those forwards.</p>
       <p style="margin:0 0 16px;font:400 16.5px/1.65 Inter,sans-serif;color:oklch(0.5 0.01 260)">Moniker confirms each nomination with ℹ️ (or 🔁 for a duplicate) and pins instructions in the channel. Screenshots don't count, only real forwards, so nominations stay traceable to the original card.</p>
@@ -208,16 +208,16 @@ a:hover{color:oklch(0.32 0.14 280)}
   </div>
 </section>
 
-<section data-screen-label="Custom features" style="position:relative;padding:100px 80px">
-  <div style="max-width:1120px;margin:0 auto;display:flex;align-items:center;gap:64px">
-    <div style="flex:1;display:flex;justify-content:center;order:2">
+<section data-screen-label="Custom features" style="position:relative;padding:clamp(60px,9vw,100px) clamp(20px,6vw,80px)">
+  <div style="max-width:1120px;margin:0 auto;display:flex;align-items:center;flex-wrap:wrap;gap:clamp(32px,5vw,64px)">
+    <div style="flex:1 1 380px;min-width:280px;display:flex;justify-content:center;order:2">
       <div style="width:100%;max-width:400px;border-radius:var(--radius-card);background:oklch(0.93 0.006 260);border:var(--card-border);box-shadow:var(--card-shadow-lg);overflow:hidden">
         <img src="https://github.com/LoopRook/Multivitamin/raw/main/assets/screenshots/feature-setup.png" alt="The /feature setup panel" style="width:100%;height:auto;display:block">
       </div>
     </div>
-    <div style="flex:1;order:1">
+    <div style="flex:1 1 380px;min-width:280px;order:1">
       <div style="display:inline-block;padding:8px 18px;border-radius:100px;background:oklch(0.93 0.006 260);box-shadow:var(--inset-shadow);font:600 12px Inter,sans-serif;letter-spacing:.03em;color:oklch(0.42 0.1 20);margin-bottom:20px">OPTIONAL</div>
-      <h2 style="margin:0 0 16px;font:700 34px/1.2 'Space Grotesk',sans-serif;color:oklch(0.24 0.01 260)">Your own "X of the day"</h2>
+      <h2 style="margin:0 0 16px;font:700 clamp(24px,3.5vw,34px)/1.2 'Space Grotesk',sans-serif;color:oklch(0.24 0.01 260)">Your own "X of the day"</h2>
       <p style="margin:0 0 20px;font:400 17px/1.65 Inter,sans-serif;color:oklch(0.5 0.01 260)">Make the bot post anything on a schedule, sourced from a channel. Run <span style="font:600 14px ui-monospace,monospace;background:oklch(0.93 0.006 260);box-shadow:var(--inset-shadow-sm);padding:3px 9px;border-radius:7px;color:oklch(0.4 0.1 20)">/feature setup</span>, pick a source channel, a destination, and a type: media, link, music (YouTube, Spotify, SoundCloud), or text, then name it and give it a command slug.</p>
       <p style="margin:0 0 20px;font:400 17px/1.65 Inter,sans-serif;color:oklch(0.5 0.01 260)">A "Meme of the Day" sourced from #memes gets its own <span style="font:600 14px ui-monospace,monospace;background:oklch(0.93 0.006 260);box-shadow:var(--inset-shadow-sm);padding:3px 9px;border-radius:7px;color:oklch(0.4 0.1 20)">/meme</span> command anyone can run on demand, or just admins, or a role, plus a scheduled daily post. Each feature has its own cadence: every 3 days, Fridays only, whatever fits.</p>
       <p style="margin:0;font:400 15px ui-monospace,monospace;color:oklch(0.55 0.01 260)">/feature list, edit, schedule, toggle, remove, access</p>
@@ -225,14 +225,14 @@ a:hover{color:oklch(0.32 0.14 280)}
   </div>
 </section>
 
-<section id="setup" data-screen-label="Setup" style="position:relative;padding:100px 80px">
+<section id="setup" data-screen-label="Setup" style="position:relative;padding:clamp(60px,9vw,100px) clamp(20px,6vw,80px)">
   <div style="max-width:1120px;margin:0 auto">
     <div style="text-align:center;margin-bottom:56px">
       <div style="display:inline-block;padding:8px 18px;border-radius:100px;background:oklch(0.93 0.006 260);box-shadow:var(--inset-shadow);font:600 12px Inter,sans-serif;letter-spacing:.03em;color:oklch(0.42 0.1 45);margin-bottom:20px">GETTING STARTED</div>
-      <h2 style="margin:0 0 14px;font:700 38px/1.15 'Space Grotesk',sans-serif;color:oklch(0.24 0.01 260)">Set it up in two minutes</h2>
+      <h2 style="margin:0 0 14px;font:700 clamp(26px,4vw,38px)/1.15 'Space Grotesk',sans-serif;color:oklch(0.24 0.01 260)">Set it up in two minutes</h2>
       <p style="margin:0 auto;font:400 17px/1.6 Inter,sans-serif;color:oklch(0.5 0.01 260);max-width:640px">Run <span style="font:600 14px ui-monospace,monospace;background:oklch(0.93 0.006 260);box-shadow:var(--inset-shadow-sm);padding:3px 9px;border-radius:7px;color:oklch(0.4 0.1 45)">/setup</span>: a stepped wizard in one ephemeral message.</p>
     </div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:30px;align-items:stretch">
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:30px;align-items:stretch">
       <div style="display:flex;flex-direction:column;gap:22px">
         <div style="background:oklch(0.93 0.006 260);border-radius:var(--radius-card-sm);border:var(--card-border);box-shadow:var(--card-shadow-sm);padding:24px 26px">
           <span style="font:700 13px 'Space Grotesk',sans-serif;color:oklch(0.5 0.14 45)">STEP 1: CHANNELS</span>
@@ -265,34 +265,34 @@ a:hover{color:oklch(0.32 0.14 280)}
   </div>
 </section>
 
-<section id="commands" data-screen-label="Commands" style="position:relative;padding:100px 80px">
+<section id="commands" data-screen-label="Commands" style="position:relative;padding:clamp(60px,9vw,100px) clamp(20px,6vw,80px)">
   <div style="max-width:1120px;margin:0 auto">
     <div style="text-align:center;margin-bottom:56px">
       <div style="display:inline-block;padding:8px 18px;border-radius:100px;background:oklch(0.93 0.006 260);box-shadow:var(--inset-shadow);font:600 12px Inter,sans-serif;letter-spacing:.03em;color:oklch(0.42 0.1 70);margin-bottom:20px">REFERENCE</div>
-      <h2 style="margin:0 0 14px;font:700 38px/1.15 'Space Grotesk',sans-serif;color:oklch(0.24 0.01 260)">Commands</h2>
+      <h2 style="margin:0 0 14px;font:700 clamp(26px,4vw,38px)/1.15 'Space Grotesk',sans-serif;color:oklch(0.24 0.01 260)">Commands</h2>
       <p style="margin:0 auto;font:400 17px/1.6 Inter,sans-serif;color:oklch(0.5 0.01 260);max-width:680px">All slash commands. Fully multi-server, no Administrator permission required, per-server data. /help shows the full reference; admin sections only appear for admins.</p>
     </div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:30px">
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:30px">
       <div style="background:oklch(0.93 0.006 260);border-radius:var(--radius-card);border:var(--card-border);box-shadow:var(--card-shadow);padding:32px">
         <h3 style="margin:0 0 20px;font:600 19px 'Space Grotesk',sans-serif;color:oklch(0.24 0.01 260)">Everyday (members)</h3>
         <div style="display:flex;flex-direction:column">
-          <div style="display:flex;justify-content:space-between;gap:16px;padding:14px 0;border-bottom:1px solid oklch(0.85 0.006 260)"><span style="font:600 14px ui-monospace,monospace;flex:none;color:oklch(0.3 0.01 260)">/mystats</span><span style="font:400 14.5px/1.5 Inter,sans-serif;color:oklch(0.5 0.01 260);text-align:right">Your submission counts and when you were last picked</span></div>
-          <div style="display:flex;justify-content:space-between;gap:16px;padding:14px 0;border-bottom:1px solid oklch(0.85 0.006 260)"><span style="font:600 14px ui-monospace,monospace;flex:none;color:oklch(0.3 0.01 260)">/contributors</span><span style="font:400 14.5px/1.5 Inter,sans-serif;color:oklch(0.5 0.01 260);text-align:right">Quote or icon submission leaderboard</span></div>
-          <div style="display:flex;justify-content:space-between;gap:16px;padding:14px 0"><span style="font:600 14px ui-monospace,monospace;flex:none;color:oklch(0.3 0.01 260)">/rename</span><span style="font:400 14.5px/1.5 Inter,sans-serif;color:oklch(0.5 0.01 260);text-align:right">Trigger a rename now (admins can restrict this)</span></div>
+          <div style="display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;padding:14px 0;border-bottom:1px solid oklch(0.85 0.006 260)"><span style="font:600 14px ui-monospace,monospace;flex:none;color:oklch(0.3 0.01 260)">/mystats</span><span style="font:400 14.5px/1.5 Inter,sans-serif;color:oklch(0.5 0.01 260);text-align:right">Your submission counts and when you were last picked</span></div>
+          <div style="display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;padding:14px 0;border-bottom:1px solid oklch(0.85 0.006 260)"><span style="font:600 14px ui-monospace,monospace;flex:none;color:oklch(0.3 0.01 260)">/contributors</span><span style="font:400 14.5px/1.5 Inter,sans-serif;color:oklch(0.5 0.01 260);text-align:right">Quote or icon submission leaderboard</span></div>
+          <div style="display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;padding:14px 0"><span style="font:600 14px ui-monospace,monospace;flex:none;color:oklch(0.3 0.01 260)">/rename</span><span style="font:400 14.5px/1.5 Inter,sans-serif;color:oklch(0.5 0.01 260);text-align:right">Trigger a rename now (admins can restrict this)</span></div>
         </div>
       </div>
       <div style="background:oklch(0.93 0.006 260);border-radius:var(--radius-card);border:var(--card-border);box-shadow:var(--card-shadow);padding:32px">
         <h3 style="margin:0 0 20px;font:600 19px 'Space Grotesk',sans-serif;color:oklch(0.24 0.01 260)">Configuration</h3>
         <div style="display:flex;flex-direction:column">
-          <div style="display:flex;justify-content:space-between;gap:16px;padding:11px 0;border-bottom:1px solid oklch(0.85 0.006 260)"><span style="font:600 13px ui-monospace,monospace;flex:none;color:oklch(0.3 0.01 260)">/setup</span><span style="font:400 13.5px/1.5 Inter,sans-serif;color:oklch(0.5 0.01 260);text-align:right">The wizard: channels, timezone, schedule</span></div>
-          <div style="display:flex;justify-content:space-between;gap:16px;padding:11px 0;border-bottom:1px solid oklch(0.85 0.006 260)"><span style="font:600 13px ui-monospace,monospace;flex:none;color:oklch(0.3 0.01 260)">/config schedule</span><span style="font:400 13.5px/1.5 Inter,sans-serif;color:oklch(0.5 0.01 260);text-align:right">Rename cadence and time</span></div>
-          <div style="display:flex;justify-content:space-between;gap:16px;padding:11px 0;border-bottom:1px solid oklch(0.85 0.006 260)"><span style="font:600 13px ui-monospace,monospace;flex:none;color:oklch(0.3 0.01 260)">/config credits</span><span style="font:400 13.5px/1.5 Inter,sans-serif;color:oklch(0.5 0.01 260);text-align:right">Nickname vs @username, champion pings</span></div>
-          <div style="display:flex;justify-content:space-between;gap:16px;padding:11px 0;border-bottom:1px solid oklch(0.85 0.006 260)"><span style="font:600 13px ui-monospace,monospace;flex:none;color:oklch(0.3 0.01 260)">/config feature</span><span style="font:400 13.5px/1.5 Inter,sans-serif;color:oklch(0.5 0.01 260);text-align:right">Toggle quote, cooldown, openrename</span></div>
-          <div style="display:flex;justify-content:space-between;gap:16px;padding:11px 0;border-bottom:1px solid oklch(0.85 0.006 260)"><span style="font:600 13px ui-monospace,monospace;flex:none;color:oklch(0.3 0.01 260)">/config timezone</span><span style="font:400 13.5px/1.5 Inter,sans-serif;color:oklch(0.5 0.01 260);text-align:right">Any IANA zone</span></div>
-          <div style="display:flex;justify-content:space-between;gap:16px;padding:11px 0;border-bottom:1px solid oklch(0.85 0.006 260)"><span style="font:600 13px ui-monospace,monospace;flex:none;color:oklch(0.3 0.01 260)">/season</span><span style="font:400 13.5px/1.5 Inter,sans-serif;color:oklch(0.5 0.01 260);text-align:right">Manage named bracket windows</span></div>
-          <div style="display:flex;justify-content:space-between;gap:16px;padding:11px 0;border-bottom:1px solid oklch(0.85 0.006 260)"><span style="font:600 13px ui-monospace,monospace;flex:none;color:oklch(0.3 0.01 260)">/admin add/remove/list</span><span style="font:400 13.5px/1.5 Inter,sans-serif;color:oklch(0.5 0.01 260);text-align:right">Grant bot-admin to non-managers</span></div>
-          <div style="display:flex;justify-content:space-between;gap:16px;padding:11px 0;border-bottom:1px solid oklch(0.85 0.006 260)"><span style="font:600 13px ui-monospace,monospace;flex:none;color:oklch(0.3 0.01 260)">/admin reset</span><span style="font:400 13.5px/1.5 Inter,sans-serif;color:oklch(0.5 0.01 260);text-align:right">Wipe this server's data (two-step confirm)</span></div>
-          <div style="display:flex;justify-content:space-between;gap:16px;padding:11px 0"><span style="font:600 13px ui-monospace,monospace;flex:none;color:oklch(0.3 0.01 260)">/showconfig</span><span style="font:400 13.5px/1.5 Inter,sans-serif;color:oklch(0.5 0.01 260);text-align:right">Everything, plus a health check</span></div>
+          <div style="display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;padding:11px 0;border-bottom:1px solid oklch(0.85 0.006 260)"><span style="font:600 13px ui-monospace,monospace;flex:none;color:oklch(0.3 0.01 260)">/setup</span><span style="font:400 13.5px/1.5 Inter,sans-serif;color:oklch(0.5 0.01 260);text-align:right">The wizard: channels, timezone, schedule</span></div>
+          <div style="display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;padding:11px 0;border-bottom:1px solid oklch(0.85 0.006 260)"><span style="font:600 13px ui-monospace,monospace;flex:none;color:oklch(0.3 0.01 260)">/config schedule</span><span style="font:400 13.5px/1.5 Inter,sans-serif;color:oklch(0.5 0.01 260);text-align:right">Rename cadence and time</span></div>
+          <div style="display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;padding:11px 0;border-bottom:1px solid oklch(0.85 0.006 260)"><span style="font:600 13px ui-monospace,monospace;flex:none;color:oklch(0.3 0.01 260)">/config credits</span><span style="font:400 13.5px/1.5 Inter,sans-serif;color:oklch(0.5 0.01 260);text-align:right">Nickname vs @username, champion pings</span></div>
+          <div style="display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;padding:11px 0;border-bottom:1px solid oklch(0.85 0.006 260)"><span style="font:600 13px ui-monospace,monospace;flex:none;color:oklch(0.3 0.01 260)">/config feature</span><span style="font:400 13.5px/1.5 Inter,sans-serif;color:oklch(0.5 0.01 260);text-align:right">Toggle quote, cooldown, openrename</span></div>
+          <div style="display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;padding:11px 0;border-bottom:1px solid oklch(0.85 0.006 260)"><span style="font:600 13px ui-monospace,monospace;flex:none;color:oklch(0.3 0.01 260)">/config timezone</span><span style="font:400 13.5px/1.5 Inter,sans-serif;color:oklch(0.5 0.01 260);text-align:right">Any IANA zone</span></div>
+          <div style="display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;padding:11px 0;border-bottom:1px solid oklch(0.85 0.006 260)"><span style="font:600 13px ui-monospace,monospace;flex:none;color:oklch(0.3 0.01 260)">/season</span><span style="font:400 13.5px/1.5 Inter,sans-serif;color:oklch(0.5 0.01 260);text-align:right">Manage named bracket windows</span></div>
+          <div style="display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;padding:11px 0;border-bottom:1px solid oklch(0.85 0.006 260)"><span style="font:600 13px ui-monospace,monospace;flex:none;color:oklch(0.3 0.01 260)">/admin add/remove/list</span><span style="font:400 13.5px/1.5 Inter,sans-serif;color:oklch(0.5 0.01 260);text-align:right">Grant bot-admin to non-managers</span></div>
+          <div style="display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;padding:11px 0;border-bottom:1px solid oklch(0.85 0.006 260)"><span style="font:600 13px ui-monospace,monospace;flex:none;color:oklch(0.3 0.01 260)">/admin reset</span><span style="font:400 13.5px/1.5 Inter,sans-serif;color:oklch(0.5 0.01 260);text-align:right">Wipe this server's data (two-step confirm)</span></div>
+          <div style="display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;padding:11px 0"><span style="font:600 13px ui-monospace,monospace;flex:none;color:oklch(0.3 0.01 260)">/showconfig</span><span style="font:400 13.5px/1.5 Inter,sans-serif;color:oklch(0.5 0.01 260);text-align:right">Everything, plus a health check</span></div>
         </div>
       </div>
     </div>
@@ -300,14 +300,14 @@ a:hover{color:oklch(0.32 0.14 280)}
   </div>
 </section>
 
-<section id="self-host" data-screen-label="Self-hosting" style="position:relative;padding:100px 80px">
-  <div style="max-width:1120px;margin:0 auto;display:grid;grid-template-columns:1fr 1fr;gap:56px;align-items:start">
+<section id="self-host" data-screen-label="Self-hosting" style="position:relative;padding:clamp(60px,9vw,100px) clamp(20px,6vw,80px)">
+  <div style="max-width:1120px;margin:0 auto;display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:56px;align-items:start">
     <div>
       <div style="display:inline-block;padding:8px 18px;border-radius:100px;background:oklch(0.93 0.006 260);box-shadow:var(--inset-shadow);font:600 12px Inter,sans-serif;letter-spacing:.03em;color:oklch(0.42 0.1 190);margin-bottom:20px">OPEN SOURCE</div>
-      <h2 style="margin:0 0 16px;font:700 34px/1.2 'Space Grotesk',sans-serif;color:oklch(0.24 0.01 260)">Self-hosting</h2>
+      <h2 style="margin:0 0 16px;font:700 clamp(24px,3.5vw,34px)/1.2 'Space Grotesk',sans-serif;color:oklch(0.24 0.01 260)">Self-hosting</h2>
       <p style="margin:0 0 20px;font:400 17px/1.65 Inter,sans-serif;color:oklch(0.5 0.01 260)">Python 3.12, discord.py 2.7.1, SQLite. Runs as a single worker process: Railway, a VPS, anything.</p>
       <div style="background:oklch(0.24 0.02 250);border-radius:var(--radius-card-sm);padding:22px 24px;border:var(--card-border);box-shadow:var(--card-shadow-sm)">
-        <p style="margin:0;font:400 14px/1.7 ui-monospace,monospace;color:oklch(0.9 0.02 250)">pip install -r requirements.txt<br>DISCORD_TOKEN=your_token DB_FILE=/path/to/server_config.db python main.py</p>
+        <p style="margin:0;font:400 13.5px/1.7 ui-monospace,monospace;color:oklch(0.9 0.02 250);overflow-wrap:anywhere">pip install -r requirements.txt<br>DISCORD_TOKEN=your_token DB_FILE=/path/to/server_config.db python main.py</p>
       </div>
       <p style="margin:20px 0 0;font:400 15.5px/1.65 Inter,sans-serif;color:oklch(0.5 0.01 260)">In the Developer Portal, enable both privileged intents, Message Content and Server Members, the bot won't log in without them. Toggle Public Bot on to let others invite it.</p>
     </div>
@@ -326,11 +326,11 @@ a:hover{color:oklch(0.32 0.14 280)}
   </div>
 </section>
 
-<section data-screen-label="Footer" style="position:relative;padding:80px 80px 60px">
+<section data-screen-label="Footer" style="position:relative;padding:clamp(50px,8vw,80px) clamp(20px,6vw,80px) clamp(36px,6vw,60px)">
   <div style="max-width:1120px;margin:0 auto;background:oklch(0.93 0.006 260);border-radius:var(--radius-card);box-shadow:var(--footer-inset);padding:48px 56px">
     <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:28px;padding-bottom:40px;border-bottom:1px solid oklch(0.85 0.006 260)">
       <div>
-        <h2 style="margin:0 0 10px;font:700 28px 'Space Grotesk',sans-serif;color:oklch(0.24 0.01 260)">Add Moniker to your server</h2>
+        <h2 style="margin:0 0 10px;font:700 clamp(22px,3vw,28px) 'Space Grotesk',sans-serif;color:oklch(0.24 0.01 260)">Add Moniker to your server</h2>
         <p style="margin:0;font:400 16px/1.6 Inter,sans-serif;color:oklch(0.5 0.01 260)">Two minutes to set up. No Administrator permission required.</p>
       </div>
       <a href="https://discord.com/oauth2/authorize?client_id=1374255006433415248&amp;scope=bot+applications.commands&amp;permissions=562949953539312" style="padding:15px 30px;border-radius:100px;font:600 15px Inter,sans-serif;color:var(--accent);background:oklch(0.93 0.006 260);box-shadow:var(--btn-shadow);white-space:nowrap">Add to Discord</a>
