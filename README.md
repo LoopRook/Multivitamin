@@ -145,6 +145,7 @@ Each feature has its own cadence: set it with `/feature schedule meme` to run ev
 | `/config credits` | How contributors are named: server nickname vs @username, and whether the champion gets pinged |
 | `/config feature <quote\|cooldown\|openrename> <on/off>` | Feature toggles |
 | `/config timezone <tz>` | Any IANA zone |
+| `/config bestof [repeat]` | Emoji the bot reacts with when a card was already nominated in the best-of channel (default 🔁, up to 3, custom server emoji work too) |
 | `/season` | Manage named bracket windows |
 | `/admin add/remove/list` | Grant bot-admin to non-managers |
 | `/admin reset` | ⚠️ Wipe this server's bot data (two-step confirm) |

@@ -17,7 +17,7 @@ def test_command_surface():
     assert {"setup", "season", "showconfig", "help", "rename", "mystats", "preview", "contributors"} <= top
     cnames = {c.name for c in main.config_group.walk_commands()}
     # slimmed surface: channels live in /setup, time lives in the schedule panel
-    assert cnames == {"feature", "timezone", "schedule", "credits", "blocklist"}
+    assert cnames == {"feature", "timezone", "schedule", "credits", "blocklist", "bestof"}
 
 
 def test_all_views_instantiate(gid):
@@ -159,6 +159,64 @@ def test_forward_nomination_reactions(gid):
     assert m7.reacted == ["🔁"]
 
 
+def test_repeat_nomination_uses_configured_reactions(gid):
+    db_utils.store_rename_post(gid, 3001, 50, "Beta", "u", 1, None, rename_key=3001)
+    db_utils.set_config(gid, "bracket_source_channel", 9000)
+    db_utils.set_config(gid, "repeat_reactions", "🔁 ⏰")
+    run(main.client._handle_forward_nomination(_fake_forward(gid, 9000, _ref(3001, FWD), 1)))
+    again = _fake_forward(gid, 9000, _ref(3001, FWD), 2)
+    run(main.client._handle_forward_nomination(again))
+    assert again.reacted == ["🔁", "⏰"]
+
+
+def test_refresh_rewrites_only_the_bots_pinned_instructions(gid):
+    import bestof
+
+    class Msg:
+        def __init__(self, author_id, content):
+            self.author = type("A", (), {"id": author_id})()
+            self.content, self.edited = content, None
+
+        async def edit(self, content):
+            self.edited = content
+
+    ours = Msg(1, bestof.instructions({"repeat_reactions": None}))
+    theirs = Msg(2, bestof.INSTRUCTIONS_HEADER + " (someone else's copy)")
+
+    class Chan:
+        def pins(self, limit=50):
+            async def gen():
+                for m in (theirs, ours):
+                    yield m
+            return gen()
+
+    guild = type("G", (), {"id": gid, "me": type("Me", (), {"id": 1})(),
+                           "get_channel": lambda self, cid: Chan() if cid == 9000 else None})()
+    db_utils.set_config(gid, "bracket_source_channel", 9000)
+    db_utils.set_config(gid, "repeat_reactions", "⏰")
+    run(main._refresh_source_instructions(guild))
+    assert theirs.edited is None
+    assert "⏰" in ours.edited and "🔁" not in ours.edited
+
+
+def test_repeat_nomination_falls_back_when_no_emoji_works(gid):
+    # e.g. a configured custom emoji was deleted: still mark the repeat with 🔁
+    db_utils.store_rename_post(gid, 4001, 50, "Gamma", "u", 1, None, rename_key=4001)
+    db_utils.set_config(gid, "bracket_source_channel", 9000)
+    db_utils.set_config(gid, "repeat_reactions", "<:gone:777>")
+    run(main.client._handle_forward_nomination(_fake_forward(gid, 9000, _ref(4001, FWD), 1)))
+    again = _fake_forward(gid, 9000, _ref(4001, FWD), 2)
+    real_add = again.add_reaction
+
+    async def add(emoji):
+        if emoji.startswith("<:"):
+            raise discord.HTTPException(type("R", (), {"status": 400, "reason": "x"})(), "Unknown Emoji")
+        await real_add(emoji)
+    again.add_reaction = add
+    run(main.client._handle_forward_nomination(again))
+    assert again.reacted == ["🔁"]
+
+
 class _Perms:
     def __init__(self, **kw):
         for a in ("manage_guild", "attach_files", "embed_links", "add_reactions", "read_message_history"):
@@ -208,6 +266,14 @@ def test_showconfig_lists_custom_features(gid):
     # legacy single-song plumbing must no longer appear in the config view
     for legacy in ("Song Feature", "Song Post Channel", "Song Time", "Music Channel"):
         assert legacy not in txt
+
+
+def test_showconfig_shows_repeat_reaction(gid):
+    txt = run(bot_features.build_config(gid, _HealthClient(manage_guild=True)))
+    assert "Best-of Repeat:      🔁" in txt                       # default
+    db_utils.set_config(gid, "repeat_reactions", "⏰ <:yoba:123>")
+    txt = run(bot_features.build_config(gid, _HealthClient(manage_guild=True)))
+    assert "Best-of Repeat:      ⏰ :yoba:" in txt                 # custom shown as :name:
 
 
 def test_showconfig_no_features(gid):
