@@ -166,6 +166,8 @@ CREATE TABLE IF NOT EXISTS bracket_entries (
     icon_user        TEXT,          -- credit for the card's icon (carried from rename_posts)
     icon_uid         INTEGER,
     season_reactions INTEGER DEFAULT 0,
+    source_channel_id INTEGER,      -- the rename post that won seeding, so its exact card is used
+    source_message_id INTEGER,
     FOREIGN KEY (bracket_id) REFERENCES brackets(id)
 )
 """
@@ -238,6 +240,8 @@ _BRACKET_ENTRIES_MIGRATIONS = [
     ("quote_uid", "INTEGER"),
     ("icon_user", "TEXT"),
     ("icon_uid",  "INTEGER"),
+    ("source_channel_id", "INTEGER"),
+    ("source_message_id", "INTEGER"),
 ]
 
 # custom_features already ships in live DBs, so new columns must be ALTER-added.
@@ -580,13 +584,16 @@ def get_active_bracket(guild_id: int) -> sqlite3.Row | None:
 def create_bracket_entry(
     bracket_id: int, seed: int, quote: str, quote_user: str | None, season_reactions: int,
     quote_uid: int | None = None, icon_user: str | None = None, icon_uid: int | None = None,
+    source_channel_id: int | None = None, source_message_id: int | None = None,
 ) -> int:
     with db_conn() as conn:
         cur = conn.execute(
             "INSERT INTO bracket_entries "
-            "(bracket_id, seed, quote, quote_user, quote_uid, icon_user, icon_uid, season_reactions) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (bracket_id, seed, quote, quote_user, quote_uid, icon_user, icon_uid, season_reactions),
+            "(bracket_id, seed, quote, quote_user, quote_uid, icon_user, icon_uid, season_reactions, "
+            "source_channel_id, source_message_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (bracket_id, seed, quote, quote_user, quote_uid, icon_user, icon_uid, season_reactions,
+             source_channel_id, source_message_id),
         )
         conn.commit()
         return cur.lastrowid
