@@ -17,7 +17,7 @@ _VALID_CONFIG_FIELDS = frozenset({
     "bracket_pacing", "bracket_source_channel", "pre_bracket_name",
     "quote_interval_days", "quote_weekdays",
     "credit_style", "credit_mentions", "rename_open",
-    "blocklist_enabled", "blocklist_custom", "removed_at",
+    "blocklist_enabled", "blocklist_custom", "removed_at", "repeat_reactions",
 })
 
 _CREATE_CONFIG = """
@@ -214,6 +214,7 @@ _CONFIG_MIGRATIONS = [
     ("blocklist_enabled",      "INTEGER DEFAULT 1"),        # 1 = skip quotes containing slurs/hate terms
     ("blocklist_custom",       "TEXT"),                     # comma-separated per-guild extra blocked words
     ("removed_at",             "TEXT"),                     # ISO UTC when the bot was removed; NULL = present
+    ("repeat_reactions",       "TEXT"),                     # space-separated emoji for repeat best-of forwards; NULL = 🔁
 ]
 
 _RENAME_POSTS_MIGRATIONS = [

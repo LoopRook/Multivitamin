@@ -39,6 +39,7 @@ from bracket import (
     force_bracket_advance,
     restore_pre_bracket_name,
 )
+import bestof
 import credits
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -168,7 +169,8 @@ def build_help_embed(is_admin: bool = False, is_manager: bool = False) -> discor
             "`/config blocklist <add|remove|list> [word]`: your server's extra blocked words\n"
             "`/config timezone <tz>`: IANA name, e.g. `US/Eastern`\n"
             "`/config schedule`: **guided** rename time and frequency (daily, every N days, or weekdays)\n"
-            "`/config credits`: **guided** contributor naming (nickname or username, and @tagging)"
+            "`/config credits`: **guided** contributor naming (nickname or username, and @tagging)\n"
+            "`/config bestof [repeat]`: emoji for repeat best-of nominations (default 🔁, up to 3)"
         ),
         inline=False,
     )
@@ -390,10 +392,20 @@ class QotdClient(discord.Client):
         # later card that reuses a quote is still a fresh nomination.
         is_new = record_forward_nomination(message.guild.id, message.channel.id,
                                            rename_key(post), message.id)
-        try:
-            await message.add_reaction("ℹ️" if is_new else "🔁")
-        except discord.HTTPException:
-            pass
+        added = 0
+        for emoji in ([bestof.COUNTED] if is_new else bestof.repeat_reactions(cfg)):
+            try:
+                await message.add_reaction(emoji)
+                added += 1
+            except discord.HTTPException as e:
+                log.warning("[%s] Could not react %s on a best-of forward: %s", message.guild.id, emoji, e)
+        if not added and not is_new:
+            # None of the configured emoji worked (e.g. a custom one was deleted):
+            # still mark the repeat so members aren't left guessing.
+            try:
+                await message.add_reaction(bestof.DEFAULT_REPEAT[0])
+            except discord.HTTPException:
+                pass
 
 
 client = QotdClient()
@@ -546,9 +558,9 @@ async def config_feature(interaction: discord.Interaction,
         msg = ("✅ `/rename` is open to **everyone**." if enabled
                else "✅ `/rename` is now **admins only**.")
     elif feature == "blocklist":
-        msg = ("✅ Slur blocklist **on** — quotes with slurs or hate terms are skipped."
+        msg = ("✅ Slur blocklist **on**. Quotes with slurs or hate terms are skipped."
                if enabled else
-               "✅ Slur blocklist **off** — no quotes are filtered.")
+               "✅ Slur blocklist **off**. No quotes are filtered.")
     else:
         msg = f"✅ {label} feature {'enabled' if enabled else 'disabled'}."
     await interaction.response.send_message(msg, ephemeral=True)
@@ -566,7 +578,7 @@ async def config_blocklist(interaction: discord.Interaction,
         extra = ", ".join(sorted(custom)) if custom else "*(none)*"
         note = "" if cfg["blocklist_enabled"] else "\n⚠️ The blocklist is currently **off** (`/config feature blocklist true`)."
         await interaction.response.send_message(
-            f"🛡️ **Blocklist** — a built-in slur/hate list is always active. "
+            f"🛡️ **Blocklist**: a built-in slur/hate list is always active. "
             f"Your server's extra words: {extra}{note}", ephemeral=True)
         return
     w = (word or "").strip().lower()
@@ -598,6 +610,35 @@ async def config_timezone(interaction: discord.Interaction, tz: str):
         return
     set_config(interaction.guild_id, "timezone", tz)
     await interaction.response.send_message(f"✅ Timezone set to `{tz}`.", ephemeral=True)
+
+
+@config_group.command(name="bestof", description="Choose the reaction for repeat best-of nominations")
+@app_commands.describe(repeat="Up to 3 emoji, e.g. 🔁 ⏰. 'default' resets; leave empty to see the current one")
+@admin_only()
+async def config_bestof(interaction: discord.Interaction, repeat: Optional[str] = None):
+    gid = interaction.guild_id
+    if repeat is None:
+        current = " ".join(bestof.repeat_reactions(get_config(gid)))
+        await interaction.response.send_message(
+            f"When a card was already nominated in the best-of channel, I react with {current}.\n"
+            "Change it with `/config bestof repeat:` and up to 3 emoji, or `default` for 🔁.",
+            ephemeral=True)
+        return
+    if repeat.strip().lower() == "default":
+        chosen = list(bestof.DEFAULT_REPEAT)
+        set_config(gid, "repeat_reactions", None)
+    else:
+        chosen, err = bestof.parse_repeat(repeat, lambda eid: client.get_emoji(eid) is not None)
+        if err:
+            await interaction.response.send_message(f"⚠️ {err}", ephemeral=True)
+            return
+        set_config(gid, "repeat_reactions", " ".join(chosen))
+    await interaction.response.defer(ephemeral=True)
+    await _refresh_source_instructions(interaction.guild)
+    await interaction.followup.send(
+        f"✅ Repeat nominations will get {' '.join(chosen)}. "
+        "Cards already reacted to keep their old emoji, and nothing loses track of what was nominated.",
+        ephemeral=True)
 
 
 # ── /config schedule — guided rename time + frequency ─────────────────────────
@@ -845,28 +886,35 @@ client.tree.add_command(config_group)
 bracket_group = app_commands.Group(name="bracket", description="Bracket championship", guild_only=True)
 
 
-_SOURCE_INSTRUCTIONS = (
-    "📌 **Best-of nominations**\n"
-    "**Forward** your favorite rename cards into this channel to nominate them for the bracket "
-    "(use Discord's **Forward** button; screenshots and re-uploads don't count).\n"
-    "• I'll react ℹ️ when a forward is counted, or 🔁 if that rename was already forwarded here.\n"
-    "• **React** to the forwards you like. The most-reacted renames get seeded into the bracket."
-)
-
-
 async def _post_source_instructions(guild: discord.Guild, channel_id: int) -> None:
     """Post the how-to-nominate message in a newly set best-of channel and pin it (best effort)."""
     channel = guild.get_channel(channel_id)
     if not channel:
         return
     try:
-        msg = await channel.send(_SOURCE_INSTRUCTIONS)
+        msg = await channel.send(bestof.instructions(get_config(guild.id)))
     except discord.HTTPException:
         return
     try:
         await msg.pin()
     except discord.HTTPException:
         pass  # missing Manage Messages — leave it unpinned
+
+
+async def _refresh_source_instructions(guild: discord.Guild) -> None:
+    """Rewrite the pinned how-to in the best-of channel so it names the current
+    reactions (best effort: skipped if it was never pinned or can't be edited)."""
+    cfg = get_config(guild.id)
+    channel = guild.get_channel(cfg["bracket_source_channel"]) if cfg["bracket_source_channel"] else None
+    if not channel or guild.me is None:
+        return
+    try:
+        async for msg in channel.pins(limit=50):
+            if msg.author.id == guild.me.id and msg.content.startswith(bestof.INSTRUCTIONS_HEADER):
+                await msg.edit(content=bestof.instructions(cfg))
+                return
+    except discord.HTTPException:
+        pass
 
 
 class _BracketChannelModal(discord.ui.Modal, title="Create bracket channel"):

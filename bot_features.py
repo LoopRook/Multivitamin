@@ -15,6 +15,7 @@ from db_utils import (
     backup_database, purge_expired_guilds,
 )
 from image_utils import generate_card, truncate_to_100_chars
+import bestof
 import credits
 import moderation
 
@@ -550,6 +551,7 @@ async def build_config(guild_id: int, client: discord.Client) -> str:
         f"Post Channel:        {ch(c['post_channel'])}",
         f"Bracket Channel:     {ch(c['bracket_channel'])}",
         f"Bracket Source:      {ch(c.get('bracket_source_channel')) if c.get('bracket_source_channel') else 'All tracked renames'}",
+        f"Best-of Repeat:      {bestof.display(bestof.repeat_reactions(c))}",
         f"Quote Feature:       {'Enabled' if c['enable_daily_quote'] else 'Disabled'}",
         f"Cooldown:            {'Enabled' if c['enable_cooldown']    else 'Disabled'}",
         f"On-Demand /rename:   {'Everyone' if c.get('rename_open', 1) else 'Admins only'}",
