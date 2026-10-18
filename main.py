@@ -16,7 +16,7 @@ from db_utils import (
     add_custom_feature, get_custom_features,
     remove_custom_feature, set_custom_feature_enabled, count_custom_features,
     get_custom_feature_by_command, set_custom_feature_access, update_custom_feature,
-    get_rename_post_by_message_id, record_forward_nomination,
+    get_rename_post_by_message_id, record_forward_nomination, rename_key,
     set_custom_feature_schedule,
     mark_guild_removed, clear_guild_removed,
 )
@@ -386,7 +386,10 @@ class QotdClient(discord.Client):
         post = get_rename_post_by_message_id(message.guild.id, ref.message_id)
         if not post:
             return  # forwarded something that isn't a tracked rename
-        is_new = record_forward_nomination(message.guild.id, message.channel.id, post["quote"], message.id)
+        # Dedup on the rename (any copy of the same card), not the quote text, so a
+        # later card that reuses a quote is still a fresh nomination.
+        is_new = record_forward_nomination(message.guild.id, message.channel.id,
+                                           rename_key(post), message.id)
         try:
             await message.add_reaction("ℹ️" if is_new else "🔁")
         except discord.HTTPException:

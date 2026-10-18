@@ -722,6 +722,10 @@ async def process_rename(
         channels_to_post.append(post_channel)
 
     post_chan_id = cfg["post_channel"]
+    # Every copy of this rename shares one key (the first copy's message id), so a
+    # best-of forward of either copy maps back to the same rename, while a later
+    # rename that reuses this quote gets a key of its own.
+    key = None
 
     for channel in channels_to_post:
         image_file.seek(0)
@@ -742,8 +746,9 @@ async def process_rename(
             # Grab the attachment URL as a cached snapshot.
             # (We always re-fetch fresh at bracket time since CDN URLs expire.)
             img_url = sent.attachments[0].url if sent.attachments else None
+            key = key or sent.id
             store_rename_post(guild_id, sent.id, sent.channel.id, quote, quote_user, quote_uid,
-                              img_url, icon_user=icon_user, icon_uid=icon_uid)
+                              img_url, icon_user=icon_user, icon_uid=icon_uid, rename_key=key)
             if not cfg["voting_enabled_at"]:
                 set_config(guild_id, "voting_enabled_at", datetime.now(pytz.utc).isoformat())
 

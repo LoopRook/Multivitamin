@@ -71,14 +71,18 @@ CREATE TABLE IF NOT EXISTS picks_history (
 )
 """
 
+# Which renames have already been nominated in a best-of channel, so a second
+# forward of the same card gets 🔁. Keyed on the rename (rename_posts.rename_key),
+# NOT the quote text: two renames that reuse a quote are different cards.
+# This is reaction-feedback state only; bracket seeding rescans the channel.
 _CREATE_FORWARD_NOMINATIONS = """
-CREATE TABLE IF NOT EXISTS forward_nominations (
+CREATE TABLE IF NOT EXISTS best_of_nominations (
     guild_id    INTEGER NOT NULL,
     channel_id  INTEGER NOT NULL,
-    quote       TEXT    NOT NULL,
+    rename_key  INTEGER NOT NULL,
     message_id  INTEGER NOT NULL,   -- the first forward's message id (for reference)
     created_at  TEXT    NOT NULL,
-    PRIMARY KEY (guild_id, channel_id, quote)
+    PRIMARY KEY (guild_id, channel_id, rename_key)
 )
 """
 
@@ -94,7 +98,8 @@ CREATE TABLE IF NOT EXISTS rename_posts (
     icon_user   TEXT,              -- who posted the icon this card was built from
     icon_uid    INTEGER,
     image_url   TEXT,
-    posted_at   TEXT    NOT NULL
+    posted_at   TEXT    NOT NULL,
+    rename_key  INTEGER            -- shared by every copy of one rename (first copy's message id)
 )
 """
 
@@ -212,9 +217,10 @@ _CONFIG_MIGRATIONS = [
 ]
 
 _RENAME_POSTS_MIGRATIONS = [
-    ("image_url", "TEXT"),
-    ("icon_user", "TEXT"),
-    ("icon_uid",  "INTEGER"),
+    ("image_url",  "TEXT"),
+    ("icon_user",  "TEXT"),
+    ("icon_uid",   "INTEGER"),
+    ("rename_key", "INTEGER"),
 ]
 
 _BRACKET_MIGRATIONS = [
@@ -256,6 +262,9 @@ def init_db() -> None:
         conn.execute(_CREATE_HISTORY)
         conn.execute(_CREATE_RENAME_POSTS)
         conn.execute(_CREATE_FORWARD_NOMINATIONS)
+        # The old table deduped on quote text, wrongly flagging any later card that
+        # reused a quote as a repeat. It only held reaction-feedback state.
+        conn.execute("DROP TABLE IF EXISTS forward_nominations")
         conn.execute(_CREATE_BRACKETS)
         conn.execute(_CREATE_BRACKET_ENTRIES)
         conn.execute(_CREATE_BRACKET_MATCHUPS)
@@ -465,17 +474,28 @@ def store_rename_post(
     quote: str, quote_user: str | None, quote_uid: int | None,
     image_url: str | None = None,
     icon_user: str | None = None, icon_uid: int | None = None,
+    rename_key: int | None = None,
 ) -> None:
     with db_conn() as conn:
         conn.execute(
             "INSERT INTO rename_posts "
             "(guild_id, message_id, channel_id, quote, quote_user, quote_uid, "
-            " icon_user, icon_uid, image_url, posted_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " icon_user, icon_uid, image_url, posted_at, rename_key) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (guild_id, message_id, channel_id, quote, quote_user, quote_uid,
-             icon_user, icon_uid, image_url, datetime.now(timezone.utc).isoformat()),
+             icon_user, icon_uid, image_url, datetime.now(timezone.utc).isoformat(), rename_key),
         )
         conn.commit()
+
+
+def rename_key(post) -> int:
+    """
+    Identity of the rename a tracked post belongs to. Every copy of one rename
+    (post channel, /rename channel) shares a key, while two renames that happen
+    to reuse a quote get different keys. Rows from before keys existed fall back
+    to their own message id.
+    """
+    return post["rename_key"] or post["message_id"]
 
 
 def get_rename_posts_in_range(
@@ -504,18 +524,18 @@ def get_rename_post_by_message_id(guild_id: int, message_id: int) -> sqlite3.Row
         ).fetchone()
 
 
-def record_forward_nomination(guild_id: int, channel_id: int, quote: str, message_id: int) -> bool:
+def record_forward_nomination(guild_id: int, channel_id: int, rename_key: int, message_id: int) -> bool:
     """
-    Note that *quote* was forwarded into *channel_id*. Returns True if this is the
-    first forward of that rename into that channel, or False if it's a duplicate
-    (the (guild, channel, quote) primary key already exists).
+    Note that the rename *rename_key* was forwarded into *channel_id*. Returns True
+    if this is the first forward of that rename into that channel, or False if it's
+    a duplicate (any copy of the same rename already nominated there).
     """
     with db_conn() as conn:
         try:
             conn.execute(
-                "INSERT INTO forward_nominations (guild_id, channel_id, quote, message_id, created_at) "
+                "INSERT INTO best_of_nominations (guild_id, channel_id, rename_key, message_id, created_at) "
                 "VALUES (?, ?, ?, ?, ?)",
-                (guild_id, channel_id, quote, message_id, datetime.now(timezone.utc).isoformat()),
+                (guild_id, channel_id, rename_key, message_id, datetime.now(timezone.utc).isoformat()),
             )
             conn.commit()
             return True
@@ -689,7 +709,7 @@ def reset_guild(guild_id: int) -> None:
         conn.execute(
             "DELETE FROM bracket_entries WHERE bracket_id IN (SELECT id FROM brackets WHERE guild_id=?)",
             (guild_id,))
-        for table in ("brackets", "rename_posts", "forward_nominations", "seasons",
+        for table in ("brackets", "rename_posts", "best_of_nominations", "seasons",
                       "custom_features", "picks_history", "bot_admins", "server_config"):
             conn.execute(f"DELETE FROM {table} WHERE guild_id=?", (guild_id,))
         conn.commit()
