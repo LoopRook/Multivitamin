@@ -145,6 +145,19 @@ def test_forward_nomination_reactions(gid):
     run(main.client._handle_forward_nomination(m5))
     assert m5.reacted == []                      # reply, not a forward
 
+    # A later rename that reuses the same quote is a different card: counted,
+    # not flagged as a repeat (the reported bug).
+    db_utils.store_rename_post(gid, 2001, 50, "Alpha", "u", 1, None, rename_key=2001)
+    m6 = _fake_forward(gid, 9000, _ref(2001, FWD), 6)
+    run(main.client._handle_forward_nomination(m6))
+    assert m6.reacted == ["ℹ️"]
+
+    # Another copy of that same rename (e.g. the /rename channel copy) IS a repeat.
+    db_utils.store_rename_post(gid, 2002, 60, "Alpha", "u", 1, None, rename_key=2001)
+    m7 = _fake_forward(gid, 9000, _ref(2002, FWD), 7)
+    run(main.client._handle_forward_nomination(m7))
+    assert m7.reacted == ["🔁"]
+
 
 class _Perms:
     def __init__(self, **kw):
