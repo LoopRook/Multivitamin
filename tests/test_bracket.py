@@ -142,3 +142,84 @@ def test_send_lines_chunks_under_discord_cap():
     assert len(ch.sent) > 1                              # split, not one oversized send
     assert all(len(m) <= 2000 for m in ch.sent)          # every chunk fits
     assert "".join(ch.sent).count("**#") == 32           # nothing dropped
+
+
+# ---- card lookup: identity is the seeded post, not the quote text ----
+
+class _FakeResp:
+    def __init__(self, data):
+        self._data = data
+
+    def raise_for_status(self):
+        pass
+
+    async def read(self):
+        return self._data
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+
+class _FakeSession:
+    def __init__(self, *a, **kw):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    def get(self, url):
+        return _FakeResp(b"IMG:" + url.encode())
+
+
+def _same_quote_posts():
+    return [
+        {"quote": "Same", "channel_id": 5, "message_id": 100, "posted_at": "2026-01-01T00:00:00"},
+        {"quote": "Same", "channel_id": 5, "message_id": 200, "posted_at": "2026-02-01T00:00:00"},
+    ]
+
+
+def _stub_card_network(monkeypatch, gone=()):
+    import aiohttp
+
+    async def fresh(client, channel_id, message_id):
+        return None if message_id in gone else f"https://cdn/{message_id}.png"
+
+    monkeypatch.setattr(bracket, "_get_fresh_image_url", fresh)
+    monkeypatch.setattr(aiohttp, "ClientSession", _FakeSession)
+
+
+def test_card_bytes_uses_seeded_post_not_newest_same_quote(monkeypatch):
+    _stub_card_network(monkeypatch)
+    entry = {"id": 1, "quote": "Same", "source_channel_id": 5, "source_message_id": 100}
+    card = run(bracket._get_card_bytes(entry, 777, FakeClient(), _same_quote_posts()))
+    assert card == b"IMG:https://cdn/100.png"  # the older, seeded post, not the newest
+
+
+def test_card_bytes_legacy_entry_falls_back_to_newest_quote_match(monkeypatch):
+    _stub_card_network(monkeypatch)
+    entry = {"id": 2, "quote": "Same"}  # no source ids (pre-migration entry)
+    card = run(bracket._get_card_bytes(entry, 777, FakeClient(), _same_quote_posts()))
+    assert card == b"IMG:https://cdn/200.png"
+
+
+def test_card_bytes_falls_back_when_source_message_is_gone(monkeypatch):
+    _stub_card_network(monkeypatch, gone={100})
+    entry = {"id": 3, "quote": "Same", "source_channel_id": 5, "source_message_id": 100}
+    card = run(bracket._get_card_bytes(entry, 777, FakeClient(), _same_quote_posts()))
+    assert card == b"IMG:https://cdn/200.png"
+
+
+def test_create_bracket_entry_stores_source_ids():
+    bid = db_utils.create_bracket(1, 2026, 2, 24)
+    eid = db_utils.create_bracket_entry(bid, 1, "q", "u", 5,
+                                        source_channel_id=5, source_message_id=100)
+    row = db_utils.get_bracket_entry(eid)
+    assert (row["source_channel_id"], row["source_message_id"]) == (5, 100)
+    legacy = db_utils.get_bracket_entry(db_utils.create_bracket_entry(bid, 2, "q2", "u", 1))
+    assert legacy["source_channel_id"] is None and legacy["source_message_id"] is None

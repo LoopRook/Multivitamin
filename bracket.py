@@ -506,8 +506,10 @@ async def _get_card_bytes(
     """
     Card image bytes for a bracket entry.
     Test brackets serve from _test_card_cache (populated by start_test_bracket).
-    Real brackets find the most recent matching rename post and download the
-    attachment fresh (CDN URLs expire, so the stored snapshot is never used).
+    Real brackets download the attachment fresh (CDN URLs expire, so the stored
+    snapshot is never used) from the exact post recorded at seeding; legacy
+    entries, or ones whose message is gone, fall back to the most recent rename
+    post with the same quote.
     """
     import aiohttp
 
@@ -516,12 +518,11 @@ async def _get_card_bytes(
         return cached[entry["id"]]
 
     _TIMEOUT = aiohttp.ClientTimeout(total=15)
-    matches = [p for p in rename_posts if p["quote"] == entry["quote"]]
-    matches.sort(key=lambda p: p["posted_at"], reverse=True)
-    for post in matches:
+
+    async def _download(post) -> bytes | None:
         url = await _get_fresh_image_url(client, post["channel_id"], post["message_id"])
         if not url:
-            continue
+            return None
         try:
             async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
                 async with session.get(url) as resp:
@@ -529,6 +530,24 @@ async def _get_card_bytes(
                     return await resp.read()
         except Exception as e:
             log.warning("Could not download card image: %s", e)
+            return None
+
+    # Exact post that won seeding: the same quote can be renamed on several days
+    # with different images, so the quote alone can't say which card was seeded.
+    src_msg = _col(entry, "source_message_id")
+    src_chan = _col(entry, "source_channel_id")
+    if src_msg and src_chan:
+        card = await _download({"channel_id": src_chan, "message_id": src_msg})
+        if card:
+            return card
+
+    # Legacy entries (no source ids) or a deleted source message: match by quote.
+    matches = [p for p in rename_posts if p["quote"] == entry["quote"]]
+    matches.sort(key=lambda p: p["posted_at"], reverse=True)
+    for post in matches:
+        card = await _download(post)
+        if card:
+            return card
     return None
 
 
@@ -1118,6 +1137,7 @@ async def _start_range_bracket(
             bracket_id, seed, quote, post["quote_user"], score,
             quote_uid=_col(post, "quote_uid"),
             icon_user=_col(post, "icon_user"), icon_uid=_col(post, "icon_uid"),
+            source_channel_id=_col(post, "channel_id"), source_message_id=_col(post, "message_id"),
         )
         entry_ids.append(eid)
 
