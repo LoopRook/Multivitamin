@@ -182,4 +182,6 @@ Found a bug or want to suggest something? [Open an issue](https://github.com/Loo
 
 ## License
 
-AGPL-3.0, see [LICENSE](LICENSE). You're free to use, modify, and self-host it; if you run a modified version for others, share your source.
+Copyright (C) 2025 LoopRook. Licensed under AGPL-3.0, see [LICENSE](LICENSE). You're free to use, modify, and self-host it; if you run a modified version for others, share your source.
+
+The Moniker name, logo, and artwork in `assets/` aren't covered by that license. If you run your own copy, give it a different name and look.
