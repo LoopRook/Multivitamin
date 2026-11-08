@@ -18,6 +18,7 @@ _VALID_CONFIG_FIELDS = frozenset({
     "quote_interval_days", "quote_weekdays",
     "credit_style", "credit_mentions", "rename_open",
     "blocklist_enabled", "blocklist_custom", "removed_at", "repeat_reactions",
+    "nsfw_guard",
 })
 
 _CREATE_CONFIG = """
@@ -217,6 +218,7 @@ _CONFIG_MIGRATIONS = [
     ("blocklist_custom",       "TEXT"),                     # comma-separated per-guild extra blocked words
     ("removed_at",             "TEXT"),                     # ISO UTC when the bot was removed; NULL = present
     ("repeat_reactions",       "TEXT"),                     # space-separated emoji for repeat best-of forwards; NULL = 🔁
+    ("nsfw_guard",             "INTEGER DEFAULT 1"),        # 1 = keep NSFW-channel content in NSFW channels; 0 = post anywhere
 ]
 
 _RENAME_POSTS_MIGRATIONS = [

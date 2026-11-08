@@ -41,6 +41,7 @@ from bracket import (
 )
 import bestof
 import credits
+import nsfw
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -170,7 +171,9 @@ def build_help_embed(is_admin: bool = False, is_manager: bool = False) -> discor
             "`/config timezone <tz>`: IANA name, e.g. `US/Eastern`\n"
             "`/config schedule`: **guided** rename time and frequency (daily, every N days, or weekdays)\n"
             "`/config credits`: **guided** contributor naming (nickname or username, and @tagging)\n"
-            "`/config bestof [repeat]`: emoji for repeat best-of nominations (default 🔁, up to 3)"
+            "`/config bestof [repeat]`: emoji for repeat best-of nominations (default 🔁, up to 3)\n"
+            "`/config nsfw [restrict]`: keep posts from NSFW channels in NSFW channels "
+            "(on by default; turning it off needs Manage Server)"
         ),
         inline=False,
     )
@@ -639,6 +642,34 @@ async def config_bestof(interaction: discord.Interaction, repeat: Optional[str] 
         f"✅ Repeat nominations will get {' '.join(chosen)}. "
         "Cards already reacted to keep their old emoji, and nothing loses track of what was nominated.",
         ephemeral=True)
+
+
+@config_group.command(name="nsfw", description="Keep posts from NSFW channels inside NSFW channels")
+@app_commands.describe(restrict="On (default): content from age-restricted channels only posts to age-restricted ones")
+@admin_only()
+async def config_nsfw(interaction: discord.Interaction, restrict: Optional[bool] = None):
+    gid = interaction.guild_id
+    if restrict is None:
+        state = ("**on**: content from age-restricted channels only posts to age-restricted "
+                 "channels, and renames don't use them" if nsfw.guard_on(get_config(gid))
+                 else "**off**: content from age-restricted channels can post to any channel")
+        await interaction.response.send_message(
+            f"🔞 The NSFW guard is {state}.\nChange it with `/config nsfw restrict:`.", ephemeral=True)
+        return
+    # Turning it off makes the server responsible for what gets reposted, so it
+    # takes someone who runs the server, not just a bot-admin.
+    if not restrict and not interaction.user.guild_permissions.manage_guild:
+        await interaction.response.send_message(
+            "⚠️ Only members with **Manage Server** can turn this off.", ephemeral=True)
+        return
+    set_config(gid, "nsfw_guard", 1 if restrict else 0)
+    if restrict:
+        msg = ("✅ Content from age-restricted channels now only posts to age-restricted channels, "
+               "and renames won't use them.")
+    else:
+        msg = ("✅ Content from age-restricted channels can now post to any channel. That includes "
+               "renames: the server name and icon are visible to everyone, including on invites.")
+    await interaction.response.send_message(msg, ephemeral=True)
 
 
 # ── /config schedule — guided rename time + frequency ─────────────────────────
@@ -2108,8 +2139,10 @@ async def preview_cmd(interaction: discord.Interaction, what: str):
     target = what.strip().lower()
     if target == "rename":
         await interaction.response.defer(ephemeral=True)
-        await process_rename(interaction.guild_id, client, override_post_channel=interaction.channel, preview=True)
-        await interaction.followup.send("✅ Rename preview posted above.", ephemeral=True)
+        blocked = await process_rename(interaction.guild_id, client,
+                                       override_post_channel=interaction.channel, preview=True)
+        await interaction.followup.send(f"⚠️ {blocked}" if blocked else "✅ Rename preview posted above.",
+                                        ephemeral=True)
         return
     feat = get_custom_feature_by_command(interaction.guild_id, target)
     if not feat:
@@ -2160,8 +2193,8 @@ async def rename_cmd(interaction: discord.Interaction):
             f"Try again in ~{wait} minute{'s' if wait != 1 else ''}.", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=True)
-    await process_rename(gid, client, override_post_channel=interaction.channel)
-    await interaction.followup.send("✅ Rename posted.", ephemeral=True)
+    blocked = await process_rename(gid, client, override_post_channel=interaction.channel)
+    await interaction.followup.send(f"⚠️ {blocked}" if blocked else "✅ Rename posted.", ephemeral=True)
 
 
 # (There is no built-in /song — "Song of the Day" is a normal feature with the

@@ -18,6 +18,7 @@ from image_utils import generate_card, truncate_to_100_chars
 import bestof
 import credits
 import moderation
+import nsfw
 
 log = logging.getLogger(__name__)
 
@@ -566,6 +567,7 @@ async def build_config(guild_id: int, client: discord.Client) -> str:
         f"Credit Names:        {'Server nickname' if credits.style_of(c) == 'nickname' else '@username'}",
         f"Credit Tagging:      {'On (mentions)' if credits.mentions_on(c) else 'Off (plain text)'}",
         f"Slur Blocklist:      {_blocklist_desc(c)}",
+        f"NSFW Content:        {'Kept in NSFW channels' if nsfw.guard_on(c) else 'Can post anywhere'}",
     ]
 
     # Custom "X of the day" features are per-server and dynamic, so list whatever
@@ -605,6 +607,15 @@ async def build_config(guild_id: int, client: discord.Client) -> str:
         ) if not ok]
         if missing:
             warnings.append("Missing perms: " + ", ".join(missing) + " - cards/polls may fail.")
+    if nsfw.guard_on(c):
+        for label, cid in (("Quote Channel", c["quote_channel"]), ("Icon Channel", c["icon_channel"])):
+            if cid and nsfw.is_age_restricted(client.get_channel(cid)):
+                warnings.append(f"{label} {ch(cid)} is age-restricted - renames are skipped (/config nsfw).")
+        for f in features:
+            if (nsfw.is_age_restricted(client.get_channel(f["source_channel"]))
+                    and not nsfw.is_age_restricted(client.get_channel(f["post_channel"]))):
+                warnings.append(f"{f['name']}: {ch(f['source_channel'])} is age-restricted but "
+                                f"{ch(f['post_channel'])} isn't - its posts are skipped (/config nsfw).")
 
     lines.append("")
     if warnings:
@@ -622,7 +633,9 @@ async def process_rename(
     client: discord.Client,
     override_post_channel=None,
     preview: bool = False,
-) -> None:
+) -> str | None:
+    """Rename the server and post the card. Returns a user-facing reason only when
+    the rename was refused for age-restricted sources; other skips just log."""
     cfg   = get_config(guild_id)
     guild = client.get_guild(guild_id)
     if not guild:
@@ -650,6 +663,11 @@ async def process_rename(
     quote_channel = client.get_channel(cfg["quote_channel"])
     icon_channel  = client.get_channel(cfg["icon_channel"])
     post_channel  = client.get_channel(cfg["post_channel"])
+
+    blocked = nsfw.rename_block_reason(cfg, quote_channel, icon_channel)
+    if blocked:
+        log.warning("[%s] Rename skipped: an age-restricted quote/icon channel with the NSFW guard on.", guild_id)
+        return blocked
 
     # No-repeat window: exclude items already used recently, so contributors with
     # only a few submissions don't have the same quote/icon headline over and over.
@@ -816,6 +834,9 @@ async def process_custom_daily(
             return _feature_fail(guild_id, name,
                 f"I can't see the **destination** channel for **{name}**. Was it deleted, "
                 f"or am I missing **View Channel** there?")
+        blocked = nsfw.feature_block_reason(cfg, source, post_channel, name)
+        if blocked:
+            return _feature_fail(guild_id, name, blocked)
 
         # Scan the source channel (needs View Channel + Read Message History).
         nr_since = (datetime.now(pytz.utc) - timedelta(days=_NO_REPEAT_DAYS)).isoformat()

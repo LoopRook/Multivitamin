@@ -146,6 +146,7 @@ Each feature has its own cadence: set it with `/feature schedule meme` to run ev
 | `/config feature <quote\|cooldown\|openrename> <on/off>` | Feature toggles |
 | `/config timezone <tz>` | Any IANA zone |
 | `/config bestof [repeat]` | Emoji the bot reacts with when a card was already nominated in the best-of channel (default 🔁, up to 3, custom server emoji work too) |
+| `/config nsfw [restrict]` | On by default: content from age-restricted (NSFW) channels only posts to age-restricted channels, and renames never use an age-restricted quote or icon channel, since the server name and icon are visible to everyone. Turning it off needs **Manage Server** |
 | `/season` | Manage named bracket windows |
 | `/admin add/remove/list` | Grant bot-admin to non-managers |
 | `/admin reset` | ⚠️ Wipe this server's bot data (two-step confirm) |
