@@ -168,13 +168,21 @@ def test_config_nsfw_turning_off_needs_manage_server(gid):
 def test_config_nsfw_without_a_value_shows_the_state(gid):
     replies = []
     run(main.config_nsfw.callback(_inter(gid, replies, manage_guild=False), None))
-    assert "on" in replies[-1].lower()
+    assert "**on**" in replies[-1]
+    assert "age-restricted" in replies[-1].split(":")[0].lower()   # names Discord's toggle up front
     assert db_utils.get_config(gid)["nsfw_guard"] == 1
 
 
+# Discord's channel toggle is called "Age-Restricted Channel", so user-facing text
+# leads with that term; "NSFW" stays in the command name and as a parenthetical.
 def test_help_lists_config_nsfw():
     embed = main.build_help_embed(is_admin=True, is_manager=True)
-    assert any("/config nsfw" in f.value for f in embed.fields)
+    line = next(l for f in embed.fields for l in f.value.splitlines() if "/config nsfw" in l)
+    assert "age-restricted (NSFW) channels" in line
+
+
+def test_config_nsfw_description_matches_discords_toggle():
+    assert "age-restricted" in main.config_nsfw.description.lower()
 
 
 # ── /showconfig ──────────────────────────────────────────────────────────────
@@ -185,7 +193,7 @@ def _showconfig(gid, *chans):
 
 
 def test_showconfig_shows_the_setting(gid):
-    assert "NSFW Content:        Kept in NSFW channels" in _showconfig(gid)
+    assert "NSFW Content:        Kept in age-restricted channels" in _showconfig(gid)
     db_utils.set_config(gid, "nsfw_guard", 0)
     assert "NSFW Content:        Can post anywhere" in _showconfig(gid)
 

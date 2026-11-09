@@ -172,7 +172,7 @@ def build_help_embed(is_admin: bool = False, is_manager: bool = False) -> discor
             "`/config schedule`: **guided** rename time and frequency (daily, every N days, or weekdays)\n"
             "`/config credits`: **guided** contributor naming (nickname or username, and @tagging)\n"
             "`/config bestof [repeat]`: emoji for repeat best-of nominations (default 🔁, up to 3)\n"
-            "`/config nsfw [restrict]`: keep posts from NSFW channels in NSFW channels "
+            "`/config nsfw [restrict]`: keep posts from age-restricted (NSFW) channels in age-restricted channels "
             "(on by default; turning it off needs Manage Server)"
         ),
         inline=False,
@@ -644,7 +644,7 @@ async def config_bestof(interaction: discord.Interaction, repeat: Optional[str] 
         ephemeral=True)
 
 
-@config_group.command(name="nsfw", description="Keep posts from NSFW channels inside NSFW channels")
+@config_group.command(name="nsfw", description="Keep posts from age-restricted (NSFW) channels in age-restricted channels")
 @app_commands.describe(restrict="On (default): content from age-restricted channels only posts to age-restricted ones")
 @admin_only()
 async def config_nsfw(interaction: discord.Interaction, restrict: Optional[bool] = None):
@@ -654,7 +654,7 @@ async def config_nsfw(interaction: discord.Interaction, restrict: Optional[bool]
                  "channels, and renames don't use them" if nsfw.guard_on(get_config(gid))
                  else "**off**: content from age-restricted channels can post to any channel")
         await interaction.response.send_message(
-            f"🔞 The NSFW guard is {state}.\nChange it with `/config nsfw restrict:`.", ephemeral=True)
+            f"🔞 Age-restricted (NSFW) guard: {state}.\nChange it with `/config nsfw restrict:`.", ephemeral=True)
         return
     # Turning it off makes the server responsible for what gets reposted, so it
     # takes someone who runs the server, not just a bot-admin.

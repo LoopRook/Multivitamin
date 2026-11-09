@@ -567,7 +567,7 @@ async def build_config(guild_id: int, client: discord.Client) -> str:
         f"Credit Names:        {'Server nickname' if credits.style_of(c) == 'nickname' else '@username'}",
         f"Credit Tagging:      {'On (mentions)' if credits.mentions_on(c) else 'Off (plain text)'}",
         f"Slur Blocklist:      {_blocklist_desc(c)}",
-        f"NSFW Content:        {'Kept in NSFW channels' if nsfw.guard_on(c) else 'Can post anywhere'}",
+        f"NSFW Content:        {'Kept in age-restricted channels' if nsfw.guard_on(c) else 'Can post anywhere'}",
     ]
 
     # Custom "X of the day" features are per-server and dynamic, so list whatever
